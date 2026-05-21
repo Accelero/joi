@@ -1,20 +1,123 @@
-import { useState } from "react";
-import type { AppState } from "./ipc";
-
 /**
- * Placeholder app chrome. The real terminal (xterm.js), controls, and media wiring land with the
- * Tauri shell (PLAN M1+); this renders the lifecycle state so the bundle has an entry point and the
- * IPC types are exercised. Media never flows through React state (SPEC §8.2).
+ * App shell: wires the backend `UiEvent` stream to the terminal and controls, and dispatches
+ * commands. Audio and screen capture are handled entirely in Rust (joi-media) — the webview never
+ * touches media (PLAN-NATIVE-MEDIA). This component is pure UI + IPC.
  */
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Controls } from "./components/Controls";
+import { Terminal, type TerminalHandle } from "./components/Terminal";
+import { commands, onUiEvent, type AppState, type ConnectionStatus } from "./ipc";
+
 export function App(): React.JSX.Element {
-  const [state] = useState<AppState>("stopped");
+  const [state, setState] = useState<AppState>("stopped");
+  const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
+  const [micMuted, setMicMuted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const running = state !== "stopped" && state !== "error";
+  const terminalRef = useRef<TerminalHandle>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onUiEvent((ev) => {
+      switch (ev.type) {
+        case "state":
+          setState(ev.state);
+          break;
+        case "transcript":
+          terminalRef.current?.writeTranscript(ev.speaker, ev.text, ev.final);
+          break;
+        case "connection":
+          setConnection(ev.status);
+          break;
+        case "error":
+          terminalRef.current?.writeError(`${ev.kind}: ${ev.message}`);
+          break;
+        case "history":
+          break;
+      }
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  const start = useCallback(async () => {
+    setBusy(true);
+    try {
+      await commands.start({ resume: false });
+    } catch (e) {
+      terminalRef.current?.writeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const stop = useCallback(async () => {
+    setBusy(true);
+    try {
+      await commands.stop({ pause: false });
+    } catch (e) {
+      terminalRef.current?.writeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    setMicMuted((prev) => {
+      const next = !prev;
+      void commands.setMicMuted({ muted: next });
+      return next;
+    });
+  }, []);
+
+  const sendDraft = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      const text = draft.trim();
+      if (!text) return;
+      setDraft("");
+      try {
+        await commands.sendText({ text });
+      } catch (err) {
+        terminalRef.current?.writeError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [draft],
+  );
 
   return (
-    <main className="p-6">
-      <h1 className="text-xl font-semibold text-slate-200">Joi</h1>
-      <p className="mt-2 text-slate-400">
-        Local voice companion — state: <span className="text-emerald-400">{state}</span>
-      </p>
+    <main className="flex h-screen flex-col bg-[#0b0f14]">
+      <Controls
+        state={state}
+        connection={connection}
+        micMuted={micMuted}
+        busy={busy}
+        onStart={() => void start()}
+        onStop={() => void stop()}
+        onToggleMute={toggleMute}
+      />
+      <div className="min-h-0 flex-1 p-2">
+        <Terminal ref={terminalRef} />
+      </div>
+      <form onSubmit={sendDraft} className="flex gap-2 border-t border-slate-800 p-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={running ? "Type a message…" : "Press Start to begin"}
+          disabled={!running}
+          className="flex-1 rounded bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={!running || draft.trim() === ""}
+          className="rounded bg-emerald-600 px-3 py-2 text-sm text-white disabled:opacity-50"
+        >
+          Send
+        </button>
+      </form>
     </main>
   );
 }

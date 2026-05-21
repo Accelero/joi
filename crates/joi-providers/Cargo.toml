@@ -14,7 +14,9 @@ workspace = true
 # When adk-rust lands in M2, the `gemini` feature gains that dependency (PLAN §0, M2).
 default = ["mock", "gemini", "openai"]
 mock = []
-gemini = []
+# `gemini` pulls the adk-realtime adapter (M2 spike: NOTES-adk.md). Only its `gemini` backend
+# feature is enabled — not openai/livekit/vertex — to keep the dependency tree minimal.
+gemini = ["dep:adk-realtime", "dep:rustls"]
 openai = []
 
 [dependencies]
@@ -23,6 +25,12 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+adk-realtime = { version = "0.8", default-features = false, features = ["gemini"], optional = true }
+# Direct dep only to install the rustls crypto provider once (adk-realtime requires it). Already in
+# the tree transitively, so this adds no build cost.
+rustls = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

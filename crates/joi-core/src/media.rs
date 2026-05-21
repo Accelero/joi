@@ -89,6 +89,131 @@ pub fn le_bytes_to_pcm16(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+/// Convert clamped float `[-1.0, 1.0]` samples to signed 16-bit PCM (native capture gives floats).
+#[must_use]
+pub fn pcm16_from_f32(input: &[f32]) -> Vec<i16> {
+    input
+        .iter()
+        .map(|&s| {
+            let s = s.clamp(-1.0, 1.0);
+            // Asymmetric scale so -1.0→-32768 and 1.0→32767 (the full i16 range).
+            if s < 0.0 {
+                (s * 32768.0) as i16
+            } else {
+                (s * 32767.0) as i16
+            }
+        })
+        .collect()
+}
+
+/// Linear-interpolation resample of mono PCM16 from `in_rate` to `out_rate` (Hz).
+///
+/// Used both ways: mic device rate → 16 kHz (down) and provider 24 kHz → device rate (either way).
+/// Equal rates, an empty input, or a zero rate return the input unchanged — never panics.
+#[must_use]
+pub fn resample_linear(input: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
+    if input.is_empty() || in_rate == 0 || out_rate == 0 || in_rate == out_rate {
+        return input.to_vec();
+    }
+    let ratio = f64::from(in_rate) / f64::from(out_rate);
+    let out_len = (input.len() as f64 / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let i0 = pos.floor() as usize;
+        let i1 = (i0 + 1).min(input.len() - 1);
+        let frac = pos - i0 as f64;
+        let s = f64::from(input[i0]) * (1.0 - frac) + f64::from(input[i1]) * frac;
+        out.push(s.round() as i16);
+    }
+    out
+}
+
+/// Accumulates PCM16 samples and emits fixed-size frames, buffering the remainder across pushes —
+/// native audio callbacks rarely align to `frame_size` boundaries (SPEC §7.1).
+#[derive(Debug)]
+pub struct FrameAccumulator {
+    frame_size: usize,
+    remainder: Vec<i16>,
+}
+
+impl FrameAccumulator {
+    /// A new accumulator emitting frames of `frame_size` samples (clamped to ≥ 1).
+    #[must_use]
+    pub fn new(frame_size: usize) -> Self {
+        Self {
+            frame_size: frame_size.max(1),
+            remainder: Vec::new(),
+        }
+    }
+
+    /// Push samples; return any newly completed frames (each exactly `frame_size`).
+    pub fn push(&mut self, samples: &[i16]) -> Vec<Vec<i16>> {
+        self.remainder.extend_from_slice(samples);
+        let mut frames = Vec::new();
+        while self.remainder.len() >= self.frame_size {
+            frames.push(self.remainder.drain(..self.frame_size).collect());
+        }
+        frames
+    }
+
+    /// Samples currently held back, waiting for a full frame.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        self.remainder.len()
+    }
+}
+
+/// Playback jitter buffer (SPEC §7.2): enqueue provider PCM, pull fixed blocks (silence on
+/// underrun), and [`flush`](Self::flush) instantly for barge-in (FR-2). Pure and lock-free of I/O —
+/// the native output callback pulls; session events enqueue.
+#[derive(Debug, Default)]
+pub struct JitterBuffer {
+    queue: std::collections::VecDeque<i16>,
+}
+
+impl JitterBuffer {
+    /// An empty buffer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a chunk of output PCM.
+    pub fn enqueue(&mut self, chunk: &[i16]) {
+        self.queue.extend(chunk.iter().copied());
+    }
+
+    /// Samples currently buffered.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Buffered duration in ms at `rate` (Hz).
+    #[must_use]
+    pub fn buffered_ms(&self, rate: u32) -> f64 {
+        if rate == 0 {
+            return 0.0;
+        }
+        (self.queue.len() as f64 / f64::from(rate)) * 1000.0
+    }
+
+    /// Pull exactly `n` samples; a missing tail is silence (zeros) on underrun.
+    pub fn pull(&mut self, n: usize) -> Vec<i16> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(self.queue.pop_front().unwrap_or(0));
+        }
+        out
+    }
+
+    /// Drop all buffered audio immediately (barge-in / interrupt).
+    pub fn flush(&mut self) {
+        self.queue.clear();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -121,5 +246,54 @@ mod tests {
     fn torn_trailing_byte_is_ignored() {
         let bytes = vec![1u8, 0, 2]; // 1.5 samples
         assert_eq!(le_bytes_to_pcm16(&bytes), vec![1i16]);
+    }
+
+    #[test]
+    fn float_to_pcm16_clamps_to_full_range() {
+        assert_eq!(pcm16_from_f32(&[0.0]), vec![0]);
+        assert_eq!(pcm16_from_f32(&[1.0]), vec![32767]);
+        assert_eq!(pcm16_from_f32(&[-1.0]), vec![-32768]);
+        assert_eq!(pcm16_from_f32(&[2.0, -2.0]), vec![32767, -32768]); // clamped
+    }
+
+    #[test]
+    fn resample_equal_rate_or_empty_is_identity() {
+        let pcm = vec![1i16, 2, 3, 4];
+        assert_eq!(resample_linear(&pcm, 16_000, 16_000), pcm);
+        assert_eq!(resample_linear(&[], 48_000, 16_000), Vec::<i16>::new());
+        assert_eq!(resample_linear(&pcm, 0, 16_000), pcm); // zero rate → unchanged, no panic
+    }
+
+    #[test]
+    fn resample_downsample_shortens_by_ratio() {
+        let pcm = vec![0i16; 480]; // 10 ms at 48 kHz
+        let out = resample_linear(&pcm, 48_000, 16_000); // → 16 kHz
+        assert_eq!(out.len(), 160); // 480 / 3
+    }
+
+    #[test]
+    fn frame_accumulator_emits_full_frames_and_buffers_remainder() {
+        let mut acc = FrameAccumulator::new(320);
+        let frames = acc.push(&vec![0i16; 320 * 3 + 100]);
+        assert_eq!(frames.len(), 3);
+        assert!(frames.iter().all(|f| f.len() == 320));
+        assert_eq!(acc.buffered(), 100);
+        // The remainder completes on the next push.
+        let more = acc.push(&vec![0i16; 220]);
+        assert_eq!(more.len(), 1);
+        assert_eq!(acc.buffered(), 0);
+    }
+
+    #[test]
+    fn jitter_buffer_pulls_then_pads_with_silence_and_flushes() {
+        let mut jb = JitterBuffer::new();
+        jb.enqueue(&[1, 2, 3]);
+        assert_eq!(jb.buffered(), 3);
+        assert_eq!(jb.pull(2), vec![1, 2]);
+        assert_eq!(jb.pull(3), vec![3, 0, 0]); // underrun → silence
+        jb.enqueue(&[9, 9]);
+        jb.flush();
+        assert_eq!(jb.buffered(), 0);
+        assert_eq!(jb.pull(2), vec![0, 0]);
     }
 }

@@ -1,66 +1,329 @@
-//! `[M2]` [`GeminiAdapter`] — Gemini Live native audio over adk-rust (SPEC §4.3, §4.5).
+//! `[M2]` [`GeminiAdapter`] — Gemini Live native audio over `adk-realtime` (SPEC §4.3, §4.5).
 //!
-//! **Stub until the M2 precondition spike.** The real connect/send/recv/interrupt/resumption shape
-//! of adk-rust is unknown until its API is read; per PLAN M2 that is a go/no-go gate recorded in
-//! `NOTES-adk.md`, and any adk-rust churn is adapted **here only** so it never leaks past
-//! [`RealtimeSession`]. Until then this returns [`SessionError::Unimplemented`] from `connect`.
+//! The realtime SDK is an implementation detail confined to this module (see `NOTES-adk.md` for the
+//! spike that pinned its API). We use `adk-realtime`'s **low-level** `RealtimeSession` (not the
+//! callback `RealtimeRunner`): its `&self` sends + `next_event()` let us pump the provider's events
+//! into Joi's owned [`EventReceiver`], so nothing about adk leaks past [`RealtimeSession`].
 //!
-//! The reported [`Capabilities`] reflect Gemini's documented intent so dependent code can be
-//! exercised against them; they are not load-bearing until the adapter is implemented.
+//! The API key is injected at construction from the [`joi_core::secrets::SecretStore`] (SPEC SEC-5)
+//! — it never travels through [`SessionConfig`].
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use joi_core::error::SessionError;
-use joi_core::media::VideoFrame;
-use joi_core::session::event::{EventReceiver, SessionEvent};
-use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-/// Gemini Live adapter. Connect is unimplemented pending the M2 adk-rust spike.
-#[derive(Debug, Default)]
-pub struct GeminiAdapter;
+use adk_realtime::audio::AudioChunk;
+use adk_realtime::gemini::{GeminiLiveBackend, GeminiRealtimeModel};
+use adk_realtime::session::RealtimeSession as AdkSession;
+use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
+
+use joi_core::error::SessionError;
+use joi_core::media::{self, VideoFrame};
+use joi_core::session::event::{
+    CloseReason, EventReceiver, EventSender, SessionEvent, Speaker, TurnEvent,
+};
+use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
+
+/// Buffer for the pump→manager event channel. Matches the manager's internal media channel.
+const EVENT_CHANNEL: usize = 512;
+
+/// Install the rustls crypto provider that `adk-realtime` requires. Idempotent; safe to call from
+/// the composition root at startup and again here (the first install wins).
+pub fn init_crypto() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// Gemini Live adapter. Construct with the API key, then [`RealtimeSession::connect`].
+pub struct GeminiAdapter {
+    api_key: SecretString,
+    session: Option<Arc<dyn AdkSession>>,
+    events: Option<EventReceiver>,
+    pump: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for GeminiAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the key.
+        f.debug_struct("GeminiAdapter")
+            .field("connected", &self.session.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 impl GeminiAdapter {
-    /// Construct the (not-yet-functional) adapter.
+    /// Build an unconnected adapter bound to `api_key`.
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(api_key: SecretString) -> Self {
+        Self {
+            api_key,
+            session: None,
+            events: None,
+            pump: None,
+        }
     }
 }
 
 #[async_trait]
 impl RealtimeSession for GeminiAdapter {
-    async fn connect(&mut self, _cfg: SessionConfig) -> Result<(), SessionError> {
-        Err(SessionError::Unimplemented(
-            "Gemini adapter pending M2 adk-rust API spike (see NOTES-adk.md)",
-        ))
+    async fn connect(&mut self, cfg: SessionConfig) -> Result<(), SessionError> {
+        init_crypto();
+
+        let backend = GeminiLiveBackend::studio(self.api_key.expose_secret().to_string());
+        let model = GeminiRealtimeModel::new(backend, cfg.model);
+
+        let mut rc = RealtimeConfig::default()
+            .with_instruction(cfg.system_instruction)
+            .with_audio_only()
+            .with_server_vad();
+        if let Some(voice) = cfg.voice {
+            rc = rc.with_voice(voice);
+        }
+        if cfg.enable_input_transcription {
+            rc = rc.with_transcription();
+        }
+
+        let boxed = model.connect(rc).await.map_err(|e| map_connect_err(&e))?;
+        // adk hands back a `Box<dyn RealtimeSession>`; share it as an `Arc` so the pump task and the
+        // `send_*` calls (all `&self`) can hold it concurrently without aliasing `&mut`.
+        let session: Arc<dyn AdkSession> = Arc::from(boxed);
+
+        let (tx, rx) = mpsc::channel(EVENT_CHANNEL);
+        let pump = tokio::spawn(pump_events(Arc::clone(&session), tx));
+
+        self.session = Some(session);
+        self.events = Some(rx);
+        self.pump = Some(pump);
+        Ok(())
     }
 
-    async fn send_audio(&mut self, _pcm: &[i16]) -> Result<(), SessionError> {
-        Err(SessionError::NotConnected)
+    async fn send_audio(&mut self, pcm: &[i16]) -> Result<(), SessionError> {
+        let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
+        let chunk = AudioChunk::pcm16_16khz(media::pcm16_to_le_bytes(pcm));
+        session
+            .send_audio(&chunk)
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))
     }
 
     async fn send_video_frame(&mut self, _frame: &VideoFrame) -> Result<(), SessionError> {
-        Err(SessionError::NotConnected)
+        // Native screen input lands in M4 (SPEC §7.3).
+        Err(SessionError::Unimplemented("screen input (M4)"))
     }
 
-    async fn send_text(&mut self, _text: &str) -> Result<(), SessionError> {
-        Err(SessionError::NotConnected)
+    async fn send_text(&mut self, text: &str) -> Result<(), SessionError> {
+        let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
+        session
+            .send_text(text)
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))?;
+        // With server VAD the model auto-responds to audio, but typed text needs an explicit trigger.
+        session
+            .create_response()
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))
     }
 
     fn take_events(&mut self) -> EventReceiver {
-        let (_tx, rx) = mpsc::channel::<SessionEvent>(1);
-        rx
+        self.events.take().unwrap_or_else(|| {
+            // Called before connect or twice: hand back an already-empty receiver.
+            let (_tx, rx) = mpsc::channel(1);
+            rx
+        })
     }
 
     async fn close(&mut self) -> Result<(), SessionError> {
+        if let Some(session) = self.session.take() {
+            let _ = session.close().await;
+        }
+        if let Some(pump) = self.pump.take() {
+            pump.abort();
+        }
+        self.events = None;
         Ok(())
     }
 
     fn capabilities(&self) -> Capabilities {
+        // Honest MVP flags: resumption is wired in M3, native screen in M4, tools are POST.
         Capabilities {
-            session_resumption: true,
-            native_screen_input: true,
-            async_tool_calls: true,
+            session_resumption: false,
+            native_screen_input: false,
+            async_tool_calls: false,
+        }
+    }
+}
+
+/// Forward adk `ServerEvent`s into Joi's owned event stream until the session closes or the manager
+/// drops its receiver.
+async fn pump_events(session: Arc<dyn AdkSession>, tx: EventSender) {
+    while let Some(result) = session.next_event().await {
+        let mapped = match result {
+            Ok(event) => map_event(event),
+            Err(e) => vec![SessionEvent::Error(SessionError::Provider(e.to_string()))],
+        };
+        for ev in mapped {
+            if tx.send(ev).await.is_err() {
+                return; // manager gone
+            }
+        }
+    }
+    let _ = tx
+        .send(SessionEvent::Closed {
+            reason: CloseReason::Server,
+        })
+        .await;
+}
+
+/// Map one adk `ServerEvent` to zero or more Joi [`SessionEvent`]s (NOTES-adk.md mapping table).
+fn map_event(event: ServerEvent) -> Vec<SessionEvent> {
+    match event {
+        ServerEvent::AudioDelta { delta, .. } => vec![SessionEvent::AudioOutput {
+            pcm: media::le_bytes_to_pcm16(&delta),
+        }],
+        ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
+            vec![agent_line(delta, false)]
+        }
+        ServerEvent::TranscriptDone { transcript: text, .. }
+        | ServerEvent::TextDone { text, .. } => vec![agent_line(text, true)],
+        // Server VAD detected the user speaking → flush any agent playback (barge-in, FR-2).
+        ServerEvent::SpeechStarted { .. } => vec![SessionEvent::TurnEvent(TurnEvent::Interrupted)],
+        ServerEvent::ResponseCreated { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)],
+        ServerEvent::ResponseDone { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnComplete)],
+        ServerEvent::Error { error, .. } => {
+            let code = error.code.unwrap_or(error.error_type);
+            vec![SessionEvent::Error(SessionError::Provider(format!(
+                "{code}: {}",
+                error.message
+            )))]
+        }
+        // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (POST), rate limits, and
+        // unknown forward-compat variants carry nothing the MVP UI needs.
+        _ => vec![],
+    }
+}
+
+fn agent_line(text: String, final_: bool) -> SessionEvent {
+    SessionEvent::Transcript {
+        speaker: Speaker::Agent,
+        text,
+        final_,
+    }
+}
+
+/// Classify a connect-time error so the UI can tell "bad key" from "network down".
+fn map_connect_err(e: &RealtimeError) -> SessionError {
+    let msg = e.to_string();
+    let low = msg.to_lowercase();
+    if ["unauthor", "api key", "permission", "401", "403", "invalid_argument key"]
+        .iter()
+        .any(|needle| low.contains(needle))
+    {
+        SessionError::Auth(msg)
+    } else {
+        SessionError::Connect(msg)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use adk_realtime::events::ErrorInfo;
+
+    fn adapter() -> GeminiAdapter {
+        GeminiAdapter::new(SecretString::from("test-key"))
+    }
+
+    #[tokio::test]
+    async fn sends_before_connect_report_not_connected() {
+        let mut a = adapter();
+        assert!(matches!(
+            a.send_audio(&[0i16; 320]).await,
+            Err(SessionError::NotConnected)
+        ));
+        assert!(matches!(
+            a.send_text("hi").await,
+            Err(SessionError::NotConnected)
+        ));
+    }
+
+    #[test]
+    fn debug_never_renders_the_key() {
+        let rendered = format!("{:?}", adapter());
+        assert!(!rendered.contains("test-key"), "key leaked: {rendered}");
+    }
+
+    #[test]
+    fn audio_delta_maps_to_pcm_output() {
+        let pcm = vec![0i16, 1, -1, 12345, -32768];
+        let event = ServerEvent::AudioDelta {
+            event_id: "e".into(),
+            response_id: "r".into(),
+            item_id: "i".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: media::pcm16_to_le_bytes(&pcm),
+        };
+        match map_event(event).as_slice() {
+            [SessionEvent::AudioOutput { pcm: out }] => assert_eq!(*out, pcm),
+            other => panic!("expected one AudioOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn speech_started_maps_to_barge_in() {
+        let event = ServerEvent::SpeechStarted {
+            event_id: "e".into(),
+            audio_start_ms: 0,
+        };
+        assert!(matches!(
+            map_event(event).as_slice(),
+            [SessionEvent::TurnEvent(TurnEvent::Interrupted)]
+        ));
+    }
+
+    #[test]
+    fn transcript_delta_is_a_partial_agent_line() {
+        let event = ServerEvent::TranscriptDelta {
+            event_id: "e".into(),
+            response_id: "r".into(),
+            item_id: "i".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: "hello".into(),
+        };
+        match map_event(event).as_slice() {
+            [SessionEvent::Transcript {
+                speaker: Speaker::Agent,
+                text,
+                final_: false,
+            }] => assert_eq!(text, "hello"),
+            other => panic!("expected partial agent transcript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_error_maps_to_provider_error() {
+        let event = ServerEvent::Error {
+            event_id: "e".into(),
+            error: ErrorInfo {
+                error_type: "internal".into(),
+                code: Some("500".into()),
+                message: "boom".into(),
+                param: None,
+            },
+        };
+        match map_event(event).as_slice() {
+            [SessionEvent::Error(SessionError::Provider(msg))] => {
+                assert!(msg.contains("500") && msg.contains("boom"), "{msg}");
+            }
+            other => panic!("expected provider error, got {other:?}"),
         }
     }
 }

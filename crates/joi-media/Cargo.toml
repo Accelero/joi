@@ -1,0 +1,17 @@
+[package]
+name = "joi-media"
+description = "Native audio capture/playback (cpal) and screen capture for Joi. Keeps all OS/audio deps out of joi-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+joi-core = { path = "../joi-core" }
+cpal = "0.15"
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

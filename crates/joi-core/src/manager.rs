@@ -294,10 +294,17 @@ impl SessionManager {
             }
             Command::SendAudio { pcm } => {
                 if !self.mic_muted {
-                    if let Some(s) = session.as_mut() {
-                        if let Err(e) = s.send_audio(&pcm).await {
-                            self.on_error("audio_send", &e);
-                        }
+                    // Borrow ends before any teardown so we can drop the dead session below.
+                    let result = match session.as_mut() {
+                        Some(s) => Some(s.send_audio(&pcm).await),
+                        None => None,
+                    };
+                    if let Some(Err(e)) = result {
+                        // A send failure means the socket is gone; stop cleanly rather than logging
+                        // an error per 20 ms frame. (M3 will distinguish transient drops → reconnect.)
+                        self.on_error("audio_send", &e);
+                        self.do_stop(session).await;
+                        self.set_state(AppState::Error);
                     }
                 }
             }
@@ -417,8 +424,12 @@ impl SessionManager {
                 use crate::session::event::TurnEvent;
                 match turn {
                     TurnEvent::TurnStarted => self.set_state(AppState::Thinking),
-                    // M2 adds barge-in playback flush on Interrupted; both return to listening.
-                    TurnEvent::TurnComplete | TurnEvent::Interrupted => {
+                    TurnEvent::TurnComplete => self.set_state(AppState::Listening),
+                    TurnEvent::Interrupted => {
+                        // Barge-in (FR-2): tell the playback sink to drop queued agent audio now,
+                        // via an empty-frame sentinel on the audio channel (TurnComplete must NOT
+                        // flush, or it would clip the reply's tail).
+                        let _ = self.audio_tx.send(Vec::new());
                         self.set_state(AppState::Listening);
                     }
                 }

@@ -16,3 +16,6 @@ dist
 # Local env
 .env
 .env.local
+
+# Tauri build-generated schemas
+/src-tauri/gen/

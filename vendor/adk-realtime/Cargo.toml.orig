@@ -1,0 +1,154 @@
+[package]
+name = "adk-realtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Real-time bidirectional audio/video streaming for Rust Agent Development Kit (ADK-Rust) agents"
+repository = "https://github.com/zavora-ai/adk-rust"
+documentation = "https://docs.rs/adk-realtime"
+keywords = ["adk", "ai", "realtime", "voice", "audio"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+# Core ADK dependencies
+adk-core.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "net", "time", "rt"] }
+async-trait.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# WebSocket
+tokio-tungstenite = { workspace = true, optional = true }
+
+# Zero-copy bytes
+bytes = "1"
+bytemuck = "1.25"
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Base64 for audio encoding
+base64 = "0.22"
+
+# UUID for session IDs
+uuid.workspace = true
+
+# OpenAI realtime types (optional)
+async-openai = { version = "0.33", optional = true, features = ["realtime"] }
+
+# Random bytes for WebSocket key generation (optional)
+getrandom = { version = "0.3", optional = true }
+
+# Gemini backend (optional)
+adk-gemini = { workspace = true, optional = true }
+
+# Vertex AI Live (optional)
+google-cloud-auth = { version = "1.4", optional = true, default-features = false, features = ["default-rustls-provider"] }
+
+# LiveKit bridge (optional)
+livekit = { workspace = true, optional = true }
+livekit-api = { workspace = true, optional = true }
+
+# OpenAI WebRTC (optional)
+# NOTE: `audiopus` builds the Opus C library from source and requires `cmake`.
+# With cmake >= 4.0, set CMAKE_POLICY_VERSION_MINIMUM=3.5 in your environment
+# to work around the bundled Opus CMakeLists.txt using an older cmake_minimum_required.
+str0m = { version = "0.17", optional = true }
+audiopus = { version = "0.3.0-rc.0", optional = true }
+reqwest = { workspace = true, optional = true }
+rustls = { version = "0.23.37", features = ["aws-lc-rs"] }
+secrecy = "0.10.3"
+url = "2.5"
+parking_lot = "0.12.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
+dotenvy = "0.15"
+proptest = "1.5"
+url = "2.5"
+anyhow = "1.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "openai_session_update"
+required-features = ["openai"]
+
+[[example]]
+name = "gemini_context_mutation"
+required-features = ["gemini"]
+
+[[example]]
+name = "vertex_live_voice"
+required-features = ["vertex-live"]
+
+[[example]]
+name = "vertex_live_tools"
+required-features = ["vertex-live"]
+
+[[example]]
+name = "debug_livekit_auth"
+path = "examples/debug_livekit_auth.rs"
+required-features = ["livekit"]
+
+[[example]]
+name = "debug_gemini"
+path = "examples/debug_gemini.rs"
+required-features = ["gemini"]
+
+[[example]]
+name = "livekit_bridge"
+required-features = ["livekit", "openai"]
+
+[[example]]
+name = "livekit_gemini_bridge"
+required-features = ["livekit", "gemini"]
+
+[[example]]
+name = "openai_webrtc"
+required-features = ["openai-webrtc"]
+
+[[bench]]
+name = "livekit_pcm_bench"
+harness = false
+
+[features]
+default = []
+# Enable OpenAI Realtime API support
+openai = ["dep:async-openai", "dep:tokio-tungstenite", "dep:getrandom"]
+# Enable Gemini Live API support
+gemini = ["dep:tokio-tungstenite", "dep:adk-gemini"]
+# Enable Vertex AI Live API support (requires gemini + OAuth2/ADC auth)
+vertex-live = ["gemini", "dep:google-cloud-auth"]
+# Enable LiveKit WebRTC bridge
+livekit = ["dep:livekit", "dep:livekit-api", "dep:tokio-tungstenite"]
+# Enable OpenAI WebRTC transport (requires openai + Sans-IO WebRTC + Opus codec)
+openai-webrtc = ["openai", "dep:str0m", "dep:audiopus", "dep:reqwest"]
+# Enable video avatar support for realtime sessions
+video-avatar = []
+# Video avatar providers
+heygen-avatar = ["video-avatar", "livekit", "dep:reqwest"]
+did-avatar = ["video-avatar", "dep:str0m", "dep:reqwest"]
+# Enable all providers and transports (except openai-webrtc which requires cmake)
+full = ["openai", "gemini", "vertex-live", "livekit"]
+# Enable everything including WebRTC (requires cmake installed)
+full-webrtc = ["full", "openai-webrtc"]
+
+[[example]]
+name = "heygen_avatar"
+required-features = ["heygen-avatar"]
+
+[[example]]
+name = "did_avatar"
+required-features = ["did-avatar"]

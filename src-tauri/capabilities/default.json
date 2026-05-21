@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the Joi main window. App commands are exposed via the invoke handler and need no extra permission.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/joi-core", "crates/joi-providers", "crates/joi-testkit"]
+members = ["crates/joi-core", "crates/joi-providers", "crates/joi-testkit", "crates/joi-media", "src-tauri"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -54,3 +55,9 @@ missing_docs = "warn"
 [profile.release]
 strip = true
 lto = "thin"
+
+# Vendored adk-realtime (crates/joi-providers depends on it) with a one-field fix: send the current
+# `realtimeInput.audio` blob instead of the deprecated `mediaChunks[]`, which current Gemini Live
+# models (gemini-3.1-flash-live-preview) reject. Patched source in vendor/adk-realtime.
+[patch.crates-io]
+adk-realtime = { path = "vendor/adk-realtime" }

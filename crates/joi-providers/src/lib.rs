@@ -8,6 +8,7 @@
 //! - [`gemini`] — `[M2]` Gemini Live via adk-rust. Stub until the M2 API spike (PLAN §0, M2).
 //! - [`openai`] — `[POST]` compile-only stub that keeps the abstraction honest (SPEC §4.4).
 
+pub mod factory;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 #[cfg(feature = "mock")]
@@ -15,5 +16,6 @@ pub mod mock;
 #[cfg(feature = "openai")]
 pub mod openai;
 
+pub use factory::{build_session_factory, FactoryError};
 #[cfg(feature = "mock")]
 pub use mock::MockSession;

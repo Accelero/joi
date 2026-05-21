@@ -54,6 +54,44 @@ impl SecretStore for InMemorySecretStore {
     }
 }
 
+/// Environment variable read by [`EnvSecretStore`]. Documented in `joi.example.toml`.
+pub const API_KEY_ENV: &str = "GEMINI_API_KEY";
+
+/// Read-only [`SecretStore`] backed by the `GEMINI_API_KEY` environment variable.
+///
+/// This is the **dev** path (SPEC SEC-5): the key is read at runtime and never persisted by us.
+/// Persistence is the shell's job (e.g. a fish universal variable). Production uses the OS
+/// keychain adapter in `src-tauri` instead.
+#[derive(Debug, Default)]
+pub struct EnvSecretStore;
+
+impl EnvSecretStore {
+    /// A store that reads [`API_KEY_ENV`] on each access.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SecretStore for EnvSecretStore {
+    async fn get_api_key(&self) -> Result<Option<SecretString>, SecretError> {
+        match std::env::var(API_KEY_ENV) {
+            Ok(v) if !v.is_empty() => Ok(Some(SecretString::from(v))),
+            Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(SecretError::Backend(format!(
+                "{API_KEY_ENV} is set but is not valid UTF-8"
+            ))),
+        }
+    }
+
+    async fn set_api_key(&self, _key: SecretString) -> Result<(), SecretError> {
+        Err(SecretError::Backend(format!(
+            "{API_KEY_ENV} is read-only; set it in your shell (e.g. `set -Ux {API_KEY_ENV} <key>`)"
+        )))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -71,6 +109,29 @@ mod tests {
         assert!(store.has_api_key().await.unwrap());
         let got = store.get_api_key().await.unwrap().unwrap();
         assert_eq!(got.expose_secret(), "abc123");
+    }
+
+    #[tokio::test]
+    async fn env_store_reads_the_variable() {
+        // Safe under edition 2021; this test owns the variable name.
+        std::env::set_var(API_KEY_ENV, "env-key-123");
+        let store = EnvSecretStore::new();
+        let got = store.get_api_key().await.unwrap().unwrap();
+        assert_eq!(got.expose_secret(), "env-key-123");
+
+        std::env::remove_var(API_KEY_ENV);
+        assert!(store.get_api_key().await.unwrap().is_none());
+
+        // Empty is treated as unset, not a key.
+        std::env::set_var(API_KEY_ENV, "");
+        assert!(store.get_api_key().await.unwrap().is_none());
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[tokio::test]
+    async fn env_store_is_read_only() {
+        let store = EnvSecretStore::new();
+        assert!(store.set_api_key(SecretString::from("x")).await.is_err());
     }
 
     #[test]
