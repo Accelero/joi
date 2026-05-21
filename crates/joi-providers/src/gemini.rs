@@ -192,7 +192,10 @@ fn map_event(event: ServerEvent) -> Vec<SessionEvent> {
         ServerEvent::TranscriptDone { transcript: text, .. }
         | ServerEvent::TextDone { text, .. } => vec![agent_line(text, true)],
         // Server VAD detected the user speaking → flush any agent playback (barge-in, FR-2).
-        ServerEvent::SpeechStarted { .. } => vec![SessionEvent::TurnEvent(TurnEvent::Interrupted)],
+        ServerEvent::SpeechStarted { .. } => {
+            tracing::debug!("gemini barge-in: model response interrupted by user speech");
+            vec![SessionEvent::TurnEvent(TurnEvent::Interrupted)]
+        }
         ServerEvent::ResponseCreated { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)],
         ServerEvent::ResponseDone { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnComplete)],
         ServerEvent::Error { error, .. } => {

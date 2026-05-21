@@ -357,6 +357,20 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "byteorder"
@@ -647,6 +661,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,6 +828,7 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.117",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -2037,6 +2061,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "joi-core",
+ "sonora",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2243,6 +2268,15 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
 ]
 
 [[package]]
@@ -3737,7 +3771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 
@@ -3748,7 +3782,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 
@@ -3842,6 +3876,79 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sonora"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "559f6011d42721f7b4599ef4cf3224ac07539ee5bc25967169701c7aeb6c6bb1"
+dependencies = [
+ "sonora-aec3",
+ "sonora-agc2",
+ "sonora-common-audio",
+ "sonora-ns",
+ "sonora-simd",
+ "tracing",
+]
+
+[[package]]
+name = "sonora-aec3"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d8b7e53b058aa4631cf2a8f483bd7a0dec093aa413d21b44b86d5704deedeb"
+dependencies = [
+ "sonora-common-audio",
+ "sonora-fft",
+ "sonora-simd",
+]
+
+[[package]]
+name = "sonora-agc2"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "132876fc38c4e191dee939a38243df5eb5830cd29f1d1ac9a67377389d74a10e"
+dependencies = [
+ "bytemuck",
+ "derive_more",
+ "sonora-common-audio",
+ "sonora-fft",
+ "sonora-simd",
+ "tracing",
+]
+
+[[package]]
+name = "sonora-common-audio"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30a16fa975fe4aa12e4d980d5453452bd3e6df2b33abfb89840e1757ebd212e6"
+dependencies = [
+ "derive_more",
+ "sonora-simd",
+]
+
+[[package]]
+name = "sonora-fft"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cca158c4b6ace2cb3f4fa8084842da2b4ffcc25cf8ac4366675aea541aabc6af"
+
+[[package]]
+name = "sonora-ns"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc549f9bca1d60e7a2483e4949e9649467c5cca371a4341e44aaf24dae338fd4"
+dependencies = [
+ "sonora-fft",
+]
+
+[[package]]
+name = "sonora-simd"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a053f93cc01f4e1cc51c61844a196b6d1da7e054cdd406d2cd27677ba4d898e0"
+dependencies = [
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -4693,10 +4800,14 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]

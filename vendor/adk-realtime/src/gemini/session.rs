@@ -542,6 +542,19 @@ impl GeminiRealtimeSession {
                 }
             }
 
+            // PATCH(joi): Gemini signals barge-in via `serverContent.interrupted`. adk 0.8.4 drops
+            // it; surface it as SpeechStarted so the client can flush playback (FR-2).
+            if content
+                .get("interrupted")
+                .and_then(|i| i.as_bool())
+                .unwrap_or(false)
+            {
+                events.push(ServerEvent::SpeechStarted {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    audio_start_ms: 0,
+                });
+            }
+
             if let Some(turn_complete) = content.get("turnComplete") {
                 if turn_complete.as_bool().unwrap_or(false) {
                     events.push(ServerEvent::ResponseDone {

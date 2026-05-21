@@ -1,36 +1,48 @@
-//! Native mic capture: a `cpal` input stream that downmixes to mono, resamples to 16 kHz, frames to
-//! 20 ms, and pushes PCM16 frames to the session. Mute is enforced by the manager
-//! (`set_mic_muted`), so capture just streams while a session is active.
+//! Native mic capture with conditioning. The realtime cpal callback only downmixes to mono and
+//! forwards raw samples; the capture thread resamples to 16 kHz and runs a WebRTC-style audio
+//! processing module (Sonora: noise suppression + AGC) before framing to 20 ms PCM16 for the
+//! session. This restores the `noiseSuppression` + `autoGainControl` the webview used to provide;
+//! Gemini only does VAD, so a leveled, denoised mic improves detection and understanding.
 
-use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Sender, TryRecvError};
+use std::sync::Arc;
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use joi_core::media::{pcm16_from_f32, resample_linear, AudioFormat, FrameAccumulator};
+use sonora::config::{GainController2, NoiseSuppression};
+use sonora::{AudioProcessing, Config, StreamConfig as ApmStreamConfig};
 
 use crate::MediaError;
 
-/// Stops capture when dropped — the input stream lives on a dedicated thread that parks until this
-/// handle's sender is dropped.
+/// APM runs at 16 kHz (a WebRTC-supported rate, and our provider rate); device audio is resampled
+/// to it first. 10 ms frames = 160 samples.
+const APM_RATE: u32 = AudioFormat::INPUT.sample_rate;
+const APM_FRAME: usize = (APM_RATE / 100) as usize;
+
+/// Stops capture when dropped — the input stream + processing loop live on a dedicated thread that
+/// exits once this handle's sender is dropped.
 pub struct CaptureHandle {
     _stop: Sender<()>,
 }
 
-/// Spawn mic capture on its own thread (owns the `!Send` input stream). 16 kHz mono PCM16 frames of
-/// `frame_samples` are pushed to `frames`, dropped on overflow so the realtime audio thread never
-/// blocks. Capture stops when the returned [`CaptureHandle`] is dropped.
+/// Spawn mic capture on its own thread (owns the `!Send` input stream and the APM). 16 kHz mono
+/// PCM16 frames of `frame_samples` are pushed to `frames`, dropped on overflow. While `muted` is
+/// set, no audio is captured. Capture stops when the returned [`CaptureHandle`] is dropped.
 #[must_use]
 pub fn spawn_capture(
     frames: tokio::sync::mpsc::Sender<Vec<i16>>,
     frame_samples: usize,
+    muted: Arc<AtomicBool>,
 ) -> CaptureHandle {
     let (stop_tx, stop_rx) = channel::<()>();
     let spawned = std::thread::Builder::new()
         .name("joi-capture".to_string())
-        .spawn(move || match Capture::start(&frames, frame_samples) {
-            Ok(_stream) => {
-                let _ = stop_rx.recv(); // park until the handle drops; the stream drops here
+        .spawn(move || {
+            if let Err(e) = run_capture(&frames, frame_samples, &muted, &stop_rx) {
+                tracing::error!("native capture unavailable: {e}");
             }
-            Err(e) => tracing::error!("native capture unavailable: {e}"),
         });
     if let Err(e) = spawned {
         tracing::error!("failed to spawn capture thread: {e}");
@@ -38,70 +50,129 @@ pub fn spawn_capture(
     CaptureHandle { _stop: stop_tx }
 }
 
-struct Capture {
-    _stream: cpal::Stream,
+fn run_capture(
+    frames: &tokio::sync::mpsc::Sender<Vec<i16>>,
+    frame_samples: usize,
+    muted: &Arc<AtomicBool>,
+    stop_rx: &std::sync::mpsc::Receiver<()>,
+) -> Result<(), MediaError> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or(MediaError::NoInputDevice)?;
+    let supported = device
+        .default_input_config()
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    let device_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let sample_format = supported.sample_format();
+    let config = supported.config();
+    let err_fn = |e| tracing::error!("capture stream error: {e}");
+
+    // Realtime callback: mute-gate, downmix to mono f32, forward. No heavy DSP on the audio thread.
+    let (raw_tx, raw_rx) = channel::<Vec<f32>>();
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => {
+            let raw_tx = raw_tx.clone();
+            let muted = Arc::clone(muted);
+            device.build_input_stream(
+                &config,
+                move |input: &[f32], _| {
+                    if !muted.load(Ordering::Relaxed) {
+                        let _ = raw_tx.send(downmix_f32(input, channels));
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        cpal::SampleFormat::I16 => {
+            let raw_tx = raw_tx.clone();
+            let muted = Arc::clone(muted);
+            device.build_input_stream(
+                &config,
+                move |input: &[i16], _| {
+                    if !muted.load(Ordering::Relaxed) {
+                        let _ = raw_tx.send(downmix_i16(input, channels));
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        other => return Err(MediaError::UnsupportedFormat(format!("{other:?}"))),
+    }
+    .map_err(|e| MediaError::Backend(e.to_string()))?;
+    drop(raw_tx); // only the stream's callback keeps a sender alive now
+    stream.play().map_err(|e| MediaError::Backend(e.to_string()))?;
+    tracing::info!(device_rate, channels, "native mic capture started (NS + AGC)");
+
+    let mut pipeline = CapturePipeline::new(device_rate, frame_samples);
+    loop {
+        match raw_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(mono) => pipeline.process(&mono, frames),
+            // No samples for a while: stop if the handle was dropped, else keep waiting.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if matches!(stop_rx.try_recv(), Err(TryRecvError::Disconnected)) {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Ok(())
 }
 
-impl Capture {
-    fn start(
-        frames: &tokio::sync::mpsc::Sender<Vec<i16>>,
-        frame_samples: usize,
-    ) -> Result<Self, MediaError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(MediaError::NoInputDevice)?;
-        let supported = device
-            .default_input_config()
-            .map_err(|e| MediaError::Backend(e.to_string()))?;
+/// Resample → APM (noise suppression + AGC) → 20 ms PCM16 framing. Lives on the capture thread, so
+/// the APM (which is `!Send`-agnostic here) never crosses to the realtime callback.
+struct CapturePipeline {
+    apm: AudioProcessing,
+    device_rate: u32,
+    apm_in: Vec<f32>,
+    out: FrameAccumulator,
+}
 
-        let device_rate = supported.sample_rate().0;
-        let channels = supported.channels() as usize;
-        let sample_format = supported.sample_format();
-        let config = supported.config();
-        let target = AudioFormat::INPUT.sample_rate;
-        let err_fn = |e| tracing::error!("capture stream error: {e}");
-
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => {
-                let frames = frames.clone();
-                let mut acc = FrameAccumulator::new(frame_samples);
-                device.build_input_stream(
-                    &config,
-                    move |input: &[f32], _| {
-                        let mono = pcm16_from_f32(&downmix_f32(input, channels));
-                        let resampled = resample_linear(&mono, device_rate, target);
-                        for frame in acc.push(&resampled) {
-                            let _ = frames.try_send(frame);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            cpal::SampleFormat::I16 => {
-                let frames = frames.clone();
-                let mut acc = FrameAccumulator::new(frame_samples);
-                device.build_input_stream(
-                    &config,
-                    move |input: &[i16], _| {
-                        let mono = downmix_i16(input, channels);
-                        let resampled = resample_linear(&mono, device_rate, target);
-                        for frame in acc.push(&resampled) {
-                            let _ = frames.try_send(frame);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            other => return Err(MediaError::UnsupportedFormat(format!("{other:?}"))),
+impl CapturePipeline {
+    fn new(device_rate: u32, frame_samples: usize) -> Self {
+        let config = Config {
+            noise_suppression: Some(NoiseSuppression::default()),
+            gain_controller2: Some(GainController2::default()),
+            ..Default::default()
+        };
+        let sc = ApmStreamConfig::new(APM_RATE, 1);
+        let apm = AudioProcessing::builder()
+            .config(config)
+            .capture_config(sc)
+            .render_config(sc)
+            .build();
+        Self {
+            apm,
+            device_rate,
+            apm_in: Vec::new(),
+            out: FrameAccumulator::new(frame_samples),
         }
-        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    }
 
-        stream.play().map_err(|e| MediaError::Backend(e.to_string()))?;
-        tracing::info!(device_rate, channels, "native mic capture started");
-        Ok(Self { _stream: stream })
+    fn process(&mut self, mono_device: &[f32], frames: &tokio::sync::mpsc::Sender<Vec<i16>>) {
+        // Down to 16 kHz, then accumulate 10 ms APM frames.
+        let pcm = pcm16_from_f32(mono_device);
+        let resampled = resample_linear(&pcm, self.device_rate, APM_RATE);
+        self.apm_in
+            .extend(resampled.iter().map(|&s| f32::from(s) / 32768.0));
+
+        while self.apm_in.len() >= APM_FRAME {
+            let frame: Vec<f32> = self.apm_in.drain(..APM_FRAME).collect();
+            let mut out = vec![0.0f32; APM_FRAME];
+            if self
+                .apm
+                .process_capture_f32(&[&frame], &mut [&mut out])
+                .is_ok()
+            {
+                for done in self.out.push(&pcm16_from_f32(&out)) {
+                    let _ = frames.try_send(done);
+                }
+            }
+        }
     }
 }
 
@@ -113,9 +184,11 @@ fn downmix_f32(input: &[f32], channels: usize) -> Vec<f32> {
     input.chunks(channels).map(|f| f[0]).collect()
 }
 
-fn downmix_i16(input: &[i16], channels: usize) -> Vec<i16> {
-    if channels <= 1 {
-        return input.to_vec();
-    }
-    input.chunks(channels).map(|f| f[0]).collect()
+fn downmix_i16(input: &[i16], channels: usize) -> Vec<f32> {
+    let step = channels.max(1);
+    input
+        .iter()
+        .step_by(step)
+        .map(|&s| f32::from(s) / 32768.0)
+        .collect()
 }

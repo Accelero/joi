@@ -5,6 +5,7 @@
 
 mod secret_store;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use joi_core::clock::SystemClock;
@@ -30,6 +31,8 @@ struct AppCtx {
     cap_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     /// Active mic capture (present only while a session runs); dropping it stops the stream.
     capture: Mutex<Option<joi_media::CaptureHandle>>,
+    /// App-level mute: gates native capture at the source, independent of session state.
+    mic_muted: Arc<AtomicBool>,
     /// Samples per input frame (e.g. 320 at 16 kHz / 20 ms), from config.
     frame_samples: usize,
 }
@@ -77,7 +80,11 @@ async fn start(resume: bool, ctx: State<'_, AppCtx>) -> Result<StartResult, Stri
     ctx.session()?.start(resume).await.map_err(|e| e.to_string())?;
     // Begin native mic capture for this session; the manager gates muted audio.
     if let Ok(mut cap) = ctx.capture.lock() {
-        *cap = Some(joi_media::spawn_capture(ctx.cap_tx.clone(), ctx.frame_samples));
+        *cap = Some(joi_media::spawn_capture(
+            ctx.cap_tx.clone(),
+            ctx.frame_samples,
+            Arc::clone(&ctx.mic_muted),
+        ));
     }
     Ok(StartResult {
         session_id: "session".to_string(),
@@ -101,23 +108,30 @@ async fn send_text(text: String, ctx: State<'_, AppCtx>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_mic_muted(muted: bool, ctx: State<'_, AppCtx>) -> Result<(), String> {
-    ctx.session()?
-        .set_mic_muted(muted)
-        .await
-        .map_err(|e| e.to_string())
+fn set_mic_muted(muted: bool, ctx: State<'_, AppCtx>) {
+    // App-level mute: gates native capture regardless of whether a session is running.
+    ctx.mic_muted.store(muted, Ordering::Relaxed);
 }
 
 #[allow(clippy::too_many_lines)] // composition root: linear wiring reads better in one place
 fn main() -> anyhow::Result<()> {
+    // Debug for Joi's own crates by default (deps stay at info to avoid raw-event/tauri noise);
+    // RUST_LOG overrides entirely when set.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| {
+                tracing_subscriber::EnvFilter::new(
+                    "info,joi=debug,joi_core=debug,joi_media=debug,joi_providers=debug",
+                )
+            },
+        ))
         .init();
 
     let config = Config::load(None)?;
     let secrets: Arc<dyn SecretStore> = Arc::new(EnvWithOverlayStore::new());
     let frame_samples = AudioFormat::INPUT.samples_per_frame(config.audio.frame_ms);
     let (cap_tx, mut cap_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+    let mic_muted = Arc::new(AtomicBool::new(false));
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -224,6 +238,7 @@ fn main() -> anyhow::Result<()> {
                 secrets: Arc::clone(&secrets),
                 cap_tx,
                 capture: Mutex::new(None),
+                mic_muted,
                 frame_samples,
             });
             Ok(())

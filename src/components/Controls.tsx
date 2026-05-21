@@ -65,8 +65,9 @@ export function Controls({
       <button
         type="button"
         onClick={onToggleMute}
-        disabled={!running}
-        className="rounded bg-slate-700 px-3 py-1 text-sm text-white disabled:opacity-50"
+        className={`rounded px-3 py-1 text-sm text-white ${
+          micMuted ? "bg-rose-700" : "bg-slate-700"
+        }`}
       >
         {micMuted ? "Unmute" : "Mute"}
       </button>
