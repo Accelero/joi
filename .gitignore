@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Node / frontend
+node_modules
+dist
+.vite
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Local env
+.env
+.env.local

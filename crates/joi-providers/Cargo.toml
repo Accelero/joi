@@ -1,0 +1,28 @@
+[package]
+name = "joi-providers"
+description = "RealtimeSession adapters: mock (tests/M1), gemini (M2), and the OpenAI compile-only stub."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# All adapters are stubs/mocks today, so default-on keeps the whole surface compiling in CI.
+# When adk-rust lands in M2, the `gemini` feature gains that dependency (PLAN §0, M2).
+default = ["mock", "gemini", "openai"]
+mock = []
+gemini = []
+openai = []
+
+[dependencies]
+joi-core = { path = "../joi-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

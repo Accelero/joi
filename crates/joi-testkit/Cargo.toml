@@ -1,0 +1,19 @@
+[package]
+name = "joi-testkit"
+description = "Shared test utilities and the RealtimeSession adapter conformance suite (SPEC §16)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+joi-core = { path = "../joi-core" }
+joi-providers = { path = "../joi-providers" }
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

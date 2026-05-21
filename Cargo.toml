@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = ["crates/joi-core", "crates/joi-providers", "crates/joi-testkit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.80"
+
+# Shared dependencies. Crates opt in via `dep.workspace = true`.
+[workspace.dependencies]
+async-trait = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
+tracing = "0.1"
+figment = { version = "0.10", features = ["toml", "env"] }
+directories = "6"
+secrecy = { version = "0.10", features = ["serde"] }
+
+# dev-dependencies shared across crates
+pretty_assertions = "1"
+proptest = "1"
+
+# Lints applied to every workspace crate. `unwrap`/`expect`/`panic` are denied in
+# library code (PLAN §1, §5). `deny(warnings)` is intentionally NOT set here — it is
+# applied CI-only via RUSTFLAGS="-D warnings" so a future compiler lint bump cannot
+# break the build (PLAN §5, m-6).
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# pedantic lints that fight readability for this codebase
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+# Test/bench code may unwrap freely; the deny above is for library paths only.
+# Per-crate test modules re-allow via `#![cfg_attr(test, allow(...))]` where needed.
+
+[profile.release]
+strip = true
+lto = "thin"
