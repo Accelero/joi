@@ -108,6 +108,7 @@ async fn send_text(text: String, ctx: State<'_, AppCtx>) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri commands take `State` by value
 fn set_mic_muted(muted: bool, ctx: State<'_, AppCtx>) {
     // App-level mute: gates native capture regardless of whether a session is running.
     ctx.mic_muted.store(muted, Ordering::Relaxed);
@@ -144,24 +145,6 @@ fn main() -> anyhow::Result<()> {
             set_mic_muted
         ])
         .setup(move |app| {
-            // Linux/WebKitGTK: enable MediaStream and grant getUserMedia permission requests, which
-            // the webview denies by default without a handler (the M0 media spike). The webview only
-            // ever loads our embedded, trusted frontend, so granting capture requests is safe.
-            #[cfg(target_os = "linux")]
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.with_webview(|webview| {
-                    use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
-                    let wv = webview.inner();
-                    if let Some(settings) = wv.settings() {
-                        settings.set_enable_media_stream(true);
-                    }
-                    wv.connect_permission_request(|_, req| {
-                        req.allow();
-                        true
-                    });
-                });
-            }
-
             // Build the session manager on the async runtime so its internal `tokio::spawn` has a
             // runtime context, and so we can read the key before spawning. A missing key (or any
             // factory error) is non-fatal: the window still opens and session commands report it.

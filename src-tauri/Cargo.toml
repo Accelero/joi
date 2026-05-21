@@ -29,9 +29,3 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
-
-# Linux/WebKitGTK: access the underlying webview to enable media capture + grant getUserMedia
-# (denied by default without a permission handler — the M0 media spike). Pinned to the same version
-# wry uses so `PlatformWebview::inner()` returns a matching `webkit2gtk::WebView`.
-[target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = "2.0"

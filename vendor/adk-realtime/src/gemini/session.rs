@@ -26,6 +26,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[allow(dead_code)] // PATCH(joi): silence upstream's unused-alias warning
 type WsSink = futures::stream::SplitSink<WsStream, Message>;
 type WsSource = futures::stream::SplitStream<WsStream>;
 const WRITER_CHANNEL_CAPACITY: usize = 64;

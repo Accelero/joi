@@ -3,8 +3,8 @@
  * `joi-core`'s serde types (`UiEvent`, `AppState`, …) and the command table in SPEC §11.1; the
  * parity test in `ipc.test.ts` pins the JSON shape so drift is caught (PLAN §5, m-4).
  *
- * Audio is **not** here: mic/playback frames stream over a binary `Channel` (SPEC §11.2), never
- * through these JSON paths or React state (SPEC §8.2).
+ * Audio and screen capture are **not** here at all: they happen entirely in Rust (joi-media, native
+ * cpal/APM). This boundary is JSON commands + UiEvents only — no media ever crosses into the webview.
  */
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
