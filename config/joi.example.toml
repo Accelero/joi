@@ -24,7 +24,9 @@ output_device = "default"
 enabled = false
 capture_path = "auto"         # auto | webview | native  (auto resolves via the M0 spike result)
 fps = 1.0
-max_width = 1920
+# Provider-specific: Gemini Live downsamples each video frame to ~768 px (one tile); sending more
+# is wasted bytes. Raise only if you switch to an API that uses higher-resolution frames.
+max_width = 768
 quality = 80                  # 1-100
 
 [history]

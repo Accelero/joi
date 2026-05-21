@@ -8,10 +8,12 @@ interface ControlsProps {
   state: AppState;
   connection: ConnectionStatus;
   micMuted: boolean;
+  sharing: boolean;
   busy: boolean;
   onStart(): void;
   onStop(): void;
   onToggleMute(): void;
+  onToggleShare(): void;
 }
 
 const STATE_COLOR: Record<AppState, string> = {
@@ -28,10 +30,12 @@ export function Controls({
   state,
   connection,
   micMuted,
+  sharing,
   busy,
   onStart,
   onStop,
   onToggleMute,
+  onToggleShare,
 }: ControlsProps): React.JSX.Element {
   const running = state !== "stopped" && state !== "error";
 
@@ -70,6 +74,17 @@ export function Controls({
         }`}
       >
         {micMuted ? "Unmute" : "Mute"}
+      </button>
+
+      <button
+        type="button"
+        onClick={onToggleShare}
+        disabled={!running}
+        className={`rounded px-3 py-1 text-sm text-white disabled:opacity-50 ${
+          sharing ? "bg-violet-700" : "bg-slate-700"
+        }`}
+      >
+        {sharing ? "Stop sharing" : "Share screen"}
       </button>
 
       <span className="ml-auto text-xs text-slate-500">{connection}</span>

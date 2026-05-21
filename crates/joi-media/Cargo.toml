@@ -13,6 +13,8 @@ workspace = true
 joi-core = { path = "../joi-core" }
 cpal = "0.15"
 sonora = "0.1"
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

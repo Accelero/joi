@@ -6,9 +6,11 @@
 
 pub mod capture;
 pub mod playback;
+pub mod screen;
 
 pub use capture::{spawn_capture, CaptureHandle};
 pub use playback::{spawn_playback, PlaybackCmd};
+pub use screen::{spawn_screen_capture, ScreenHandle};
 
 /// Failures from a native media engine.
 #[derive(Debug, thiserror::Error)]

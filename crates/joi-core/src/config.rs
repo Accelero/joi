@@ -192,7 +192,9 @@ impl Default for Config {
                 enabled: false,
                 capture_path: CapturePath::Auto,
                 fps: 1.0,
-                max_width: 1920,
+                // Sized to the provider's per-frame video resolution. Gemini Live tiles each frame
+                // to ~768 px (one 768x768 tile / ~258 tokens); sending more is downsampled away.
+                max_width: 768,
                 quality: 80,
             },
             history: HistoryCfg {

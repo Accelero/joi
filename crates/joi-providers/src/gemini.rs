@@ -112,9 +112,13 @@ impl RealtimeSession for GeminiAdapter {
             .map_err(|e| SessionError::Send(e.to_string()))
     }
 
-    async fn send_video_frame(&mut self, _frame: &VideoFrame) -> Result<(), SessionError> {
-        // Native screen input lands in M4 (SPEC §7.3).
-        Err(SessionError::Unimplemented("screen input (M4)"))
+    async fn send_video_frame(&mut self, frame: &VideoFrame) -> Result<(), SessionError> {
+        let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
+        // Screen frames are JPEG (joi-media); Gemini takes them as a realtimeInput.video blob.
+        session
+            .send_video_jpeg(&frame.data)
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))
     }
 
     async fn send_text(&mut self, text: &str) -> Result<(), SessionError> {

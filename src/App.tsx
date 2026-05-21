@@ -12,6 +12,7 @@ export function App(): React.JSX.Element {
   const [state, setState] = useState<AppState>("stopped");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [micMuted, setMicMuted] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState("");
 
@@ -24,6 +25,10 @@ export function App(): React.JSX.Element {
       switch (ev.type) {
         case "state":
           setState(ev.state);
+          if (ev.state === "stopped" || ev.state === "error") {
+            setSharing(false);
+            void commands.stopScreenshare();
+          }
           break;
         case "transcript":
           terminalRef.current?.writeTranscript(ev.speaker, ev.text, ev.final);
@@ -73,6 +78,14 @@ export function App(): React.JSX.Element {
     });
   }, []);
 
+  const toggleShare = useCallback(() => {
+    setSharing((prev) => {
+      const next = !prev;
+      void (next ? commands.startScreenshare() : commands.stopScreenshare());
+      return next;
+    });
+  }, []);
+
   const sendDraft = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -94,10 +107,12 @@ export function App(): React.JSX.Element {
         state={state}
         connection={connection}
         micMuted={micMuted}
+        sharing={sharing}
         busy={busy}
         onStart={() => void start()}
         onStop={() => void stop()}
         onToggleMute={toggleMute}
+        onToggleShare={toggleShare}
       />
       <div className="min-h-0 flex-1 p-2">
         <Terminal ref={terminalRef} />

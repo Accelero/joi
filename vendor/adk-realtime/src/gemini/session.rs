@@ -152,6 +152,9 @@ struct GeminiRealtimeInput {
     // single `audio` Blob. See PLAN-NATIVE-MEDIA / NOTES-adk.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     audio: Option<GeminiMediaChunk>,
+    // PATCH(joi): realtime video frames (screen share) — JPEG blob.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video: Option<GeminiMediaChunk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
 }
@@ -648,6 +651,26 @@ impl RealtimeSession for GeminiRealtimeSession {
                 audio: Some(GeminiMediaChunk {
                     mime_type: "audio/pcm;rate=16000".to_string(),
                     data: audio_base64.to_string(),
+                }),
+                video: None,
+                text: None,
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+        self.send_raw(&msg).await
+    }
+
+    /// PATCH(joi): send a JPEG frame as `realtimeInput.video` (screen share).
+    async fn send_video_jpeg(&self, jpeg: &[u8]) -> Result<()> {
+        let data = base64::engine::general_purpose::STANDARD.encode(jpeg);
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                video: Some(GeminiMediaChunk {
+                    mime_type: "image/jpeg".to_string(),
+                    data,
                 }),
                 text: None,
             }),

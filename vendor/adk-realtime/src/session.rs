@@ -64,6 +64,14 @@ pub trait RealtimeSession: Send + Sync {
     /// Send a text message.
     async fn send_text(&self, text: &str) -> Result<()>;
 
+    /// PATCH(joi): Send a JPEG video/image frame as realtime input (screen share). Default: the
+    /// provider doesn't support video; overridden by Gemini.
+    async fn send_video_jpeg(&self, _jpeg: &[u8]) -> Result<()> {
+        Err(crate::error::RealtimeError::provider(
+            "video input not supported by this provider",
+        ))
+    }
+
     /// Send a tool/function response.
     async fn send_tool_response(&self, response: ToolResponse) -> Result<()>;
 

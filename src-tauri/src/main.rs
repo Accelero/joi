@@ -12,7 +12,7 @@ use joi_core::clock::SystemClock;
 use joi_core::config::Config;
 use joi_core::history::InMemoryHistory;
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
-use joi_core::media::AudioFormat;
+use joi_core::media::{AudioFormat, VideoFrame};
 use joi_core::secrets::SecretStore;
 use secrecy::SecretString;
 use serde::Serialize;
@@ -35,6 +35,14 @@ struct AppCtx {
     mic_muted: Arc<AtomicBool>,
     /// Samples per input frame (e.g. 320 at 16 kHz / 20 ms), from config.
     frame_samples: usize,
+    /// Native screen frames are pushed here and forwarded to the session.
+    frame_tx: tokio::sync::mpsc::Sender<VideoFrame>,
+    /// Active screen capture (present while sharing); dropping it stops capture.
+    screen: Mutex<Option<joi_media::ScreenHandle>>,
+    /// Screen-capture settings from config.
+    screen_fps: f32,
+    screen_max_width: u32,
+    screen_quality: u8,
 }
 
 impl AppCtx {
@@ -114,6 +122,28 @@ fn set_mic_muted(muted: bool, ctx: State<'_, AppCtx>) {
     ctx.mic_muted.store(muted, Ordering::Relaxed);
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn start_screenshare(ctx: State<'_, AppCtx>) {
+    // Capture the primary monitor natively; frames flow to the session via the forwarder.
+    if let Ok(mut screen) = ctx.screen.lock() {
+        *screen = Some(joi_media::spawn_screen_capture(
+            ctx.frame_tx.clone(),
+            ctx.screen_fps,
+            ctx.screen_max_width,
+            ctx.screen_quality,
+        ));
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn stop_screenshare(ctx: State<'_, AppCtx>) {
+    if let Ok(mut screen) = ctx.screen.lock() {
+        *screen = None; // dropping the handle stops capture
+    }
+}
+
 #[allow(clippy::too_many_lines)] // composition root: linear wiring reads better in one place
 fn main() -> anyhow::Result<()> {
     // Debug for Joi's own crates by default (deps stay at info to avoid raw-event/tauri noise);
@@ -133,6 +163,10 @@ fn main() -> anyhow::Result<()> {
     let frame_samples = AudioFormat::INPUT.samples_per_frame(config.audio.frame_ms);
     let (cap_tx, mut cap_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
     let mic_muted = Arc::new(AtomicBool::new(false));
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<VideoFrame>(8);
+    let screen_fps = config.screen.fps;
+    let screen_max_width = config.screen.max_width;
+    let screen_quality = config.screen.quality;
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -142,7 +176,9 @@ fn main() -> anyhow::Result<()> {
             start,
             stop,
             send_text,
-            set_mic_muted
+            set_mic_muted,
+            start_screenshare,
+            stop_screenshare
         ])
         .setup(move |app| {
             // Build the session manager on the async runtime so its internal `tokio::spawn` has a
@@ -214,6 +250,16 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
+
+                // Drain native screen frames into the session.
+                let session = handle.clone();
+                async_runtime::spawn(async move {
+                    while let Some(frame) = frame_rx.recv().await {
+                        if session.send_frame(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                });
             }
 
             app.manage(AppCtx {
@@ -223,6 +269,11 @@ fn main() -> anyhow::Result<()> {
                 capture: Mutex::new(None),
                 mic_muted,
                 frame_samples,
+                frame_tx,
+                screen: Mutex::new(None),
+                screen_fps,
+                screen_max_width,
+                screen_quality,
             });
             Ok(())
         })
