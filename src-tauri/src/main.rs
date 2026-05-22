@@ -117,6 +117,9 @@ fn stop_screenshare(ctx: State<'_, AppCtx>) {
 
 #[allow(clippy::too_many_lines)] // composition root: linear wiring reads better in one place
 fn main() -> anyhow::Result<()> {
+    // (WebKitGTK's blank-window workaround lives in `.cargo/config.toml [env]` — it must be set
+    // before the process starts, so it can't be done here.)
+
     // Debug for Joi's own crates by default (deps stay at info to avoid raw-event/tauri noise);
     // RUST_LOG overrides entirely when set.
     tracing_subscriber::fmt()
@@ -136,6 +139,7 @@ fn main() -> anyhow::Result<()> {
         screen_fps: config.screen.fps,
         screen_max_width: config.screen.max_width,
         screen_quality: config.screen.quality,
+        echo_cancellation: config.audio.echo_cancellation,
     };
 
     tauri::Builder::default()

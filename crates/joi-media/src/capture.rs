@@ -26,6 +26,10 @@ use crate::MediaError;
 /// to it first. 10 ms frames = 160 samples.
 const APM_RATE: u32 = AudioFormat::INPUT.sample_rate;
 const APM_FRAME: usize = (APM_RATE / 100) as usize;
+/// Cap on buffered far-end (render) audio (~200 ms at 16 kHz). If the provider ever streams faster
+/// than real time, drop the oldest so the AEC reference lead stays within AEC3's delay-tracking
+/// range instead of growing unboundedly.
+const MAX_RENDER_BACKLOG: usize = APM_FRAME * 20;
 
 /// Stops capture when dropped — the input stream + processing loop live on a dedicated thread that
 /// exits once this handle's sender is dropped.
@@ -44,12 +48,20 @@ pub fn spawn_capture(
     frame_samples: usize,
     muted: Arc<AtomicBool>,
     render_rx: Receiver<Vec<i16>>,
+    echo_cancellation: bool,
 ) -> CaptureHandle {
     let (stop_tx, stop_rx) = channel::<()>();
     let spawned = std::thread::Builder::new()
         .name("joi-capture".to_string())
         .spawn(move || {
-            if let Err(e) = run_capture(&frames, frame_samples, &muted, &stop_rx, &render_rx) {
+            if let Err(e) = run_capture(
+                &frames,
+                frame_samples,
+                &muted,
+                &stop_rx,
+                &render_rx,
+                echo_cancellation,
+            ) {
                 tracing::error!("native capture unavailable: {e}");
             }
         });
@@ -65,6 +77,7 @@ fn run_capture(
     muted: &Arc<AtomicBool>,
     stop_rx: &std::sync::mpsc::Receiver<()>,
     render_rx: &Receiver<Vec<i16>>,
+    echo_cancellation: bool,
 ) -> Result<(), MediaError> {
     let host = cpal::default_host();
     let device = host
@@ -120,16 +133,17 @@ fn run_capture(
     tracing::info!(
         device_rate,
         channels,
+        echo_cancellation,
         "native mic capture started (NS + AGC)"
     );
 
-    let mut pipeline = CapturePipeline::new(device_rate, frame_samples);
+    let mut pipeline = CapturePipeline::new(device_rate, frame_samples, echo_cancellation);
     loop {
-        // Feed the echo canceller its far-end reference (what we're playing) before the near-end
-        // mic frame, so it can subtract our own audio. Drains all that's queued; ends quietly once
-        // the render sink is dropped on stop.
+        // Buffer the far-end reference (what we're playing); `process` consumes it 1:1 with capture
+        // frames so the AEC sees both at the same cadence. Drains all that's queued; ends quietly
+        // once the render sink is dropped on stop.
         while let Ok(render) = render_rx.try_recv() {
-            pipeline.process_render(&render);
+            pipeline.buffer_render(&render);
         }
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mono) => pipeline.process(&mono, frames),
@@ -152,6 +166,9 @@ fn run_capture(
 struct CapturePipeline {
     apm: AudioProcessing,
     device_rate: u32,
+    /// Whether the echo canceller is enabled (config `audio.echo_cancellation`). When off, the
+    /// far-end reference isn't fed and no echo is subtracted.
+    echo_cancellation: bool,
     /// Near-end (mic) samples awaiting a full 10 ms APM frame.
     apm_in: Vec<f32>,
     /// Far-end (render/playback) samples awaiting a full 10 ms APM frame.
@@ -160,10 +177,11 @@ struct CapturePipeline {
 }
 
 impl CapturePipeline {
-    fn new(device_rate: u32, frame_samples: usize) -> Self {
+    fn new(device_rate: u32, frame_samples: usize, echo_cancellation: bool) -> Self {
         let config = Config {
             // AEC3: remove Joi's own playback (picked up by the mic) so it doesn't read as speech.
-            echo_canceller: Some(EchoCanceller::default()),
+            // Off when `audio.echo_cancellation = false` (e.g. when using headphones).
+            echo_canceller: echo_cancellation.then(EchoCanceller::default),
             noise_suppression: Some(NoiseSuppression::default()),
             gain_controller2: Some(GainController2::default()),
             ..Default::default()
@@ -177,6 +195,7 @@ impl CapturePipeline {
         Self {
             apm,
             device_rate,
+            echo_cancellation,
             apm_in: Vec::new(),
             render_in: Vec::new(),
             out: FrameAccumulator::new(frame_samples),
@@ -191,6 +210,23 @@ impl CapturePipeline {
             .extend(resampled.iter().map(|&s| f32::from(s) / 32768.0));
 
         while self.apm_in.len() >= APM_FRAME {
+            // AEC3 needs the far-end (render) fed **every** capture frame at the same cadence —
+            // silence when nothing is playing. Feeding it only during agent speech (as we did)
+            // drifts its render/capture alignment until it cancels the *near-end* (user) voice,
+            // i.e. the mic stops getting through after a few turns. Pair one render frame (real, or
+            // silence) with each capture frame.
+            if self.echo_cancellation {
+                let render_frame: Vec<f32> = if self.render_in.len() >= APM_FRAME {
+                    self.render_in.drain(..APM_FRAME).collect()
+                } else {
+                    vec![0.0f32; APM_FRAME]
+                };
+                let mut render_out = vec![0.0f32; APM_FRAME];
+                let _ = self
+                    .apm
+                    .process_render_f32(&[&render_frame], &mut [&mut render_out]);
+            }
+
             let frame: Vec<f32> = self.apm_in.drain(..APM_FRAME).collect();
             let mut out = vec![0.0f32; APM_FRAME];
             if self
@@ -205,18 +241,21 @@ impl CapturePipeline {
         }
     }
 
-    /// Feed the far-end (playback) reference into the echo canceller. `render` is provider audio at
-    /// [`AudioFormat::OUTPUT`] (24 kHz); resampled to the 16 kHz APM rate and processed in 10 ms
-    /// frames, mirroring [`process`](Self::process). AEC3 estimates the speaker→mic delay itself.
-    fn process_render(&mut self, render: &[i16]) {
+    /// Buffer the far-end (playback) reference for the echo canceller — provider audio at
+    /// [`AudioFormat::OUTPUT`] (24 kHz), resampled to the 16 kHz APM rate. It is consumed 1:1 with
+    /// capture frames in [`process`](Self::process); here we only enqueue it. The backlog is capped
+    /// so that if the provider streams faster than real time, the far-end lead stays within AEC3's
+    /// delay-tracking range instead of growing unboundedly.
+    fn buffer_render(&mut self, render: &[i16]) {
+        if !self.echo_cancellation {
+            return; // AEC off: no reference needed; drained frames are simply dropped.
+        }
         let resampled = resample_linear(render, AudioFormat::OUTPUT.sample_rate, APM_RATE);
         self.render_in
             .extend(resampled.iter().map(|&s| f32::from(s) / 32768.0));
-
-        while self.render_in.len() >= APM_FRAME {
-            let frame: Vec<f32> = self.render_in.drain(..APM_FRAME).collect();
-            let mut out = vec![0.0f32; APM_FRAME];
-            let _ = self.apm.process_render_f32(&[&frame], &mut [&mut out]);
+        if self.render_in.len() > MAX_RENDER_BACKLOG {
+            let excess = self.render_in.len() - MAX_RENDER_BACKLOG;
+            self.render_in.drain(..excess);
         }
     }
 }

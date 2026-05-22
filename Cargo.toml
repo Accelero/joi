@@ -64,3 +64,8 @@ lto = "thin"
 # models (gemini-3.1-flash-live-preview) reject. Patched source in vendor/adk-realtime.
 [patch.crates-io]
 adk-realtime = { path = "vendor/adk-realtime" }
+# Patched sonora-aec3: upstream 0.1.0 panics (`slice index starts at N but ends at N-1`) when the
+# AEC adaptive filter *shrinks* (echo path shortens after a barge-in flush / audio stall) — its
+# `zero_filter` only handles growth. The vendored copy no-ops the shrink case. See
+# vendor/sonora-aec3/src/adaptive_fir_filter.rs (PATCH(joi)).
+sonora-aec3 = { path = "vendor/sonora-aec3" }

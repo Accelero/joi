@@ -157,6 +157,9 @@ pub struct AudioCfg {
     pub input_device: String,
     /// Output device name, or `default`.
     pub output_device: String,
+    /// Acoustic echo cancellation: subtract Joi's own playback from the mic so the model doesn't
+    /// hear itself (and interrupt itself) on speakers. Turn off when using headphones.
+    pub echo_cancellation: bool,
 }
 
 /// Screen-capture settings (SPEC §7.3, FR-11).
@@ -243,6 +246,7 @@ impl Default for Config {
                 frame_ms: 20,
                 input_device: "default".to_string(),
                 output_device: "default".to_string(),
+                echo_cancellation: true,
             },
             screen: ScreenCfg {
                 enabled: false,

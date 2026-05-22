@@ -32,6 +32,9 @@ pub struct MediaConfig {
     pub screen_max_width: u32,
     /// JPEG encode quality, 1–100.
     pub screen_quality: u8,
+    /// Acoustic echo cancellation on the mic (subtract Joi's own playback). Off → no far-end
+    /// reference is wired and the canceller is disabled.
+    pub echo_cancellation: bool,
 }
 
 /// Owns all native media for one app instance. Construct once with [`MediaEngine::new`] (within a
@@ -79,32 +82,41 @@ impl MediaEngine {
         }
     }
 
-    /// Start native mic capture for a session. Replaces any prior capture; the manager and the
-    /// mute gate both drop muted audio.
+    /// Start native mic capture for a session. **Idempotent**: if capture is already running this
+    /// is a no-op (the stream is not torn down and respawned). The manager and the mute gate both
+    /// drop muted audio.
     pub fn start_capture(&self) {
-        // A fresh render channel for this capture; the playback pump forwards the provider audio
-        // here as the echo-cancellation reference.
-        let (render_tx, render_rx) = std::sync::mpsc::channel::<Vec<i16>>();
-        if let Ok(mut sink) = self.render_sink.lock() {
-            *sink = Some(render_tx);
-        }
+        // Hold `capture` across the whole operation so concurrent calls can't both spawn (and so the
+        // lock order is capture → render_sink, matching `stop_capture` — no deadlock).
         if let Ok(mut cap) = self.capture.lock() {
+            if cap.is_some() {
+                return; // already capturing
+            }
+            // A fresh render channel; the playback pump forwards provider audio here as the
+            // echo-cancellation reference. Only wire the sink when AEC is on — otherwise the sender
+            // is dropped immediately and nothing is forwarded (capture won't use it anyway).
+            let (render_tx, render_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+            if let Ok(mut sink) = self.render_sink.lock() {
+                *sink = self.config.echo_cancellation.then_some(render_tx);
+            }
             *cap = Some(spawn_capture(
                 self.cap_tx.clone(),
                 self.config.frame_samples,
                 Arc::clone(&self.mic_muted),
                 render_rx,
+                self.config.echo_cancellation,
             ));
         }
     }
 
-    /// Stop native mic capture (no-op if not capturing).
+    /// Stop native mic capture. Idempotent (no-op if not capturing).
     pub fn stop_capture(&self) {
-        if let Ok(mut sink) = self.render_sink.lock() {
-            *sink = None; // stop forwarding the AEC reference
-        }
+        // Same lock order as `start_capture` (capture → render_sink) to avoid deadlock.
         if let Ok(mut cap) = self.capture.lock() {
             *cap = None;
+        }
+        if let Ok(mut sink) = self.render_sink.lock() {
+            *sink = None; // stop forwarding the AEC reference
         }
     }
 
@@ -114,8 +126,12 @@ impl MediaEngine {
     }
 
     /// Start native screen capture of the primary monitor; frames flow to the session.
+    /// **Idempotent**: a no-op if already sharing (no duplicate capture thread / doubled frames).
     pub fn start_screenshare(&self) {
         if let Ok(mut screen) = self.screen.lock() {
+            if screen.is_some() {
+                return; // already sharing
+            }
             *screen = Some(spawn_screen_capture(
                 self.frame_tx.clone(),
                 self.config.screen_fps,

@@ -27,6 +27,9 @@ audio:
   frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
   input_device: default
   output_device: default
+  # Acoustic echo cancellation: subtract Joi's own voice from the mic so it doesn't hear itself
+  # (and interrupt itself) on speakers. Set false if you use headphones (no echo to cancel).
+  echo_cancellation: true
 
 screen:
   enabled: false
