@@ -15,6 +15,12 @@ use crate::capture::{spawn_capture, CaptureHandle};
 use crate::playback::{spawn_playback, PlaybackCmd};
 use crate::screen::{spawn_screen_capture, ScreenHandle};
 
+/// Sink for the active capture's echo-cancellation reference: the provider audio Joi is playing.
+/// `Some` only while capturing; the playback pump forwards each chunk so the capture APM can
+/// subtract Joi's own voice from the mic (AEC). A `std::sync::mpsc` channel bridges the async pump
+/// to the synchronous capture thread.
+type RenderSink = Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<i16>>>>>;
+
 /// Native-media settings, sourced from `Config` by the composition root.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaConfig {
@@ -43,6 +49,8 @@ pub struct MediaEngine {
     frame_tx: tokio::sync::mpsc::Sender<VideoFrame>,
     /// Active screen capture (present only while sharing); dropping it stops capture.
     screen: Mutex<Option<ScreenHandle>>,
+    /// Echo-cancellation reference sink for the active capture (see [`RenderSink`]).
+    render_sink: RenderSink,
 }
 
 impl MediaEngine {
@@ -54,8 +62,9 @@ impl MediaEngine {
         let (cap_tx, cap_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<VideoFrame>(8);
         let mic_muted = Arc::new(AtomicBool::new(false));
+        let render_sink: RenderSink = Arc::new(Mutex::new(None));
 
-        spawn_playback_pump(&handle);
+        spawn_playback_pump(&handle, Arc::clone(&render_sink));
         spawn_audio_drain(handle.clone(), cap_rx);
         spawn_frame_drain(handle, frame_rx);
 
@@ -66,23 +75,34 @@ impl MediaEngine {
             mic_muted,
             frame_tx,
             screen: Mutex::new(None),
+            render_sink,
         }
     }
 
     /// Start native mic capture for a session. Replaces any prior capture; the manager and the
     /// mute gate both drop muted audio.
     pub fn start_capture(&self) {
+        // A fresh render channel for this capture; the playback pump forwards the provider audio
+        // here as the echo-cancellation reference.
+        let (render_tx, render_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+        if let Ok(mut sink) = self.render_sink.lock() {
+            *sink = Some(render_tx);
+        }
         if let Ok(mut cap) = self.capture.lock() {
             *cap = Some(spawn_capture(
                 self.cap_tx.clone(),
                 self.config.frame_samples,
                 Arc::clone(&self.mic_muted),
+                render_rx,
             ));
         }
     }
 
     /// Stop native mic capture (no-op if not capturing).
     pub fn stop_capture(&self) {
+        if let Ok(mut sink) = self.render_sink.lock() {
+            *sink = None; // stop forwarding the AEC reference
+        }
         if let Ok(mut cap) = self.capture.lock() {
             *cap = None;
         }
@@ -114,20 +134,27 @@ impl MediaEngine {
 }
 
 /// Provider audio → native cpal playback. The manager's empty-frame is the barge-in sentinel →
-/// flush the playback buffer immediately (FR-2).
-fn spawn_playback_pump(handle: &SessionManagerHandle) {
+/// flush the playback buffer immediately (FR-2). Each non-empty chunk is also forwarded to the
+/// active capture's echo-cancellation reference (so the mic's copy of Joi's own voice is removed).
+fn spawn_playback_pump(handle: &SessionManagerHandle, render_sink: RenderSink) {
     let playback_tx = spawn_playback();
     let mut audio_rx = handle.subscribe_audio();
     tokio::spawn(async move {
         loop {
             match audio_rx.recv().await {
+                Ok(pcm) if pcm.is_empty() => {
+                    if playback_tx.send(PlaybackCmd::Flush).is_err() {
+                        break;
+                    }
+                }
                 Ok(pcm) => {
-                    let cmd = if pcm.is_empty() {
-                        PlaybackCmd::Flush
-                    } else {
-                        PlaybackCmd::Pcm(pcm)
-                    };
-                    if playback_tx.send(cmd).is_err() {
+                    // Feed the AEC reference (what we're about to play) before playing it.
+                    if let Ok(sink) = render_sink.lock() {
+                        if let Some(tx) = sink.as_ref() {
+                            let _ = tx.send(pcm.clone());
+                        }
+                    }
+                    if playback_tx.send(PlaybackCmd::Pcm(pcm)).is_err() {
                         break;
                     }
                 }
