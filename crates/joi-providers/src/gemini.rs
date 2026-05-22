@@ -189,16 +189,15 @@ async fn pump_events(session: Arc<dyn AdkSession>, tx: EventSender) {
         .await;
 }
 
-/// Maps adk `ServerEvent`s to Joi [`SessionEvent`]s (NOTES-adk.md mapping table), accumulating the
-/// agent's output-transcript deltas into the cumulative line the UI renders.
-///
-/// Transcript/text deltas arrive incrementally, but the manager forwards each `Transcript.text`
-/// verbatim and the terminal rewrites the line in place — so we emit the **cumulative** text each
-/// time and a final line at the turn boundary (which is also what gets appended to history).
+/// Maps adk `ServerEvent`s to Joi [`SessionEvent`]s (NOTES-adk.md mapping table). The agent's
+/// output transcript is streamed **incrementally**: each provider delta becomes one
+/// `Transcript { final_: false }` carrying only that delta (the manager accumulates the line for
+/// history; the terminal appends). A turn boundary (turn-complete / barge-in) emits a final,
+/// empty-text `Transcript { final_: true }` to commit the line.
 #[derive(Default)]
 struct EventMapper {
-    /// The agent's transcript accumulated so far this turn.
-    agent: String,
+    /// Whether an agent transcript line is open (deltas streamed, not yet committed this turn).
+    agent_open: bool,
 }
 
 impl EventMapper {
@@ -208,34 +207,35 @@ impl EventMapper {
                 pcm: media::le_bytes_to_pcm16(&delta),
             }],
             ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
-                self.agent.push_str(&delta);
-                vec![self.agent_line(false)]
+                self.agent_open = true;
+                vec![agent_delta(delta, false)]
             }
-            // A provider that sends an explicit done (OpenAI-style) carries the full text.
+            // A provider that sends an explicit done (OpenAI-style) carries the full text. If we
+            // already streamed deltas, they cover it → just commit; otherwise emit it as the line.
             ServerEvent::TranscriptDone {
                 transcript: text, ..
             }
             | ServerEvent::TextDone { text, .. } => {
-                self.agent = text;
-                let line = self.agent_line(true);
-                self.agent.clear();
+                let line = agent_delta(if self.agent_open { String::new() } else { text }, true);
+                self.agent_open = false;
                 vec![line]
             }
-            // Server VAD detected the user speaking → commit any partial line and flush agent
+            // Server VAD detected the user speaking → commit any open line and flush agent
             // playback (barge-in, FR-2).
             ServerEvent::SpeechStarted { .. } => {
                 tracing::debug!("gemini barge-in: model response interrupted by user speech");
-                let mut out = self.finalize_pending();
+                let mut out = self.close_line();
                 out.push(SessionEvent::TurnEvent(TurnEvent::Interrupted));
                 out
             }
             ServerEvent::ResponseCreated { .. } => {
-                self.agent.clear();
-                vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)]
+                let mut out = self.close_line();
+                out.push(SessionEvent::TurnEvent(TurnEvent::TurnStarted));
+                out
             }
-            // Gemini signals turn end with no transcript-done; commit the accumulated line here.
+            // Gemini signals turn end with no transcript-done; commit the open line here.
             ServerEvent::ResponseDone { .. } => {
-                let mut out = self.finalize_pending();
+                let mut out = self.close_line();
                 out.push(SessionEvent::TurnEvent(TurnEvent::TurnComplete));
                 out
             }
@@ -252,22 +252,22 @@ impl EventMapper {
         }
     }
 
-    /// Emit a final agent line for the accumulated transcript if any, clearing the buffer.
-    fn finalize_pending(&mut self) -> Vec<SessionEvent> {
-        if self.agent.is_empty() {
+    /// Commit the open agent line (empty-text final) if one is open; no-op otherwise.
+    fn close_line(&mut self) -> Vec<SessionEvent> {
+        if !self.agent_open {
             return vec![];
         }
-        let line = self.agent_line(true);
-        self.agent.clear();
-        vec![line]
+        self.agent_open = false;
+        vec![agent_delta(String::new(), true)]
     }
+}
 
-    fn agent_line(&self, final_: bool) -> SessionEvent {
-        SessionEvent::Transcript {
-            speaker: Speaker::Agent,
-            text: self.agent.clone(),
-            final_,
-        }
+/// One incremental agent transcript event (the manager accumulates the line; the UI appends).
+fn agent_delta(text: String, final_: bool) -> SessionEvent {
+    SessionEvent::Transcript {
+        speaker: Speaker::Agent,
+        text,
+        final_,
     }
 }
 
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_delta_is_a_partial_agent_line() {
+    fn transcript_delta_is_an_incremental_agent_line() {
         match EventMapper::default()
             .map(transcript_delta("hello"))
             .as_slice()
@@ -379,32 +379,33 @@ mod tests {
                 text,
                 final_: false,
             }] => assert_eq!(text, "hello"),
-            other => panic!("expected partial agent transcript, got {other:?}"),
+            other => panic!("expected incremental agent transcript, got {other:?}"),
         }
     }
 
     #[test]
-    fn output_transcript_deltas_accumulate_and_finalize_on_turn_end() {
+    fn output_transcript_streams_deltas_and_commits_on_turn_end() {
         let mut m = EventMapper::default();
-        // Deltas are incremental; each emitted partial carries the cumulative text.
+        // Each delta is forwarded verbatim — incrementally, not cumulatively.
         assert!(matches!(
             m.map(transcript_delta("Hel")).as_slice(),
             [SessionEvent::Transcript { text, final_: false, .. }] if text == "Hel"
         ));
         assert!(matches!(
             m.map(transcript_delta("lo there")).as_slice(),
-            [SessionEvent::Transcript { text, final_: false, .. }] if text == "Hello there"
+            [SessionEvent::Transcript { text, final_: false, .. }] if text == "lo there"
         ));
-        // Turn end commits the full line, then reports the turn complete.
+        // Turn end commits the line (empty-text final — the manager accumulated it), then reports
+        // the turn complete.
         match m.map(response_done()).as_slice() {
             [SessionEvent::Transcript {
                 speaker: Speaker::Agent,
                 text,
                 final_: true,
-            }, SessionEvent::TurnEvent(TurnEvent::TurnComplete)] => assert_eq!(text, "Hello there"),
-            other => panic!("expected final line + TurnComplete, got {other:?}"),
+            }, SessionEvent::TurnEvent(TurnEvent::TurnComplete)] => assert!(text.is_empty()),
+            other => panic!("expected empty final + TurnComplete, got {other:?}"),
         }
-        // Buffer reset: a bare turn end now emits only TurnComplete (no empty transcript).
+        // Line already committed: a bare turn end now emits only TurnComplete.
         assert!(matches!(
             m.map(response_done()).as_slice(),
             [SessionEvent::TurnEvent(TurnEvent::TurnComplete)]
@@ -412,20 +413,19 @@ mod tests {
     }
 
     #[test]
-    fn barge_in_commits_the_partial_line() {
+    fn barge_in_commits_the_open_line() {
         let mut m = EventMapper::default();
         let _ = m.map(transcript_delta("partial reply"));
         let speech = ServerEvent::SpeechStarted {
             event_id: "e".into(),
             audio_start_ms: 0,
         };
+        // Open line is committed (empty-text final), then the barge-in is surfaced.
         match m.map(speech).as_slice() {
             [SessionEvent::Transcript {
                 text, final_: true, ..
-            }, SessionEvent::TurnEvent(TurnEvent::Interrupted)] => {
-                assert_eq!(text, "partial reply");
-            }
-            other => panic!("expected committed partial + Interrupted, got {other:?}"),
+            }, SessionEvent::TurnEvent(TurnEvent::Interrupted)] => assert!(text.is_empty()),
+            other => panic!("expected empty final + Interrupted, got {other:?}"),
         }
     }
 

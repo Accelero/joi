@@ -37,18 +37,22 @@ export function Terminal({ ref }: { ref?: Ref<TerminalHandle> }): React.JSX.Elem
       writeTranscript(speaker, text, final) {
         const term = termRef.current;
         if (!term) return;
-        // Close the previous line if the speaker changed mid-stream.
-        if (openRef.current !== null && openRef.current !== speaker) {
-          term.write("\r\n");
-          openRef.current = null;
-        }
         const label = speaker === "user" ? "you" : "joi";
-        term.write(`\x1b[2K\r${SPEAKER_COLOR[speaker]}${label}${RESET}  ${text}`);
+
+        // Starting a line for this speaker (first ever, or speaker changed): close the previous
+        // line and open a new labeled one.
+        if (openRef.current !== speaker) {
+          if (openRef.current !== null) term.write("\r\n");
+          term.write(`${SPEAKER_COLOR[speaker]}${label}${RESET}  `);
+          openRef.current = speaker;
+        }
+
+        // `text` is an incremental delta — append it (wraps naturally, no redraw).
+        if (text.length > 0) term.write(text);
+
         if (final) {
           term.write("\r\n");
           openRef.current = null;
-        } else {
-          openRef.current = speaker;
         }
       },
       writeError(message) {

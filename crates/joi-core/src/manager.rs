@@ -204,6 +204,9 @@ pub struct SessionManager {
     state: AppState,
     mic_muted: bool,
     last_resumption_handle: Option<String>,
+    /// Accumulates the current transcript line's incremental deltas so the full line can be
+    /// appended to history when it finalizes (the provider streams deltas; SPEC §11.3).
+    transcript_line: String,
 }
 
 impl SessionManager {
@@ -230,6 +233,7 @@ impl SessionManager {
             state: AppState::Stopped,
             mic_muted: false,
             last_resumption_handle: None,
+            transcript_line: String::new(),
         };
         tokio::spawn(actor.run(cmd_rx, ev_rx));
         SessionManagerHandle {
@@ -411,13 +415,17 @@ impl SessionManager {
                 text,
                 final_,
             } => {
+                // `text` is an incremental delta: accumulate the line for history, forward the
+                // delta to the UI (which appends it). On finalize, persist the whole line.
+                self.transcript_line.push_str(&text);
                 self.emit(UiEvent::Transcript {
                     speaker,
-                    text: text.clone(),
+                    text,
                     final_,
                 });
                 if final_ {
-                    self.append_turn(speaker, text).await;
+                    let line = std::mem::take(&mut self.transcript_line);
+                    self.append_turn(speaker, line).await;
                 }
             }
             SessionEvent::TurnEvent(turn) => {
@@ -507,14 +515,24 @@ mod tests {
     use tokio::sync::broadcast::error::RecvError;
 
     /// A minimal scripted session: each `send_text`/`send_audio` pushes deterministic events.
+    /// `closed` counts `close()` calls so tests can prove Stop tears the session down.
     struct ScriptedSession {
         tx: Option<EventSender>,
         rx: Option<EventReceiver>,
+        closed: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl ScriptedSession {
         fn new() -> Self {
-            Self { tx: None, rx: None }
+            Self::with_close_tracker(Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+        }
+
+        fn with_close_tracker(closed: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self {
+                tx: None,
+                rx: None,
+                closed,
+            }
         }
     }
 
@@ -551,9 +569,20 @@ mod tests {
             })
             .await
             .ok();
+            // Agent reply streamed as incremental deltas, then committed with an empty-text final —
+            // mirrors the real provider path (the manager accumulates the line for history).
+            for delta in ["ec", "ho: ", text] {
+                tx.send(SessionEvent::Transcript {
+                    speaker: Speaker::Agent,
+                    text: delta.to_string(),
+                    final_: false,
+                })
+                .await
+                .ok();
+            }
             tx.send(SessionEvent::Transcript {
                 speaker: Speaker::Agent,
-                text: format!("echo: {text}"),
+                text: String::new(),
                 final_: true,
             })
             .await
@@ -572,6 +601,8 @@ mod tests {
 
         async fn close(&mut self) -> Result<(), SessionError> {
             self.tx = None; // ends the pump
+            self.closed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -606,6 +637,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_closes_the_session_so_billing_ends() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let closed = Arc::new(AtomicUsize::new(0));
+        let factory_closed = Arc::clone(&closed);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(TestClock::new(1_000)),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_close_tracker(Arc::clone(
+                    &factory_closed,
+                ))) as Box<dyn RealtimeSession>
+            }),
+        );
+
+        handle.start(false).await.unwrap();
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            0,
+            "session closed while running"
+        );
+
+        handle.stop(false).await.unwrap();
+        // Stop must close the provider session (the WebSocket) so the provider stops billing.
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            1,
+            "Stop must close the session"
+        );
+        assert_eq!(handle.state().await.unwrap(), AppState::Stopped);
+    }
+
+    #[tokio::test]
     async fn start_running_stop_transitions() {
         let (handle, _history) = spawn_manager();
         let mut ui = handle.subscribe();
@@ -635,6 +699,7 @@ mod tests {
         handle.send_text("hi").await.unwrap();
 
         let mut user_seen = false;
+        let mut agent_text = String::new();
         let mut agent_seen = false;
         let mut history_seen = false;
         for _ in 0..20 {
@@ -646,12 +711,16 @@ mod tests {
                 } if text == "hi" => {
                     user_seen = true;
                 }
+                // Agent line arrives as incremental deltas; the full text is their concatenation.
                 UiEvent::Transcript {
                     speaker: Speaker::Agent,
                     text,
-                    final_: true,
-                } if text == "echo: hi" => {
-                    agent_seen = true;
+                    final_,
+                } => {
+                    agent_text.push_str(&text);
+                    if final_ && agent_text == "echo: hi" {
+                        agent_seen = true;
+                    }
                 }
                 UiEvent::History(meta) if meta.turns >= 2 => history_seen = true,
                 _ => {}
@@ -661,7 +730,7 @@ mod tests {
             }
         }
         assert!(user_seen, "user transcript not observed");
-        assert!(agent_seen, "agent transcript not observed");
+        assert!(agent_seen, "agent transcript not assembled from deltas");
         assert!(history_seen, "history meta not observed");
 
         let stored = history
