@@ -5,8 +5,8 @@
 //! callback `RealtimeRunner`): its `&self` sends + `next_event()` let us pump the provider's events
 //! into Joi's owned [`EventReceiver`], so nothing about adk leaks past [`RealtimeSession`].
 //!
-//! The API key is injected at construction from the [`joi_core::secrets::SecretStore`] (SPEC SEC-5)
-//! — it never travels through [`SessionConfig`].
+//! The API key is injected at construction (the factory reads it from `config.live_api.gemini`) and
+//! held as a [`secrecy::SecretString`] — it never travels through [`SessionConfig`].
 
 use std::sync::Arc;
 

@@ -48,7 +48,7 @@ let config  = RealtimeConfig::default()
 let session /* : BoxedSession = Arc<dyn RealtimeSession> */ = model.connect(config).await?;
 ```
 
-⚠️ **Model id mismatch to reconcile:** our `joi.example.toml` uses
+⚠️ **Model id mismatch to reconcile:** our `joi.example.yaml` uses
 `gemini-live-2.5-flash-native-audio`; the adk example uses the `models/…-latest` form. The adapter
 must pass whatever Gemini's BiDi endpoint accepts — confirm the exact id during the live smoke test
 and update the config default if needed.

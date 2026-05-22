@@ -17,5 +17,10 @@ dist
 .env
 .env.local
 
+# Real app config lives at ~/.config/joi/joi.yaml (outside the repo). If one is ever placed in the
+# repo's config/ dir, keep it out of source control — only the example is tracked.
+/config/*
+!/config/joi.example.yaml
+
 # Tauri build-generated schemas
 /src-tauri/gen/

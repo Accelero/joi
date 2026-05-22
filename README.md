@@ -13,7 +13,7 @@ The verifiable, fully-tested backbone (M0 foundation + the M1 core loop on a moc
 
 | Crate | Contents |
 |---|---|
-| **`joi-core`** | Pure domain + port traits. `Config` (figment: defaults → TOML → `JOI_` env, XDG paths, validation), `Clock`, `SecretStore` (redacting `SecretString`), `RealtimeSession` + `SessionEvent`/`UiEvent`, `HistoryStore` (`InMemory` + bounded `Jsonl`), `ScreenSource`, `media` framing/PCM conversions, and the **`SessionManager` actor** (owns the session, `select!`s commands vs. the provider event stream, fans out `UiEvent`s, appends finalized transcripts). The `[POST]` tools seam exists, unused. |
+| **`joi-core`** | Pure domain + port traits. `Config` (figment: defaults → YAML file → `JOI_`/`GEMINI_*` env, env wins; XDG paths, validation; provider key lives at `live_api.gemini.api_key` as a redacting `ApiKey`), `Clock`, `RealtimeSession` + `SessionEvent`/`UiEvent`, `HistoryStore` (`InMemory` + bounded `Jsonl`), `ScreenSource`, `media` framing/PCM conversions, and the **`SessionManager` actor** (owns the session, `select!`s commands vs. the provider event stream, fans out `UiEvent`s, appends finalized transcripts). The `[POST]` tools seam exists, unused. |
 | **`joi-providers`** | `MockSession` (scripted, no network), the `OpenAIAdapter` compile-only stub (SPEC §4.4), and the `GeminiAdapter` stub awaiting the M2 adk-rust spike. |
 | **`joi-testkit`** | `run_conformance` — one ordered scenario run against any adapter; proves provider-agnosticism (passes against the mock, verifies the OpenAI stub). |
 | **frontend (`src/`)** | Vite + React + TS + Tailwind v4 scaffold. The testable media DSP (`media/dsp.ts`: downsample, PCM framing, jitter buffer, transcript throttle) and the typed IPC boundary (`ipc.ts`) mirroring the Rust contract, both unit-tested with Vitest. |
@@ -22,11 +22,10 @@ Everything above passes `cargo fmt`/`clippy -D warnings`/`test` and `bun run typ
 
 ## Not yet built (and why)
 
-- **Tauri shell (`src-tauri/`)** — the composition root, `#[tauri::command]` handlers, the binary
-  `tauri::ipc::Channel` media transport, and the keychain `SecretStore`. Compiling Tauri needs the
-  system WebKitGTK libraries (`libwebkit2gtk-4.1-dev`) for the UI webview and ALSA dev headers
-  (`alsa-lib`/`libasound2-dev`) for native cpal audio — see `scripts/setup-linux.sh`. Media is
-  native (cpal + xcap), so **no GStreamer is needed**.
+- **Build system deps** — compiling the Tauri shell needs the system WebKitGTK libraries
+  (`libwebkit2gtk-4.1-dev`) for the UI webview and ALSA dev headers (`alsa-lib`/`libasound2-dev`)
+  for native cpal audio — see `scripts/setup-linux.sh`. Media is native (cpal + xcap), so **no
+  GStreamer is needed**.
 - **M0 media spike, M2 (Gemini/adk-rust), M3 lifecycle persistence wiring, M4 screen capture
   pipelines, M5 packaging** — these need the running webview, a live API key, or the screen-capture
   backends. The core seams for all of them are in place; see `PLAN.md`.
@@ -54,9 +53,19 @@ Full setup for the eventual Tauri build (system deps + tauri-cli):
 
 ### Config
 
-Copy `config/joi.example.toml` → `~/.config/joi/joi.toml`. Any field overrides via `JOI_`-prefixed
-env vars (nested with `__`, e.g. `JOI_AUDIO__FRAME_MS=30`). **The API key is never in config** — it
-lives in the OS keychain; for dev, `GEMINI_API_KEY` is read at runtime and never persisted.
+Config is a **YAML** file at `~/.config/joi/joi.yaml`; Joi writes it with defaults on first run if
+it's missing (see `config/joi.example.yaml` for the documented schema). Every field can be set in
+the file **or** via a `JOI_`-prefixed env var (nested with `__`, e.g. `JOI_AUDIO__FRAME_MS=30`), and
+**env takes precedence over the file**.
+
+The Gemini API key lives at `live_api.gemini.api_key`. It can be set in the YAML, but **prefer the
+environment** so it isn't stored in plaintext on disk:
+
+- `GEMINI_API_KEY=…` (the convenient, conventional name), or
+- `JOI_LIVE_API__GEMINI__API_KEY=…` (the uniform nested form).
+
+Env always wins over the file. The model is `live_api.gemini.model` (or `GEMINI_MODEL`) — set the
+exact id your key can access.
 
 ### Display-server note (Linux)
 

@@ -54,13 +54,13 @@ impl SessionConfig {
         resumption_handle: Option<String>,
     ) -> Self {
         Self {
-            model: cfg.provider.model.clone(),
-            system_instruction: cfg.provider.system_instruction.clone(),
-            voice: cfg.provider.voice.clone(),
+            model: cfg.live_api.gemini.model.clone(),
+            system_instruction: cfg.live_api.gemini.system_instruction.clone(),
+            voice: cfg.live_api.gemini.voice.clone(),
             input_audio: AudioFormat::INPUT,
             output_audio: AudioFormat::OUTPUT,
-            enable_input_transcription: cfg.provider.input_transcription,
-            enable_output_transcription: cfg.provider.output_transcription,
+            enable_input_transcription: cfg.live_api.gemini.input_transcription,
+            enable_output_transcription: cfg.live_api.gemini.output_transcription,
             initial_context,
             resumption_handle,
             tools: Vec::new(),

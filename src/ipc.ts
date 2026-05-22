@@ -71,6 +71,5 @@ export const commands = {
   startScreenshare: () => tauriInvoke<void>("start_screenshare"),
   stopScreenshare: () => tauriInvoke<void>("stop_screenshare"),
   hasApiKey: () => tauriInvoke<HasApiKeyResult>("has_api_key"),
-  setApiKey: (key: string) => tauriInvoke<void>("set_api_key", { key }),
   ping: () => tauriInvoke<string>("ping"),
 } as const;

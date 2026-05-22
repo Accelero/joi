@@ -14,11 +14,11 @@ async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_norway.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 figment.workspace = true
 directories.workspace = true
-secrecy.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

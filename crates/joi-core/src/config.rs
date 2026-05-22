@@ -1,11 +1,16 @@
-//! Layered configuration (defaults → TOML file → `JOI_` env), loaded once at startup.
+//! Layered configuration (defaults → YAML file → `JOI_` env), loaded once at startup.
 //!
-//! Precedence, lowest to highest (PLAN §4.1): built-in [`Config::default`], a TOML file, then
-//! `JOI_`-prefixed environment variables (nested via `__`). CLI flags (`--config`/`--log`) are
-//! applied by the binary *before* this loader runs.
+//! Precedence, lowest to highest (PLAN §4.1): built-in [`Config::default`], a YAML file, then
+//! `JOI_`-prefixed environment variables (nested via `__`) — **env always wins over the file**. CLI
+//! flags (`--config`/`--log`) are applied by the binary *before* this loader runs. Every config
+//! value can therefore be set in the YAML file or via the environment.
 //!
-//! **Secrets are never in config** (SPEC SEC-5) — the API key lives only in a
-//! [`crate::secrets::SecretStore`].
+//! On startup the binary writes a defaults file to the config path if none exists
+//! ([`Config::write_default_if_missing`]), so users have a documented YAML to edit.
+//!
+//! The provider API key may be set in the file (`live_api.gemini.api_key`) or, preferably, via the
+//! `GEMINI_API_KEY` (or `JOI_LIVE_API__GEMINI__API_KEY`) environment variable — env wins. It is held
+//! as a redacting [`ApiKey`] so it never leaks into logs.
 //!
 //! `joi-core` is the single source of truth for XDG paths (PLAN §4.2): the binary must pass these
 //! resolved paths in rather than re-deriving them, to avoid divergent locations.
@@ -13,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
+    providers::{Env, Serialized},
     Figment,
 };
 use serde::{Deserialize, Serialize};
@@ -74,13 +79,61 @@ impl LogLevel {
     }
 }
 
-/// Provider + model + persona settings (SPEC §13).
+/// Provider API key, settable in the YAML file or via env. Redacts in `Debug` so it can't leak into
+/// logs; empty means unset. Unlike `secrecy::SecretString` it supports the serde + `Eq` derives
+/// [`Config`] needs (and the key may legitimately live in config now).
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ApiKey(String);
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "ApiKey(unset)"
+        } else {
+            "ApiKey(<redacted>)"
+        })
+    }
+}
+
+impl ApiKey {
+    /// Wrap a raw key string.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+
+    /// The raw key, or `None` when unset/empty.
+    #[must_use]
+    pub fn get(&self) -> Option<&str> {
+        (!self.0.is_empty()).then_some(self.0.as_str())
+    }
+
+    /// Whether a non-empty key is set.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        !self.0.is_empty()
+    }
+}
+
+/// Live-API configuration: which provider to drive and its per-provider settings (SPEC §13). Only
+/// `gemini` is functional in the MVP, so it is the single provider block today.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ProviderCfg {
-    /// Which adapter to use.
-    pub name: ProviderName,
-    /// Model id, e.g. `gemini-live-2.5-flash-native-audio`.
+pub struct LiveApiCfg {
+    /// Which live-API provider to use.
+    pub provider: ProviderName,
+    /// Gemini Live settings (used when `provider` is `gemini`).
+    pub gemini: GeminiCfg,
+}
+
+/// Gemini Live provider settings. The API key may be set here or via the `GEMINI_API_KEY` /
+/// `JOI_LIVE_API__GEMINI__API_KEY` environment variable (env wins).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GeminiCfg {
+    /// Exact model id, e.g. `gemini-live-2.5-flash-native-audio`.
     pub model: String,
+    /// API key. Empty = unset; prefer providing it via the environment.
+    #[serde(default)]
+    pub api_key: ApiKey,
     /// Optional named voice.
     pub voice: Option<String>,
     /// System instruction / persona seeded into every session.
@@ -156,8 +209,8 @@ pub struct LoggingCfg {
 /// The complete, validated application configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
-    /// Provider + model + persona.
-    pub provider: ProviderCfg,
+    /// Live-API provider selection + per-provider settings.
+    pub live_api: LiveApiCfg,
     /// Audio I/O.
     pub audio: AudioCfg,
     /// Screen capture.
@@ -173,13 +226,16 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            provider: ProviderCfg {
-                name: ProviderName::Gemini,
-                model: "gemini-live-2.5-flash-native-audio".to_string(),
-                voice: Some("Aoede".to_string()),
-                system_instruction: "You are Joi, a concise local voice companion.".to_string(),
-                input_transcription: true,
-                output_transcription: true,
+            live_api: LiveApiCfg {
+                provider: ProviderName::Gemini,
+                gemini: GeminiCfg {
+                    model: "gemini-live-2.5-flash-native-audio".to_string(),
+                    api_key: ApiKey::default(),
+                    voice: Some("Aoede".to_string()),
+                    system_instruction: "You are Joi, a concise local voice companion.".to_string(),
+                    input_transcription: true,
+                    output_transcription: true,
+                },
             },
             audio: AudioCfg {
                 input_sample_rate: 16_000,
@@ -217,7 +273,7 @@ impl Default for Config {
 /// XDG-resolved paths Joi uses. The binary passes these in rather than re-deriving them (m-1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
-    /// Default config file (`~/.config/joi/joi.toml`).
+    /// Default config file (`~/.config/joi/joi.yaml`).
     pub config_file: PathBuf,
     /// Data directory (`~/.local/share/joi/`).
     pub data_dir: PathBuf,
@@ -242,7 +298,7 @@ impl ProjectPaths {
             .unwrap_or_else(|| dirs.data_dir())
             .to_path_buf();
         Ok(Self {
-            config_file: dirs.config_dir().join("joi.toml"),
+            config_file: dirs.config_dir().join("joi.yaml"),
             history_dir: data_dir.join("history"),
             data_dir,
             log_dir,
@@ -251,21 +307,79 @@ impl ProjectPaths {
 }
 
 impl Config {
-    /// Load configuration: defaults → TOML file (if present) → `JOI_` env, then validate.
+    /// Load configuration: defaults → YAML file (if present) → `JOI_` env, then validate.
     ///
-    /// `cli_path` overrides the default config-file location. Unset path-typed fields
-    /// (`history.dir`, `logging.file`) are resolved against XDG locations.
+    /// `cli_path` overrides the default config-file location. If no file exists there yet, a
+    /// defaults file is written first (best-effort) so the user has something to edit. Unset
+    /// path-typed fields (`history.dir`, `logging.file`) are resolved against XDG locations.
     pub fn load(cli_path: Option<&Path>) -> Result<Self, ConfigError> {
         let paths = ProjectPaths::resolve()?;
         let file = cli_path.map_or_else(|| paths.config_file.clone(), Path::to_path_buf);
-        Self::load_from(&file, &paths)
+        if let Err(e) = Self::write_default_if_missing(&file) {
+            tracing::warn!("could not write default config to {}: {e}", file.display());
+        }
+        let mut cfg = Self::load_from(&file, &paths)?;
+        // Conventional provider env shortcuts win over the file (the nested `JOI_LIVE_API__GEMINI__*`
+        // form is already handled by `load_from`'s figment env layer).
+        cfg.apply_provider_env_overrides();
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Overlay the conventional provider env vars `GEMINI_API_KEY` and `GEMINI_MODEL` onto
+    /// `live_api.gemini.{api_key,model}`. Non-empty env values win over whatever the file set.
+    fn apply_provider_env_overrides(&mut self) {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            if !key.is_empty() {
+                self.live_api.gemini.api_key = ApiKey::new(key);
+            }
+        }
+        if let Ok(model) = std::env::var("GEMINI_MODEL") {
+            if !model.is_empty() {
+                self.live_api.gemini.model = model;
+            }
+        }
+    }
+
+    /// Write the built-in defaults as YAML to `path` if no config file exists there yet (creating
+    /// parent dirs). Gives the user a documented file to edit; never overwrites an existing one.
+    /// This is the one place Joi writes config — secrets are never included (they come from the
+    /// environment).
+    pub fn write_default_if_missing(path: &Path) -> Result<(), ConfigError> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Path {
+                path: parent.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        }
+        let yaml = serde_norway::to_string(&Config::default())
+            .map_err(|e| ConfigError::Load(e.to_string()))?;
+        std::fs::write(path, yaml).map_err(|e| ConfigError::Path {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        tracing::info!("wrote default config to {}", path.display());
+        Ok(())
     }
 
     /// The path-resolution + figment merge used by [`Config::load`], with paths injected so it is
     /// testable without touching the real environment.
+    ///
+    /// The YAML file is parsed with `serde_norway` and merged (deep, over the defaults) via figment;
+    /// `JOI_` env vars are layered last and win. A missing file is treated as empty.
     pub fn load_from(file: &Path, paths: &ProjectPaths) -> Result<Self, ConfigError> {
-        let mut cfg: Config = Figment::from(Serialized::defaults(Config::default()))
-            .merge(Toml::file(file))
+        let mut figment = Figment::from(Serialized::defaults(Config::default()));
+        if file.exists() {
+            let contents = std::fs::read_to_string(file)
+                .map_err(|e| ConfigError::Load(format!("{}: {e}", file.display())))?;
+            let value: serde_norway::Value =
+                serde_norway::from_str(&contents).map_err(|e| ConfigError::Load(e.to_string()))?;
+            figment = figment.merge(Serialized::defaults(value));
+        }
+        let mut cfg: Config = figment
             .merge(Env::prefixed("JOI_").split("__"))
             .extract()
             .map_err(|e| ConfigError::Load(e.to_string()))?;
@@ -288,8 +402,8 @@ impl Config {
             reason: reason.to_string(),
         };
 
-        if self.provider.model.trim().is_empty() {
-            return Err(invalid("provider.model", "must not be empty"));
+        if self.live_api.gemini.model.trim().is_empty() {
+            return Err(invalid("live_api.gemini.model", "must not be empty"));
         }
         if self.audio.input_sample_rate == 0 || self.audio.output_sample_rate == 0 {
             return Err(invalid("audio.*_sample_rate", "must be > 0"));
@@ -321,7 +435,7 @@ mod tests {
 
     fn test_paths() -> ProjectPaths {
         ProjectPaths {
-            config_file: PathBuf::from("/nonexistent/joi.toml"),
+            config_file: PathBuf::from("/nonexistent/joi.yaml"),
             data_dir: PathBuf::from("/data"),
             history_dir: PathBuf::from("/data/history"),
             log_dir: PathBuf::from("/state"),
@@ -335,69 +449,142 @@ mod tests {
 
     #[test]
     fn example_config_loads_and_validates() {
-        // Guards config/joi.example.toml against drift from the Config schema.
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.toml");
+        // Guards config/joi.example.yaml against drift from the Config schema.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.yaml");
         let cfg = Config::load_from(&path, &test_paths()).unwrap();
         // Assert only fields the parallel Jail tests never set via env (they mutate real process
         // env, which figment reads), to avoid cross-test races.
-        assert_eq!(cfg.provider.name, ProviderName::Gemini);
-        assert_eq!(cfg.provider.voice.as_deref(), Some("Aoede"));
+        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+        assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
+        // The template leaves the key empty — it comes from the environment.
+        assert!(!cfg.live_api.gemini.api_key.is_set());
     }
 
     #[test]
     fn missing_file_yields_defaults_with_resolved_paths() {
         let paths = test_paths();
-        let cfg = Config::load_from(Path::new("/nonexistent/joi.toml"), &paths).unwrap();
-        assert_eq!(cfg.provider.name, ProviderName::Gemini);
+        let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
         assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/history")));
         assert_eq!(cfg.logging.file, Some(PathBuf::from("/state/joi.log")));
     }
 
     #[test]
+    fn writes_default_file_when_missing_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        // A nested path exercises parent-dir creation.
+        let path = dir.path().join("nested/joi.yaml");
+        assert!(!path.exists());
+        Config::write_default_if_missing(&path).unwrap();
+        assert!(path.exists());
+        // The written file round-trips back to the defaults.
+        let cfg = Config::load_from(&path, &test_paths()).unwrap();
+        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+        // A second call must not overwrite or error.
+        Config::write_default_if_missing(&path).unwrap();
+    }
+
+    #[test]
     fn file_overrides_defaults() {
         figment::Jail::expect_with(|jail| {
+            // YAML body starts at column 0 — indentation is significant.
             jail.create_file(
-                "joi.toml",
-                r#"
-                [provider]
-                name = "mock"
-                model = "test-model"
-                system_instruction = "hi"
-                input_transcription = false
-                output_transcription = false
-
-                [audio]
-                frame_ms = 40
-                "#,
+                "joi.yaml",
+                r"
+live_api:
+  provider: mock
+  gemini:
+    model: test-model
+audio:
+  frame_ms: 40
+",
             )?;
-            let cfg = Config::load_from(Path::new("joi.toml"), &test_paths()).unwrap();
-            assert_eq!(cfg.provider.name, ProviderName::Mock);
-            assert_eq!(cfg.provider.model, "test-model");
+            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.provider, ProviderName::Mock);
+            assert_eq!(cfg.live_api.gemini.model, "test-model");
             assert_eq!(cfg.audio.frame_ms, 40);
-            // unspecified fields keep their defaults
+            // unspecified nested fields keep their defaults (deep merge)
+            assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
             assert_eq!(cfg.audio.input_sample_rate, 16_000);
             Ok(())
         });
     }
 
     #[test]
+    fn api_key_from_file_and_nested_joi_env() {
+        // In the file…
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "joi.yaml",
+                r"
+live_api:
+  gemini:
+    api_key: file-key
+",
+            )?;
+            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.gemini.api_key.get(), Some("file-key"));
+            Ok(())
+        });
+        // …and the nested JOI_ env form wins over the file.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "joi.yaml",
+                r"
+live_api:
+  gemini:
+    api_key: file-key
+",
+            )?;
+            jail.set_env("JOI_LIVE_API__GEMINI__API_KEY", "env-key");
+            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.gemini.api_key.get(), Some("env-key"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn gemini_convenience_env_overrides_win() {
+        // `GEMINI_API_KEY`/`GEMINI_MODEL` map onto live_api.gemini and beat the file value.
+        // No other joi-core test reads these vars, so set/remove here is race-free.
+        std::env::set_var("GEMINI_API_KEY", "env-secret");
+        std::env::set_var("GEMINI_MODEL", "env-model");
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.api_key = ApiKey::new("file-secret");
+        cfg.live_api.gemini.model = "file-model".to_string();
+        cfg.apply_provider_env_overrides();
+        assert_eq!(cfg.live_api.gemini.api_key.get(), Some("env-secret"));
+        assert_eq!(cfg.live_api.gemini.model, "env-model");
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("GEMINI_MODEL");
+    }
+
+    #[test]
+    fn api_key_redacts_in_debug() {
+        let rendered = format!("{:?}", ApiKey::new("super-secret-key-987"));
+        assert!(
+            !rendered.contains("super-secret-key-987"),
+            "Debug leaked: {rendered}"
+        );
+        assert_eq!(format!("{:?}", ApiKey::default()), "ApiKey(unset)");
+    }
+
+    #[test]
     fn env_overrides_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.toml",
-                r#"
-                [provider]
-                name = "mock"
-                model = "from-file"
-                system_instruction = "hi"
-                input_transcription = false
-                output_transcription = false
-                "#,
+                "joi.yaml",
+                r"
+live_api:
+  provider: mock
+  gemini:
+    model: from-file
+",
             )?;
-            jail.set_env("JOI_PROVIDER__MODEL", "from-env");
+            jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "from-env");
             jail.set_env("JOI_AUDIO__FRAME_MS", "30");
-            let cfg = Config::load_from(Path::new("joi.toml"), &test_paths()).unwrap();
-            assert_eq!(cfg.provider.model, "from-env");
+            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.gemini.model, "from-env");
             assert_eq!(cfg.audio.frame_ms, 30);
             Ok(())
         });
@@ -407,13 +594,13 @@ mod tests {
     fn invalid_value_is_rejected() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.toml",
+                "joi.yaml",
                 r"
-                [audio]
-                frame_ms = 500
-                ",
+audio:
+  frame_ms: 500
+",
             )?;
-            let err = Config::load_from(Path::new("joi.toml"), &test_paths()).unwrap_err();
+            let err = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap_err();
             assert!(matches!(err, ConfigError::Invalid { .. }));
             Ok(())
         });

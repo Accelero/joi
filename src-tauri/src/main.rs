@@ -1,9 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! Joi Tauri shell: the composition root that wires [`Config`], the [`SecretStore`], and the
-//! [`SessionManager`] actor together, plus the IPC command surface mirrored by `src/ipc.ts`
-//! (SPEC §11). All provider/session logic lives in the inner crates; this binary is the thin edge.
-
-mod secret_store;
+//! Joi Tauri shell: the composition root that wires [`Config`] and the [`SessionManager`] actor
+//! together, plus the IPC command surface mirrored by `src/ipc.ts` (SPEC §11). All provider/session
+//! logic lives in the inner crates; this binary is the thin edge. The provider API key is part of
+//! the config (`live_api.gemini.api_key`, from the YAML file or the environment).
 
 use std::sync::Arc;
 
@@ -12,14 +11,10 @@ use joi_core::config::Config;
 use joi_core::history::InMemoryHistory;
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
 use joi_core::media::AudioFormat;
-use joi_core::secrets::SecretStore;
 use joi_media::{MediaConfig, MediaEngine};
-use secrecy::SecretString;
 use serde::Serialize;
 use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
-
-use secret_store::EnvWithOverlayStore;
 
 /// Shared application context held in Tauri-managed state. Domain work lives in the inner crates;
 /// this struct just holds the handles the commands dispatch to. `handle`/`media` are `None` until a
@@ -27,15 +22,17 @@ use secret_store::EnvWithOverlayStore;
 /// commands return a clear error rather than crashing.
 struct AppCtx {
     handle: Option<SessionManagerHandle>,
-    secrets: Arc<dyn SecretStore>,
+    /// Whether `config.live_api.gemini.api_key` was set at load (file or env); drives `has_api_key`.
+    has_key: bool,
     media: Option<MediaEngine>,
 }
 
 impl AppCtx {
     fn session(&self) -> Result<&SessionManagerHandle, String> {
-        self.handle
-            .as_ref()
-            .ok_or_else(|| "No API key set. Set GEMINI_API_KEY and restart Joi.".to_string())
+        self.handle.as_ref().ok_or_else(|| {
+            "No API key configured. Set GEMINI_API_KEY (or live_api.gemini.api_key) and restart Joi."
+                .to_string()
+        })
     }
 }
 
@@ -55,17 +52,12 @@ fn ping() -> &'static str {
 }
 
 #[tauri::command]
-async fn has_api_key(ctx: State<'_, AppCtx>) -> Result<HasApiKeyResult, String> {
-    let present = ctx.secrets.has_api_key().await.map_err(|e| e.to_string())?;
-    Ok(HasApiKeyResult { present })
-}
-
-#[tauri::command]
-async fn set_api_key(key: String, ctx: State<'_, AppCtx>) -> Result<(), String> {
-    ctx.secrets
-        .set_api_key(SecretString::from(key))
-        .await
-        .map_err(|e| e.to_string())
+#[allow(clippy::needless_pass_by_value)] // Tauri commands take `State` by value
+fn has_api_key(ctx: State<'_, AppCtx>) -> HasApiKeyResult {
+    // The key is configured (file or env), not set via IPC — this is a read-only check.
+    HasApiKeyResult {
+        present: ctx.has_key,
+    }
 }
 
 #[tauri::command]
@@ -138,7 +130,7 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load(None)?;
-    let secrets: Arc<dyn SecretStore> = Arc::new(EnvWithOverlayStore::new());
+    let has_key = config.live_api.gemini.api_key.is_set();
     let media_config = MediaConfig {
         frame_samples: AudioFormat::INPUT.samples_per_frame(config.audio.frame_ms),
         screen_fps: config.screen.fps,
@@ -150,7 +142,6 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             ping,
             has_api_key,
-            set_api_key,
             start,
             stop,
             send_text,
@@ -160,15 +151,13 @@ fn main() -> anyhow::Result<()> {
         ])
         .setup(move |app| {
             let cfg = config.clone();
-            let secrets_for_factory = Arc::clone(&secrets);
-            // Build the manager and its MediaEngine together inside the runtime: we read the key
-            // first, and both the manager and the engine spawn tasks with `tokio::spawn`, which
-            // needs the runtime context this block enters. A missing key (or any factory error) is
-            // non-fatal: the window still opens and session commands report it.
+            // Build the manager and its MediaEngine together inside the runtime: both spawn tasks
+            // with `tokio::spawn`, which needs the runtime context this block enters. The key now
+            // lives in `cfg` (file/env). A missing key (or any factory error) is non-fatal: the
+            // window still opens and session commands report it.
             let (handle, media): (Option<SessionManagerHandle>, Option<MediaEngine>) =
                 async_runtime::block_on(async move {
-                    let api_key = secrets_for_factory.get_api_key().await.ok().flatten();
-                    match joi_providers::build_session_factory(&cfg, api_key) {
+                    match joi_providers::build_session_factory(&cfg) {
                         Ok(factory) => {
                             let factory: Arc<dyn SessionFactory> = Arc::from(factory);
                             let clock = Arc::new(SystemClock);
@@ -205,7 +194,7 @@ fn main() -> anyhow::Result<()> {
 
             app.manage(AppCtx {
                 handle,
-                secrets: Arc::clone(&secrets),
+                has_key,
                 media,
             });
             Ok(())

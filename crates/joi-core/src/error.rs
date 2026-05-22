@@ -29,14 +29,6 @@ pub enum ConfigError {
     },
 }
 
-/// Failure reading or writing the API key in a [`crate::secrets::SecretStore`].
-#[derive(Debug, thiserror::Error)]
-pub enum SecretError {
-    /// The underlying secret backend (keychain, file, …) returned an error.
-    #[error("secret store backend error: {0}")]
-    Backend(String),
-}
-
 /// Failure on a [`crate::session::RealtimeSession`].
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {

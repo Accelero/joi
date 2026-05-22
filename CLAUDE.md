@@ -20,7 +20,7 @@ with a Rust backend and a thin web (React/TS) frontend.
 
 | Crate | Responsibility |
 |---|---|
-| `crates/joi-core` | Pure domain: `Config`, `Clock`, `SecretStore`, `RealtimeSession`/`SessionEvent`/`UiEvent`, `HistoryStore`, `ScreenSource`, pure `media` DSP (framing, resample, `JitterBuffer`, PCM/float), and the **`SessionManager`** actor + `SessionManagerHandle`. No OS/audio/IO deps. |
+| `crates/joi-core` | Pure domain: `Config` (YAML file + `JOI_`/`GEMINI_*` env, env wins; written with defaults on first run; provider key at `live_api.gemini.api_key` as a redacting `ApiKey`), `Clock`, `RealtimeSession`/`SessionEvent`/`UiEvent`, `HistoryStore`, `ScreenSource`, pure `media` DSP (framing, resample, `JitterBuffer`, PCM/float), and the **`SessionManager`** actor + `SessionManagerHandle`. No OS/audio/IO deps. |
 | `crates/joi-media` | Native I/O behind the **`MediaEngine`** interface: cpal capture (with NS+AGC) and playback, xcap screen capture. Bound to a `SessionManagerHandle`; keeps OS/audio deps out of `joi-core`. |
 | `crates/joi-providers` | Realtime provider adapters (Gemini Live via adk-rust; OpenAI stub) + `build_session_factory`. |
 | `crates/joi-testkit` | Test doubles/helpers. |
@@ -51,4 +51,5 @@ bun install && bun run test && bun run build
 - **Dev (hot reload):** `bun run tauri dev` — runs the Vite dev server; the webview loads it.
 - **Standalone:** `bun run tauri build --no-bundle` → `./target/release/joi` (frontend embedded).
   Do **not** use `cargo build --release` for the standalone — Tauri stays in dev mode and points the
-  webview at the dev URL. The provider key is read from `GEMINI_API_KEY` at launch.
+  webview at the dev URL. The provider key comes from config (`live_api.gemini.api_key`) or the
+  `GEMINI_API_KEY` env var (env wins).

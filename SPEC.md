@@ -114,7 +114,7 @@ src-tauri/src/
     store.rs           # on-disk persistence (append + prune)
   # media is native and lives in crates/joi-media (cpal capture/playback, xcap screen);
   # pure DSP (framing, resample, jitter buffer) is in crates/joi-core::media (§7).
-  secrets.rs           # OS keychain wrapper (§12 SEC-5)
+  # the API key is part of Config (live_api.gemini.api_key, from YAML/env) — see §13, SEC-5.
   log.rs               # structured event log
   ipc.rs               # serde IPC types shared in shape with frontend (§11)
   tools/               # [POST] mod.rs (Tool trait, registry), bash.rs, memory.rs
@@ -620,9 +620,12 @@ controls are specified now so they exist *before* the first tool lands.
 - **SEC-2** `[POST]` Default-deny on approval timeout.
 - **SEC-3** `[POST]` Local jail on every executed command (non-root, scoped cwd, no net, full log).
 - **SEC-4** `[POST]` Exec endpoint swappable; first impl is local-jail.
-- **SEC-5** `[MVP]` **Key handling (DESIGN §8.5):** API key in OS keychain via Tauri secure
-  storage; never in webview storage, logs, history, or any Joi-operated server (none exists). Key
-  travels only to the provider over the direct WebSocket.
+- **SEC-5** `[MVP]` **Key handling:** the API key is part of config (`live_api.gemini.api_key`),
+  set in the YAML file or — preferred — the `GEMINI_API_KEY` environment variable (env wins). It is
+  held as a redacting `ApiKey` (Debug-safe), never sent to the webview, logs, history, or any
+  Joi-operated server (none exists); it travels only to the provider over the direct WebSocket.
+  Putting the key in the YAML stores it in plaintext on disk — the env var avoids that. (OS-keychain
+  storage remains a possible future hardening, `[POST]`.)
 - **SEC-6** `[POST]` Treat all on-screen content as hostile input; the permission prompt is
   app-chrome, never rendered inside shared/streamed content (anti-spoof).
 - **SEC-7** `[MVP]` Webview never receives the key, never decides a command, never executes.
@@ -633,8 +636,9 @@ controls are specified now so they exist *before* the first tool lands.
 
 ## 13. Configuration & settings
 
-Non-secret settings in app config; **secrets in keychain only** (SEC-5).
-- Provider + model id; voice; system instruction / persona.
+All settings live in the YAML config or env (env wins). The API key may be set in config but is
+**preferably provided via `GEMINI_API_KEY`** to avoid plaintext on disk (SEC-5).
+- Live-API provider + exact model id; voice; system instruction / persona (under `live_api.gemini`).
 - Mic device; audio output device.
 - Screen: source preference, capture path (auto/webview/native), fps, resolution cap, quality.
 - Terminal: theme / color scheme, font, scrollback.

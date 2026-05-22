@@ -15,9 +15,12 @@ async-trait = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Maintained fork of the (now archived) serde_yaml; used for both parsing and writing config YAML.
+serde_norway = "0.9"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
 tracing = "0.1"
-figment = { version = "0.10", features = ["toml", "env"] }
+# `env` only: YAML parsing is done with serde_norway so the deprecated serde_yaml stays out of tree.
+figment = { version = "0.10", features = ["env"] }
 directories = "6"
 secrecy = { version = "0.10", features = ["serde"] }
 
