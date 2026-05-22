@@ -19,9 +19,12 @@ export function App(): React.JSX.Element {
   const running = state !== "stopped" && state !== "error";
   const terminalRef = useRef<TerminalHandle>(null);
 
+  // One listener for the app's lifetime: App is the root component, so this is registered once and
+  // lives the whole session, turning every backend `ui_event` into a state update or terminal
+  // write. Cleanup runs only on teardown (or StrictMode's dev-only remount); holding the
+  // registration promise lets us unlisten even if it resolves after cleanup — so no duplicate leaks.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void onUiEvent((ev) => {
+    const ready = onUiEvent((ev) => {
       switch (ev.type) {
         case "state":
           setState(ev.state);
@@ -42,10 +45,8 @@ export function App(): React.JSX.Element {
         case "history":
           break;
       }
-    }).then((u) => {
-      unlisten = u;
     });
-    return () => unlisten?.();
+    return () => void ready.then((unlisten) => unlisten());
   }, []);
 
   const start = useCallback(async () => {
@@ -70,21 +71,19 @@ export function App(): React.JSX.Element {
     }
   }, []);
 
+  // Keep the IPC call out of the setState updater: React (StrictMode, dev) double-invokes updaters
+  // to surface impurity, which would fire the command twice (e.g. two screen-capture threads).
   const toggleMute = useCallback(() => {
-    setMicMuted((prev) => {
-      const next = !prev;
-      void commands.setMicMuted({ muted: next });
-      return next;
-    });
-  }, []);
+    const next = !micMuted;
+    void commands.setMicMuted({ muted: next });
+    setMicMuted(next);
+  }, [micMuted]);
 
   const toggleShare = useCallback(() => {
-    setSharing((prev) => {
-      const next = !prev;
-      void (next ? commands.startScreenshare() : commands.stopScreenshare());
-      return next;
-    });
-  }, []);
+    const next = !sharing;
+    void (next ? commands.startScreenshare() : commands.stopScreenshare());
+    setSharing(next);
+  }, [sharing]);
 
   const sendDraft = useCallback(
     async (e: React.FormEvent) => {
