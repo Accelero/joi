@@ -4,13 +4,14 @@
 //! `cpal`'s [`Stream`](cpal::Stream) is `!Send`, so each engine owns its stream on a dedicated OS
 //! thread and is driven over a channel; callers hold only the `Send` channel sender.
 
-pub mod capture;
-pub mod playback;
-pub mod screen;
+pub mod engine;
 
-pub use capture::{spawn_capture, CaptureHandle};
-pub use playback::{spawn_playback, PlaybackCmd};
-pub use screen::{spawn_screen_capture, ScreenHandle};
+// Low-level cpal/xcap workers are crate-internal; `MediaEngine` is the public interface.
+mod capture;
+mod playback;
+mod screen;
+
+pub use engine::{MediaConfig, MediaEngine};
 
 /// Failures from a native media engine.
 #[derive(Debug, thiserror::Error)]

@@ -104,8 +104,14 @@ fn run_capture(
     }
     .map_err(|e| MediaError::Backend(e.to_string()))?;
     drop(raw_tx); // only the stream's callback keeps a sender alive now
-    stream.play().map_err(|e| MediaError::Backend(e.to_string()))?;
-    tracing::info!(device_rate, channels, "native mic capture started (NS + AGC)");
+    stream
+        .play()
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    tracing::info!(
+        device_rate,
+        channels,
+        "native mic capture started (NS + AGC)"
+    );
 
     let mut pipeline = CapturePipeline::new(device_rate, frame_samples);
     loop {

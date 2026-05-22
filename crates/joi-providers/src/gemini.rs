@@ -193,14 +193,18 @@ fn map_event(event: ServerEvent) -> Vec<SessionEvent> {
         ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
             vec![agent_line(delta, false)]
         }
-        ServerEvent::TranscriptDone { transcript: text, .. }
+        ServerEvent::TranscriptDone {
+            transcript: text, ..
+        }
         | ServerEvent::TextDone { text, .. } => vec![agent_line(text, true)],
         // Server VAD detected the user speaking → flush any agent playback (barge-in, FR-2).
         ServerEvent::SpeechStarted { .. } => {
             tracing::debug!("gemini barge-in: model response interrupted by user speech");
             vec![SessionEvent::TurnEvent(TurnEvent::Interrupted)]
         }
-        ServerEvent::ResponseCreated { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)],
+        ServerEvent::ResponseCreated { .. } => {
+            vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)]
+        }
         ServerEvent::ResponseDone { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnComplete)],
         ServerEvent::Error { error, .. } => {
             let code = error.code.unwrap_or(error.error_type);
@@ -227,9 +231,16 @@ fn agent_line(text: String, final_: bool) -> SessionEvent {
 fn map_connect_err(e: &RealtimeError) -> SessionError {
     let msg = e.to_string();
     let low = msg.to_lowercase();
-    if ["unauthor", "api key", "permission", "401", "403", "invalid_argument key"]
-        .iter()
-        .any(|needle| low.contains(needle))
+    if [
+        "unauthor",
+        "api key",
+        "permission",
+        "401",
+        "403",
+        "invalid_argument key",
+    ]
+    .iter()
+    .any(|needle| low.contains(needle))
     {
         SessionError::Auth(msg)
     } else {

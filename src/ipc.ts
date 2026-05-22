@@ -62,18 +62,15 @@ export interface HasApiKeyResult {
   present: boolean;
 }
 
+// Mirrors `generate_handler!` in src-tauri/src/main.rs 1:1 — keep them in sync (SPEC §11.1).
 export const commands = {
   start: (args: StartArgs) => tauriInvoke<{ session_id: string }>("start", args),
   stop: (args: StopArgs) => tauriInvoke<void>("stop", args),
-  resume: () => tauriInvoke<{ session_id: string }>("resume"),
   sendText: (args: SendTextArgs) => tauriInvoke<void>("send_text", args),
   setMicMuted: (args: SetMicMutedArgs) => tauriInvoke<void>("set_mic_muted", args),
   startScreenshare: () => tauriInvoke<void>("start_screenshare"),
   stopScreenshare: () => tauriInvoke<void>("stop_screenshare"),
   hasApiKey: () => tauriInvoke<HasApiKeyResult>("has_api_key"),
   setApiKey: (key: string) => tauriInvoke<void>("set_api_key", { key }),
-  getHistoryMeta: () => tauriInvoke<HistoryMeta>("get_history_meta"),
-  clearHistory: () => tauriInvoke<void>("clear_history"),
-  panicStop: () => tauriInvoke<void>("panic_stop"),
   ping: () => tauriInvoke<string>("ping"),
 } as const;

@@ -115,7 +115,9 @@ impl Playback {
         }
         .map_err(|e| MediaError::Backend(e.to_string()))?;
 
-        stream.play().map_err(|e| MediaError::Backend(e.to_string()))?;
+        stream
+            .play()
+            .map_err(|e| MediaError::Backend(e.to_string()))?;
         Ok(Self {
             _stream: stream,
             buffer,

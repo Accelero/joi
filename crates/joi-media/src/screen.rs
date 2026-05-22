@@ -45,7 +45,12 @@ fn run(
     quality: u8,
     stop_rx: &std::sync::mpsc::Receiver<()>,
 ) {
-    tracing::info!(?interval, max_width, quality, "native screen capture started");
+    tracing::info!(
+        ?interval,
+        max_width,
+        quality,
+        "native screen capture started"
+    );
     while !matches!(stop_rx.try_recv(), Err(TryRecvError::Disconnected)) {
         let started = Instant::now();
         match capture_jpeg(max_width, quality) {
