@@ -189,6 +189,11 @@ pub struct RealtimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_audio_transcription: Option<TranscriptionConfig>,
 
+    /// PATCH(joi): whether to include output (model) audio transcription. When set, Gemini returns
+    /// the model's spoken response as text alongside the audio, which Joi streams to its terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_audio_transcription: Option<TranscriptionConfig>,
+
     /// Temperature for response generation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -355,6 +360,13 @@ impl RealtimeConfig {
     /// Enable input audio transcription.
     pub fn with_transcription(mut self) -> Self {
         self.input_audio_transcription = Some(TranscriptionConfig::whisper());
+        self
+    }
+
+    /// PATCH(joi): enable output (model) audio transcription, so the model's spoken response is
+    /// also returned as text.
+    pub fn with_output_transcription(mut self) -> Self {
+        self.output_audio_transcription = Some(TranscriptionConfig::whisper());
         self
     }
 

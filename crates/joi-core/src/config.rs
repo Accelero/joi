@@ -329,15 +329,20 @@ impl Config {
     /// Overlay the conventional provider env vars `GEMINI_API_KEY` and `GEMINI_MODEL` onto
     /// `live_api.gemini.{api_key,model}`. Non-empty env values win over whatever the file set.
     fn apply_provider_env_overrides(&mut self) {
-        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-            if !key.is_empty() {
-                self.live_api.gemini.api_key = ApiKey::new(key);
-            }
+        self.apply_provider_overrides(
+            std::env::var("GEMINI_API_KEY").ok(),
+            std::env::var("GEMINI_MODEL").ok(),
+        );
+    }
+
+    /// Pure core of [`apply_provider_env_overrides`] (env reading split out so it's testable without
+    /// mutating the process environment). Non-empty values replace the current ones.
+    fn apply_provider_overrides(&mut self, api_key: Option<String>, model: Option<String>) {
+        if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            self.live_api.gemini.api_key = ApiKey::new(key);
         }
-        if let Ok(model) = std::env::var("GEMINI_MODEL") {
-            if !model.is_empty() {
-                self.live_api.gemini.model = model;
-            }
+        if let Some(model) = model.filter(|m| !m.is_empty()) {
+            self.live_api.gemini.model = model;
         }
     }
 
@@ -545,18 +550,17 @@ live_api:
 
     #[test]
     fn gemini_convenience_env_overrides_win() {
-        // `GEMINI_API_KEY`/`GEMINI_MODEL` map onto live_api.gemini and beat the file value.
-        // No other joi-core test reads these vars, so set/remove here is race-free.
-        std::env::set_var("GEMINI_API_KEY", "env-secret");
-        std::env::set_var("GEMINI_MODEL", "env-model");
+        // `GEMINI_API_KEY`/`GEMINI_MODEL` map onto live_api.gemini and beat the file value. Test the
+        // pure core so we don't mutate the process env (which would race the parallel Jail tests).
         let mut cfg = Config::default();
         cfg.live_api.gemini.api_key = ApiKey::new("file-secret");
         cfg.live_api.gemini.model = "file-model".to_string();
-        cfg.apply_provider_env_overrides();
+        cfg.apply_provider_overrides(Some("env-secret".into()), Some("env-model".into()));
         assert_eq!(cfg.live_api.gemini.api_key.get(), Some("env-secret"));
         assert_eq!(cfg.live_api.gemini.model, "env-model");
-        std::env::remove_var("GEMINI_API_KEY");
-        std::env::remove_var("GEMINI_MODEL");
+        // Empty/absent env values leave the existing value untouched.
+        cfg.apply_provider_overrides(Some(String::new()), None);
+        assert_eq!(cfg.live_api.gemini.api_key.get(), Some("env-secret"));
     }
 
     #[test]

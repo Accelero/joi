@@ -122,6 +122,12 @@ struct GeminiSetup {
     cached_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_resumption: Option<SessionResumptionConfig>,
+    // PATCH(joi): request transcription so Gemini returns input/output text alongside audio
+    // (empty object = enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_audio_transcription: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_audio_transcription: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +414,15 @@ impl GeminiRealtimeSession {
                 tools,
                 cached_content: config.cached_content,
                 session_resumption,
+                // PATCH(joi): enabled (empty object) when the corresponding config is set.
+                input_audio_transcription: config
+                    .input_audio_transcription
+                    .as_ref()
+                    .map(|_| json!({})),
+                output_audio_transcription: config
+                    .output_audio_transcription
+                    .as_ref()
+                    .map(|_| json!({})),
             }),
             realtime_input: None,
             tool_response: None,
@@ -543,6 +558,27 @@ impl GeminiRealtimeSession {
                             });
                         }
                     }
+                }
+            }
+
+            // PATCH(joi): output transcription — the model's spoken response as text. Gemini sends
+            // it incrementally in `serverContent.outputTranscription.text` (only when requested in
+            // setup). Surface as TranscriptDelta (the agent's output transcript). (Input
+            // transcription, `inputTranscription`, is requested but not yet surfaced — follow-up.)
+            if let Some(text) = content
+                .get("outputTranscription")
+                .and_then(|t| t.get("text"))
+                .and_then(|t| t.as_str())
+            {
+                if !text.is_empty() {
+                    events.push(ServerEvent::TranscriptDelta {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        response_id: String::new(),
+                        item_id: String::new(),
+                        output_index: 0,
+                        content_index: 0,
+                        delta: text.to_string(),
+                    });
                 }
             }
 

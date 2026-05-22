@@ -88,6 +88,10 @@ impl RealtimeSession for GeminiAdapter {
         if cfg.enable_input_transcription {
             rc = rc.with_transcription();
         }
+        if cfg.enable_output_transcription {
+            // Gemini transcribes the model's spoken reply to text → streamed to the terminal.
+            rc = rc.with_output_transcription();
+        }
 
         let boxed = model.connect(rc).await.map_err(|e| map_connect_err(&e))?;
         // adk hands back a `Box<dyn RealtimeSession>`; share it as an `Arc` so the pump task and the
@@ -166,12 +170,13 @@ impl RealtimeSession for GeminiAdapter {
 /// Forward adk `ServerEvent`s into Joi's owned event stream until the session closes or the manager
 /// drops its receiver.
 async fn pump_events(session: Arc<dyn AdkSession>, tx: EventSender) {
+    let mut mapper = EventMapper::default();
     while let Some(result) = session.next_event().await {
-        let mapped = match result {
-            Ok(event) => map_event(event),
+        let session_events = match result {
+            Ok(event) => mapper.map(event),
             Err(e) => vec![SessionEvent::Error(SessionError::Provider(e.to_string()))],
         };
-        for ev in mapped {
+        for ev in session_events {
             if tx.send(ev).await.is_err() {
                 return; // manager gone
             }
@@ -184,46 +189,85 @@ async fn pump_events(session: Arc<dyn AdkSession>, tx: EventSender) {
         .await;
 }
 
-/// Map one adk `ServerEvent` to zero or more Joi [`SessionEvent`]s (NOTES-adk.md mapping table).
-fn map_event(event: ServerEvent) -> Vec<SessionEvent> {
-    match event {
-        ServerEvent::AudioDelta { delta, .. } => vec![SessionEvent::AudioOutput {
-            pcm: media::le_bytes_to_pcm16(&delta),
-        }],
-        ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
-            vec![agent_line(delta, false)]
-        }
-        ServerEvent::TranscriptDone {
-            transcript: text, ..
-        }
-        | ServerEvent::TextDone { text, .. } => vec![agent_line(text, true)],
-        // Server VAD detected the user speaking → flush any agent playback (barge-in, FR-2).
-        ServerEvent::SpeechStarted { .. } => {
-            tracing::debug!("gemini barge-in: model response interrupted by user speech");
-            vec![SessionEvent::TurnEvent(TurnEvent::Interrupted)]
-        }
-        ServerEvent::ResponseCreated { .. } => {
-            vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)]
-        }
-        ServerEvent::ResponseDone { .. } => vec![SessionEvent::TurnEvent(TurnEvent::TurnComplete)],
-        ServerEvent::Error { error, .. } => {
-            let code = error.code.unwrap_or(error.error_type);
-            vec![SessionEvent::Error(SessionError::Provider(format!(
-                "{code}: {}",
-                error.message
-            )))]
-        }
-        // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (POST), rate limits, and
-        // unknown forward-compat variants carry nothing the MVP UI needs.
-        _ => vec![],
-    }
+/// Maps adk `ServerEvent`s to Joi [`SessionEvent`]s (NOTES-adk.md mapping table), accumulating the
+/// agent's output-transcript deltas into the cumulative line the UI renders.
+///
+/// Transcript/text deltas arrive incrementally, but the manager forwards each `Transcript.text`
+/// verbatim and the terminal rewrites the line in place — so we emit the **cumulative** text each
+/// time and a final line at the turn boundary (which is also what gets appended to history).
+#[derive(Default)]
+struct EventMapper {
+    /// The agent's transcript accumulated so far this turn.
+    agent: String,
 }
 
-fn agent_line(text: String, final_: bool) -> SessionEvent {
-    SessionEvent::Transcript {
-        speaker: Speaker::Agent,
-        text,
-        final_,
+impl EventMapper {
+    fn map(&mut self, event: ServerEvent) -> Vec<SessionEvent> {
+        match event {
+            ServerEvent::AudioDelta { delta, .. } => vec![SessionEvent::AudioOutput {
+                pcm: media::le_bytes_to_pcm16(&delta),
+            }],
+            ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
+                self.agent.push_str(&delta);
+                vec![self.agent_line(false)]
+            }
+            // A provider that sends an explicit done (OpenAI-style) carries the full text.
+            ServerEvent::TranscriptDone {
+                transcript: text, ..
+            }
+            | ServerEvent::TextDone { text, .. } => {
+                self.agent = text;
+                let line = self.agent_line(true);
+                self.agent.clear();
+                vec![line]
+            }
+            // Server VAD detected the user speaking → commit any partial line and flush agent
+            // playback (barge-in, FR-2).
+            ServerEvent::SpeechStarted { .. } => {
+                tracing::debug!("gemini barge-in: model response interrupted by user speech");
+                let mut out = self.finalize_pending();
+                out.push(SessionEvent::TurnEvent(TurnEvent::Interrupted));
+                out
+            }
+            ServerEvent::ResponseCreated { .. } => {
+                self.agent.clear();
+                vec![SessionEvent::TurnEvent(TurnEvent::TurnStarted)]
+            }
+            // Gemini signals turn end with no transcript-done; commit the accumulated line here.
+            ServerEvent::ResponseDone { .. } => {
+                let mut out = self.finalize_pending();
+                out.push(SessionEvent::TurnEvent(TurnEvent::TurnComplete));
+                out
+            }
+            ServerEvent::Error { error, .. } => {
+                let code = error.code.unwrap_or(error.error_type);
+                vec![SessionEvent::Error(SessionError::Provider(format!(
+                    "{code}: {}",
+                    error.message
+                )))]
+            }
+            // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (POST), rate limits,
+            // and unknown forward-compat variants carry nothing the MVP UI needs.
+            _ => vec![],
+        }
+    }
+
+    /// Emit a final agent line for the accumulated transcript if any, clearing the buffer.
+    fn finalize_pending(&mut self) -> Vec<SessionEvent> {
+        if self.agent.is_empty() {
+            return vec![];
+        }
+        let line = self.agent_line(true);
+        self.agent.clear();
+        vec![line]
+    }
+
+    fn agent_line(&self, final_: bool) -> SessionEvent {
+        SessionEvent::Transcript {
+            speaker: Speaker::Agent,
+            text: self.agent.clone(),
+            final_,
+        }
     }
 }
 
@@ -277,6 +321,24 @@ mod tests {
         assert!(!rendered.contains("test-key"), "key leaked: {rendered}");
     }
 
+    fn transcript_delta(delta: &str) -> ServerEvent {
+        ServerEvent::TranscriptDelta {
+            event_id: "e".into(),
+            response_id: "r".into(),
+            item_id: "i".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: delta.into(),
+        }
+    }
+
+    fn response_done() -> ServerEvent {
+        ServerEvent::ResponseDone {
+            event_id: "e".into(),
+            response: serde_json::Value::Null,
+        }
+    }
+
     #[test]
     fn audio_delta_maps_to_pcm_output() {
         let pcm = vec![0i16, 1, -1, 12345, -32768];
@@ -288,7 +350,7 @@ mod tests {
             content_index: 0,
             delta: media::pcm16_to_le_bytes(&pcm),
         };
-        match map_event(event).as_slice() {
+        match EventMapper::default().map(event).as_slice() {
             [SessionEvent::AudioOutput { pcm: out }] => assert_eq!(*out, pcm),
             other => panic!("expected one AudioOutput, got {other:?}"),
         }
@@ -301,28 +363,69 @@ mod tests {
             audio_start_ms: 0,
         };
         assert!(matches!(
-            map_event(event).as_slice(),
+            EventMapper::default().map(event).as_slice(),
             [SessionEvent::TurnEvent(TurnEvent::Interrupted)]
         ));
     }
 
     #[test]
     fn transcript_delta_is_a_partial_agent_line() {
-        let event = ServerEvent::TranscriptDelta {
-            event_id: "e".into(),
-            response_id: "r".into(),
-            item_id: "i".into(),
-            output_index: 0,
-            content_index: 0,
-            delta: "hello".into(),
-        };
-        match map_event(event).as_slice() {
+        match EventMapper::default()
+            .map(transcript_delta("hello"))
+            .as_slice()
+        {
             [SessionEvent::Transcript {
                 speaker: Speaker::Agent,
                 text,
                 final_: false,
             }] => assert_eq!(text, "hello"),
             other => panic!("expected partial agent transcript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_transcript_deltas_accumulate_and_finalize_on_turn_end() {
+        let mut m = EventMapper::default();
+        // Deltas are incremental; each emitted partial carries the cumulative text.
+        assert!(matches!(
+            m.map(transcript_delta("Hel")).as_slice(),
+            [SessionEvent::Transcript { text, final_: false, .. }] if text == "Hel"
+        ));
+        assert!(matches!(
+            m.map(transcript_delta("lo there")).as_slice(),
+            [SessionEvent::Transcript { text, final_: false, .. }] if text == "Hello there"
+        ));
+        // Turn end commits the full line, then reports the turn complete.
+        match m.map(response_done()).as_slice() {
+            [SessionEvent::Transcript {
+                speaker: Speaker::Agent,
+                text,
+                final_: true,
+            }, SessionEvent::TurnEvent(TurnEvent::TurnComplete)] => assert_eq!(text, "Hello there"),
+            other => panic!("expected final line + TurnComplete, got {other:?}"),
+        }
+        // Buffer reset: a bare turn end now emits only TurnComplete (no empty transcript).
+        assert!(matches!(
+            m.map(response_done()).as_slice(),
+            [SessionEvent::TurnEvent(TurnEvent::TurnComplete)]
+        ));
+    }
+
+    #[test]
+    fn barge_in_commits_the_partial_line() {
+        let mut m = EventMapper::default();
+        let _ = m.map(transcript_delta("partial reply"));
+        let speech = ServerEvent::SpeechStarted {
+            event_id: "e".into(),
+            audio_start_ms: 0,
+        };
+        match m.map(speech).as_slice() {
+            [SessionEvent::Transcript {
+                text, final_: true, ..
+            }, SessionEvent::TurnEvent(TurnEvent::Interrupted)] => {
+                assert_eq!(text, "partial reply");
+            }
+            other => panic!("expected committed partial + Interrupted, got {other:?}"),
         }
     }
 
@@ -337,7 +440,7 @@ mod tests {
                 param: None,
             },
         };
-        match map_event(event).as_slice() {
+        match EventMapper::default().map(event).as_slice() {
             [SessionEvent::Error(SessionError::Provider(msg))] => {
                 assert!(msg.contains("500") && msg.contains("boom"), "{msg}");
             }
