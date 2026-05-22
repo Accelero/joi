@@ -24,8 +24,9 @@ Everything above passes `cargo fmt`/`clippy -D warnings`/`test` and `bun run typ
 
 - **Tauri shell (`src-tauri/`)** — the composition root, `#[tauri::command]` handlers, the binary
   `tauri::ipc::Channel` media transport, and the keychain `SecretStore`. Compiling Tauri needs the
-  system WebKitGTK libraries (`libwebkit2gtk-4.1-dev` + GStreamer; see `scripts/setup-linux.sh`),
-  which were not installable in the environment this was built in.
+  system WebKitGTK libraries (`libwebkit2gtk-4.1-dev`) for the UI webview and ALSA dev headers
+  (`alsa-lib`/`libasound2-dev`) for native cpal audio — see `scripts/setup-linux.sh`. Media is
+  native (cpal + xcap), so **no GStreamer is needed**.
 - **M0 media spike, M2 (Gemini/adk-rust), M3 lifecycle persistence wiring, M4 screen capture
   pipelines, M5 packaging** — these need the running webview, a live API key, or the screen-capture
   backends. The core seams for all of them are in place; see `PLAN.md`.
@@ -59,8 +60,9 @@ lives in the OS keychain; for dev, `GEMINI_API_KEY` is read at runtime and never
 
 ### Display-server note (Linux)
 
-WebKitGTK media capture is fragile on Wayland (PLAN §3). If mic/screen capture misbehaves once the
-Tauri shell exists, use the X11 fallback:
+Media is native now (cpal audio, xcap screen), so the old WebKitGTK getUserMedia/Wayland fragility
+no longer applies. Audio goes through ALSA (PipeWire's ALSA compat works). If the webview UI itself
+misbehaves on Wayland, the X11 fallback still works:
 
 ```bash
 GDK_BACKEND=x11 WEBKIT_DISABLE_COMPOSITING_MODE=1 cargo tauri dev

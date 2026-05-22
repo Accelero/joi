@@ -112,9 +112,8 @@ src-tauri/src/
   history/
     mod.rs             # conversation model, bounded store, restore-to-context (§6)
     store.rs           # on-disk persistence (append + prune)
-  media/
-    audio.rs           # PCM framing, resample, format constants (§7.1/7.2)
-    screen.rs          # source enumeration, frame typing, native fallback (§7.3)
+  # media is native and lives in crates/joi-media (cpal capture/playback, xcap screen);
+  # pure DSP (framing, resample, jitter buffer) is in crates/joi-core::media (§7).
   secrets.rs           # OS keychain wrapper (§12 SEC-5)
   log.rs               # structured event log
   ipc.rs               # serde IPC types shared in shape with frontend (§11)
@@ -125,22 +124,20 @@ src-tauri/src/
 
 ### 2.2 Frontend layout (React + TypeScript; UI stack in §8)
 
+The frontend is **UI only** — no media (§7, §8.2). All capture/playback/screen lives in native Rust
+(`crates/joi-media`).
+
 ```
 src/
   main.tsx             # React bootstrap, IPC bridge
-  media/
-    mic.ts             # getUserMedia + AudioWorklet → 16k mono PCM; mute gates here
-    worklets/*.js      # AudioWorklet processors (must be JS — separate realm)
-    playback.ts        # 24k PCM → Web Audio jitter buffer (off main thread)
-    screen.ts          # getDisplayMedia + source pick → frames; detect-unsupported → backend
-  ui/
+  App.tsx              # composition: calls commands.start({resume}), renders UiEvents
+  components/
     Terminal.tsx       # xterm.js — model text output, ANSI theming (§8)
-    Controls.tsx       # start/stop/pause/resume, mic mute, share start/stop, status
-    Settings.tsx       # API key entry, devices, screen source, quality, theme
-    components/         # shadcn/ui primitives (copied in), shared widgets
-  ipc.ts               # typed wrappers over Tauri invoke/listen
-  state.ts             # UI store (audio frames bypass React state — see §8)
+    Controls.tsx       # start/stop, mic mute, screenshare toggle, status
+  ipc.ts               # typed command wrappers + onUiEvent listener (JSON only, §11)
 ```
+(`Settings.tsx` and a UI store are `[POST]`; API-key entry currently rides on the `set_api_key`
+command.)
 
 ---
 
@@ -157,8 +154,8 @@ src/
 
 ### 3.2 Audio I/O `[MVP]`
 - **FR-5** Capture the **system microphone** and stream it to the model live.
-- **FR-6** **Mute** control that stops sending mic audio at the source (worklet), reachable in
-  one action; state always visible.
+- **FR-6** **Mute** control that stops sending mic audio at the source (native engine + manager),
+  reachable in one action; state always visible.
 - **FR-7** Play the model's **audio output** with low added latency and immediate flush on
   barge-in.
 
@@ -406,29 +403,35 @@ for transient drops.
 
 ## 7. Media pipeline (DESIGN §6.3)
 
+All media is captured, processed, and played **natively in Rust** (`crates/joi-media`); the webview
+never touches audio or video. The DSP (framing, resample, jitter buffer, PCM/float conversion) is
+pure, tested Rust in `joi-core::media`.
+
 ### 7.1 Audio in `[MVP]`
-- Webview `getUserMedia({audio})` → AudioWorklet → downsample to **16 kHz mono PCM16**, **20 ms**
-  chunks (320 samples), streamed over IPC to `send_audio`.
-- **Mute (FR-6)** gates at the worklet — it stops *sending*, not just a UI flag.
+- Native **cpal** input (device from `config.audio.input_device`) → linear resample to
+  **16 kHz mono PCM16** → frame to **20 ms** chunks (320 samples) → `send_audio`. The realtime cpal
+  callback hands off to async via a lock-free `ringbuf`.
+- **Mute (FR-6)** gates natively — the engine stops *pushing* and the manager drops muted audio
+  (`set_mic_muted`), not just a UI flag.
 
 ### 7.2 Audio out `[MVP]`
-- Provider **24 kHz mono PCM16** → IPC → webview → Web Audio playback through a **jitter buffer**
-  on an AudioWorklet (off main thread); target added latency ≤ 80 ms.
-- On `Interrupted`/barge-in: **flush buffer and stop playback immediately** (FR-2).
+- Provider **24 kHz mono PCM16** → `subscribe_audio()` → `joi-core::media::JitterBuffer` → native
+  **cpal** output callback pulls fixed blocks (silence on underrun); target added latency ≤ 80 ms.
+- On `Interrupted`/barge-in: a `Flush` command empties the jitter buffer and halts playback
+  immediately (FR-2, target < 300 ms).
 
 ### 7.3 Screen capture `[MVP]`
-- **Source selection (FR-9):** enumerate displays/sources; user picks one. `getDisplayMedia`
-  picker primary; backend enumeration available for the native path.
-- **Capture path:** primary `getDisplayMedia` in webview; **native Rust fallback** (`scap`/`xcap`)
-  where the platform webview is unreliable (DESIGN §6.3, §17). Chosen path shown in the sharing
-  indicator (FR-10).
-- **Frames:** sampled to the configured rate, encoded (JPEG/WebP) tuned for the model. **Default
-  quality policy (FR-11):** native resolution and the **max frame rate the API accepts**, clamped
-  by a configurable ceiling for cost/bandwidth; user can lower it.
-- **Start/stop (FR-10):** immediate; stopping revokes in-flight frames.
-- **Capture-source abstraction (FR-12, `[POST]`):** the capture API takes a `CaptureSource`
-  enum (`Display(id)` now; `Window(id)` later) so app-window capture is an added variant, not a
-  rewrite.
+- **Capture path:** native **`xcap`** grab loop (`crates/joi-media/src/screen.rs`) at `screen.fps`,
+  downscaled so the longest edge ≤ `max_width`, JPEG-encoded at `quality`, pushed via `send_frame`.
+  This is the **primary** path — no `getDisplayMedia`/webview capture. `scap` (PipeWire continuous)
+  is a later upgrade if HW/continuous capture is needed.
+- **Source (FR-9):** MVP captures the **primary monitor**; `start_screenshare` takes no source arg.
+  Per-display selection and enumeration are `[POST]`.
+- **Frames (FR-11):** sampled at `config.screen.fps`, downscaled to `max_width`, JPEG at `quality`
+  — all configurable for cost/bandwidth.
+- **Start/stop (FR-10):** immediate; the capture thread stops on signal, ending in-flight frames.
+- **Capture-source abstraction (FR-12, `[POST]`):** widen the native grab to a `CaptureSource`
+  (`Display(id)` now; `Window(id)` later) so app-window capture is an added variant, not a rewrite.
 
 ---
 
@@ -458,10 +461,11 @@ The primary readable surface is a **web terminal emulator** rendering the model'
   the techy aesthetic. Theme configurable (§13).
 
 ### 8.2 Performance note (high-frequency updates)
-React's re-render model must not sit on the hot paths. **Audio frames never touch React state** —
-mic/playback run in the worklet/Web-Audio layer and talk to IPC directly. **Streaming transcript**
-writes go to xterm.js imperatively (or a buffered, throttled commit), not a per-token React
-setState. React owns *control* UI (state, buttons, settings), not the per-frame media flow.
+React's re-render model must not sit on the hot paths. **Media never touches React — or the
+webview at all**: capture, playback, and screen frames live entirely in native Rust (`joi-media`,
+§7), so no audio/video crosses IPC. **Streaming transcript** writes go to xterm.js imperatively
+(or a buffered, throttled commit), not a per-token React setState. React owns *control* UI (state,
+buttons, settings) and renders backend `UiEvent`s; it never carries per-frame media.
 
 ---
 
@@ -559,44 +563,43 @@ touching the gate or tools.
 ## 11. IPC protocol (webview ↔ backend)
 
 Two channels: **commands** (frontend → backend via `invoke`) and **events** (backend → frontend
-via event emit). Media uses binary payloads, not JSON.
+via a single `ui_event` emit). **No media crosses IPC** — audio/video are native (§7), so the
+protocol is **JSON only**; the binary `tauri::ipc::Channel` is gone.
 
 ### 11.1 Commands (frontend → backend)
+Registered today in `src-tauri` (`generate_handler!`):
+
 | Command | Args | Returns |
 |---|---|---|
+| `ping` | `{}` | `"pong"`-style string (health check) |
+| `has_api_key` | `{}` | `{ present }` |
+| `set_api_key` | `{ key }` | ok |
 | `start` | `{ resume: bool }` | `{ session_id }` or error |
 | `stop` | `{ pause: bool }` | ok (closes session, persists) |
-| `resume` | `{}` | `{ session_id }` (restore context) |
 | `send_text` | `{ text }` | ok |
 | `set_mic_muted` | `{ muted }` | ok |
-| `list_screen_sources` | `{}` | `[{ id, label, kind }]` |
-| `start_screenshare` | `{ source_id, quality? }` | `{ path: "webview" \| "native" }` |
+| `start_screenshare` | `{}` | ok (native primary-monitor capture; §7.3) |
 | `stop_screenshare` | `{}` | ok |
-| `screen_capability` | `{}` | `{ getDisplayMedia: bool }` |
-| `set_api_key` / `has_api_key` | `{ key }` / `{}` | ok / `{ present }` |
-| `get_settings` / `set_settings` | … | … |
-| `get_history_meta` | `{}` | `{ turns, token_estimate, budget }` |
-| `clear_history` | `{}` | ok |
-| `panic_stop` | `{}` | ok (stop session, mute mic, stop capture) |
-| `permission_decision` `[POST]` | `{ call_id, decision, edited_command? }` | ok |
+
+`[POST]` (planned, not yet wired): `resume`, `get_history_meta`, `clear_history`, `panic_stop`,
+`get_settings`/`set_settings`, `permission_decision`. (`resume`/history/panic helpers exist in the
+TS `ipc.ts` wrapper but are not yet registered as commands.)
 
 ### 11.2 Media transport
-- **Mic frames** (FE→BE): binary 16 kHz PCM16, 20 ms chunks, via **`tauri::ipc::Channel`** (not the
-  JSON command/event path).
-- **Audio out** (BE→FE): binary 24 kHz PCM16 frames via **`tauri::ipc::Channel`** (the JSON event
-  emitter is too slow for frequent binary and would blow the ≤80 ms latency target — do not use it
-  for media).
-- **Screen frames:** webview-captured → FE→BE as encoded image bytes; native capture stays
-  backend-side and never crosses IPC.
+**None.** Audio capture/playback (cpal) and screen capture (`xcap`) run entirely in native Rust
+(`joi-media`, §7) against the `SessionManagerHandle`; no PCM or image bytes ever cross the IPC
+boundary. This supersedes the earlier binary `tauri::ipc::Channel` audio path.
 
 ### 11.3 Events (backend → frontend)
-| Event | Payload |
+A single Tauri event named **`ui_event`** carries the tagged `UiEvent` enum (serde `type` tag,
+snake_case):
+
+| `type` | Payload |
 |---|---|
 | `state` | `{ state }` (FR-4 enum) |
 | `transcript` | `{ speaker, text, final }` → terminal (§8) |
-| `audio_out` | binary PCM (11.2) |
 | `connection` | `{ status, detail? }` |
-| `history` | `{ turns, token_estimate, budget }` (on append/prune) |
+| `history` | `HistoryMeta` `{ turns, token_estimate, budget }` (on append/prune) |
 | `error` | `{ kind, message }` |
 | `command_log_append` `[POST]` | LogEntry |
 | `permission_request` `[POST]` | `{ call_id, command, tier, cwd, explanation, timeout_s }` |
@@ -651,8 +654,8 @@ Non-secret settings in app config; **secrets in keychain only** (SEC-5).
   context silently.
 - **History at budget:** prune oldest within the same write; persistence must never block the audio
   path.
-- **getDisplayMedia denied/empty:** fall back to native capture; if that also fails, disable
-  screenshare with a clear reason — never send blank/black frames silently.
+- **Screen capture fails/empty (no monitor, `xcap` error):** disable screenshare with a clear
+  reason — never send blank/black frames silently.
 - **Long transcript/output:** terminal scrollback bounded; full content in history within budget.
 - `[POST]` **Barge-in while a tool runs:** MVP-default once tools exist — conversation can be
   interrupted, but a running command keeps running until it finishes or `panic_stop`/cancel.
