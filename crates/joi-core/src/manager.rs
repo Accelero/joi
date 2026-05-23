@@ -351,6 +351,18 @@ impl SessionManager {
                 }
             }
             Command::SetMicMuted { muted } => {
+                // On the mute transition, tell the provider the audio stream paused so it finalizes
+                // the current turn and stops expecting audio — cleaner than streaming silence (no
+                // bandwidth/tokens, and the model's output doesn't degrade). Unmuting needs no
+                // signal: the next mic frame reopens the stream server-side. A failure here is
+                // non-fatal (the connection stays up), so just log it rather than surfacing an error.
+                if muted && !self.mic_muted {
+                    if let Some(s) = session.as_mut() {
+                        if let Err(e) = s.end_audio_stream().await {
+                            tracing::warn!(error = %e, "audio_stream_end failed");
+                        }
+                    }
+                }
                 self.mic_muted = muted;
             }
             Command::QueryState { reply } => {
@@ -612,6 +624,8 @@ mod tests {
         tx: Option<EventSender>,
         rx: Option<EventReceiver>,
         closed: Arc<std::sync::atomic::AtomicUsize>,
+        /// Counts `end_audio_stream()` calls so a test can prove mute pauses the provider stream.
+        audio_ended: Arc<std::sync::atomic::AtomicUsize>,
         /// When set, the session reports these as `transport_bytes` (the wire-metering path).
         transport: Option<Arc<WireCounters>>,
     }
@@ -626,7 +640,15 @@ mod tests {
                 tx: None,
                 rx: None,
                 closed,
+                audio_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 transport: None,
+            }
+        }
+
+        fn with_audio_end_tracker(audio_ended: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self {
+                audio_ended,
+                ..Self::new()
             }
         }
 
@@ -656,6 +678,12 @@ mod tests {
         }
 
         async fn send_video_frame(&mut self, _f: &VideoFrame) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn end_audio_stream(&mut self) -> Result<(), SessionError> {
+            self.audio_ended
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -988,6 +1016,39 @@ mod tests {
         // No AudioOutput should be produced because the send was dropped at the manager.
         let got = tokio::time::timeout(Duration::from_millis(200), audio.recv()).await;
         assert!(got.is_err(), "expected no audio when muted, got {got:?}");
+        handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mute_pauses_provider_audio_stream_once_per_transition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let audio_ended = Arc::new(AtomicUsize::new(0));
+        let factory_ended = Arc::clone(&audio_ended);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(TestClock::new(1_000)),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_audio_end_tracker(Arc::clone(
+                    &factory_ended,
+                ))) as Box<dyn RealtimeSession>
+            }),
+        );
+        handle.start(false).await.unwrap();
+
+        // Muting signals the provider once (audioStreamEnd) so it finalizes the turn and pauses.
+        handle.set_mic_muted(true).await.unwrap();
+        // A redundant mute(true) must not re-signal — only the false→true transition fires.
+        handle.set_mic_muted(true).await.unwrap();
+        // Unmuting needs no signal (the next mic frame reopens the stream).
+        handle.set_mic_muted(false).await.unwrap();
+        handle.state().await.unwrap(); // barrier: all prior commands processed
+
+        assert_eq!(
+            audio_ended.load(Ordering::SeqCst),
+            1,
+            "expected exactly one end_audio_stream on the mute transition"
+        );
         handle.stop(false).await.unwrap();
     }
 }

@@ -79,6 +79,14 @@ pub trait RealtimeSession: Send + Sync {
         ))
     }
 
+    /// PATCH(joi): Signal that the realtime audio input stream has paused (e.g. the mic was muted),
+    /// so the server finalizes the current turn and stops expecting audio until the next
+    /// `send_audio` reopens it (Gemini `realtimeInput.audioStreamEnd`). Default: no-op for providers
+    /// that have no explicit pause signal — they simply stop receiving audio.
+    async fn send_audio_stream_end(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Send a tool/function response.
     async fn send_tool_response(&self, response: ToolResponse) -> Result<()>;
 

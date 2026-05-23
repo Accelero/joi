@@ -128,10 +128,19 @@ impl JoiApp {
         self.session()?.send_audio(pcm).await
     }
 
-    /// App-level mute (no-op without local media).
+    /// App-level mute. Gates local capture at the source immediately (`media`), and notifies the
+    /// session manager so it can pause/resume the provider's audio stream on the transition
+    /// (`audioStreamEnd` rather than streaming silence). The manager notification is fire-and-forget
+    /// on the current runtime — mute is best-effort and a failure is non-fatal.
     pub fn set_mic_muted(&self, muted: bool) {
         if let Some(m) = &self.media {
             m.set_mic_muted(muted);
+        }
+        if let Some(h) = &self.handle {
+            let h = h.clone();
+            tokio::spawn(async move {
+                let _ = h.set_mic_muted(muted).await;
+            });
         }
     }
 

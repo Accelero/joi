@@ -163,6 +163,11 @@ struct GeminiRealtimeInput {
     video: Option<GeminiMediaChunk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    // PATCH(joi): mark the audio stream paused (mic muted). The server finalizes the turn and waits;
+    // the next `audio` chunk reopens the stream. Valid only with automatic activity detection (our
+    // default). See `send_audio_stream_end`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_stream_end: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -716,6 +721,7 @@ impl RealtimeSession for GeminiRealtimeSession {
                 }),
                 video: None,
                 text: None,
+                audio_stream_end: None,
             }),
             tool_response: None,
             client_content: None,
@@ -735,6 +741,26 @@ impl RealtimeSession for GeminiRealtimeSession {
                     data,
                 }),
                 text: None,
+                audio_stream_end: None,
+            }),
+            tool_response: None,
+            client_content: None,
+        };
+        self.send_raw(&msg).await
+    }
+
+    /// PATCH(joi): mark the audio stream paused (mic muted). Flush any buffered audio first so the
+    /// paused turn includes everything captured, then send `realtimeInput.audioStreamEnd`. The
+    /// server finalizes the turn and waits; the next `send_audio` reopens the stream.
+    async fn send_audio_stream_end(&self) -> Result<()> {
+        self.flush_audio().await?;
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: Some(GeminiRealtimeInput {
+                audio: None,
+                video: None,
+                text: None,
+                audio_stream_end: Some(true),
             }),
             tool_response: None,
             client_content: None,

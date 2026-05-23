@@ -126,6 +126,14 @@ impl RealtimeSession for GeminiAdapter {
             .map_err(|e| SessionError::Send(e.to_string()))
     }
 
+    async fn end_audio_stream(&mut self) -> Result<(), SessionError> {
+        let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
+        session
+            .send_audio_stream_end()
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))
+    }
+
     async fn send_text(&mut self, text: &str) -> Result<(), SessionError> {
         let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
         session

@@ -64,9 +64,8 @@ pub struct ApmConfig {
 
 /// Spawn mic capture on its own thread (owns the `!Send` input stream and the APM). 16 kHz mono
 /// PCM16 frames of `frame_samples` are pushed to `frames`, dropped on overflow. While `muted` is
-/// set, **silence** is captured instead of the mic (no user audio leaves the device, but the frame
-/// cadence is preserved — see the realtime callback). Capture stops when the returned
-/// [`CaptureHandle`] is dropped.
+/// set, no audio is captured (the manager separately tells the provider the stream paused).
+/// Capture stops when the returned [`CaptureHandle`] is dropped.
 /// `render_rx` carries the provider audio Joi is playing — the AEC far-end reference (24 kHz PCM16,
 /// [`AudioFormat::OUTPUT`]). It ends when the engine clears the render sink on stop.
 #[must_use]
@@ -120,10 +119,9 @@ fn run_capture(
     let config = supported.config();
     let err_fn = |e| tracing::error!("capture stream error: {e}");
 
-    // Realtime callback: downmix to mono f32 (or emit equal-length silence when muted), forward. No
-    // heavy DSP on the audio thread. Muting feeds silence rather than dropping the frame so the
-    // provider's realtime stream and the AEC render cadence stay continuous — halting the upstream
-    // audio entirely disrupts the session's VAD/turn detection (the model's output cuts out).
+    // Realtime callback: mute-gate, downmix to mono f32, forward. No heavy DSP on the audio thread.
+    // Muting drops frames here; the manager separately signals the provider that the audio stream
+    // paused (`end_audio_stream`), so no silence needs to be streamed to keep the session healthy.
     let (raw_tx, raw_rx) = channel::<Vec<f32>>();
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
@@ -132,12 +130,9 @@ fn run_capture(
             device.build_input_stream(
                 &config,
                 move |input: &[f32], _| {
-                    let mono = if muted.load(Ordering::Relaxed) {
-                        vec![0.0; input.len() / channels.max(1)]
-                    } else {
-                        downmix_f32(input, channels)
-                    };
-                    let _ = raw_tx.send(mono);
+                    if !muted.load(Ordering::Relaxed) {
+                        let _ = raw_tx.send(downmix_f32(input, channels));
+                    }
                 },
                 err_fn,
                 None,
@@ -149,12 +144,9 @@ fn run_capture(
             device.build_input_stream(
                 &config,
                 move |input: &[i16], _| {
-                    let mono = if muted.load(Ordering::Relaxed) {
-                        vec![0.0; input.len() / channels.max(1)]
-                    } else {
-                        downmix_i16(input, channels)
-                    };
-                    let _ = raw_tx.send(mono);
+                    if !muted.load(Ordering::Relaxed) {
+                        let _ = raw_tx.send(downmix_i16(input, channels));
+                    }
                 },
                 err_fn,
                 None,

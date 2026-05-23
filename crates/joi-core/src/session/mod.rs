@@ -100,6 +100,14 @@ pub trait RealtimeSession: Send {
     /// Send a text message (e.g. typed input).
     async fn send_text(&mut self, text: &str) -> Result<(), SessionError>;
 
+    /// Signal that the mic audio stream has paused (e.g. the user muted) so the provider finalizes
+    /// the current turn and stops expecting audio until the next [`send_audio`](Self::send_audio)
+    /// reopens it. The default is a no-op — a provider without an explicit pause signal just stops
+    /// receiving audio.
+    async fn end_audio_stream(&mut self) -> Result<(), SessionError> {
+        Ok(())
+    }
+
     /// `[POST]` Return a tool result to the provider. Unused in the MVP; the default rejects
     /// (SPEC §10).
     async fn send_tool_result(
