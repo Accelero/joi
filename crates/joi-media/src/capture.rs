@@ -31,6 +31,7 @@ const APM_FRAME: usize = (APM_RATE / 100) as usize;
 /// range instead of growing unboundedly.
 const MAX_RENDER_BACKLOG: usize = APM_FRAME * 20;
 /// Emit a mic-level diagnostic line once per this many APM frames (1 s = 100 × 10 ms frames).
+#[cfg(debug_assertions)]
 const LEVEL_LOG_FRAMES: usize = APM_RATE as usize / APM_FRAME;
 
 /// Stops capture when dropped — the input stream + processing loop live on a dedicated thread that
@@ -165,12 +166,6 @@ fn run_capture(
     );
 
     let mut pipeline = CapturePipeline::new(device_rate, render.rate, frame_samples, apm);
-    // DIAGNOSTIC: measure the *actual* mono input rate vs the rate we assume for resampling. If the
-    // device delivers a different rate than `default_input_config` reported (e.g. a PipeWire virtual
-    // source negotiated at 44.1 k but feeding 48 k), every resample is wrong and the audio sent to
-    // the provider is pitch/speed-distorted — i.e. unintelligible. Logged once per ~second.
-    let mut rx_samples: u64 = 0;
-    let mut rx_since = std::time::Instant::now();
     loop {
         // Buffer the far-end reference (what we're playing); `process` consumes it 1:1 with capture
         // frames so the AEC sees both at the same cadence. Drains all that's queued; ends quietly
@@ -180,19 +175,7 @@ fn run_capture(
         }
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mono) => {
-                rx_samples += mono.len() as u64;
-                let elapsed = rx_since.elapsed();
-                if elapsed >= Duration::from_secs(1) {
-                    #[allow(clippy::cast_precision_loss)]
-                    let actual_rate = rx_samples as f64 / elapsed.as_secs_f64();
-                    tracing::debug!(
-                        assumed_rate = device_rate,
-                        actual_rate,
-                        "mic input rate (mono samples/s)"
-                    );
-                    rx_samples = 0;
-                    rx_since = std::time::Instant::now();
-                }
+                pipeline.diag.on_input(&mono, device_rate);
                 pipeline.process(&mono, frames);
             }
             // No samples for a while: stop if the handle was dropped, else keep waiting.
@@ -210,12 +193,14 @@ fn run_capture(
 /// Accumulates sum-of-squares to report a signal's mean RMS level in dBFS, for capture diagnostics.
 /// Samples are full-scale floats (±1.0), so 0 dBFS is full scale; speech typically lands around
 /// −30…−15 dBFS and a silent/dead signal floors at [`LevelMeter::FLOOR_DBFS`].
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct LevelMeter {
     sum_sq: f64,
     samples: u64,
 }
 
+#[cfg(debug_assertions)]
 impl LevelMeter {
     /// Reported level when no signal is present, so `log10` never goes to −∞.
     const FLOOR_DBFS: f32 = -120.0;
@@ -248,6 +233,124 @@ impl LevelMeter {
     }
 }
 
+/// Per-second capture diagnostics: mic RMS levels (raw / pre-APM / post-APM / far-end reference)
+/// and the actual input sample rate vs the assumed one.
+///
+/// **Debug builds only.** Compiled behind `debug_assertions`, so `cargo run`/`tauri dev` get it but
+/// the release standalone (`tauri build`) gets the zero-cost no-op stubs below — none of the
+/// metering or `tracing::debug!` calls are in the shipped binary. View output with
+/// `RUST_LOG=joi_media=debug`.
+#[cfg(debug_assertions)]
+struct CaptureDiag {
+    echo_cancellation: bool,
+    raw: LevelMeter,
+    pre_apm: LevelMeter,
+    post_apm: LevelMeter,
+    render: LevelMeter,
+    frames_since_log: usize,
+    rx_samples: u64,
+    rx_since: std::time::Instant,
+}
+
+#[cfg(debug_assertions)]
+impl CaptureDiag {
+    fn new(echo_cancellation: bool) -> Self {
+        Self {
+            echo_cancellation,
+            raw: LevelMeter::default(),
+            pre_apm: LevelMeter::default(),
+            post_apm: LevelMeter::default(),
+            render: LevelMeter::default(),
+            frames_since_log: 0,
+            rx_samples: 0,
+            rx_since: std::time::Instant::now(),
+        }
+    }
+
+    fn tap_raw(&mut self, mono: &[f32]) {
+        self.raw.add(mono);
+    }
+    fn tap_render(&mut self, frame: &[f32]) {
+        self.render.add(frame);
+    }
+    fn tap_pre(&mut self, frame: &[f32]) {
+        self.pre_apm.add(frame);
+    }
+    fn tap_post(&mut self, out: &[f32]) {
+        self.post_apm.add(out);
+    }
+
+    /// Count one processed APM frame; emit the levels line every [`LEVEL_LOG_FRAMES`] (~1 s). Low
+    /// `raw`/`pre_apm` ⇒ mic too quiet for VAD; `post_apm` far below `pre_apm` ⇒ APM (likely AEC) is
+    /// suppressing the user's voice; `render` rises when Joi plays (the AEC reference is live).
+    fn on_apm_frame(&mut self) {
+        self.frames_since_log += 1;
+        if self.frames_since_log < LEVEL_LOG_FRAMES {
+            return;
+        }
+        self.frames_since_log = 0;
+        let raw_dbfs = self.raw.drain_dbfs();
+        let pre_apm_dbfs = self.pre_apm.drain_dbfs();
+        let post_apm_dbfs = self.post_apm.drain_dbfs();
+        if self.echo_cancellation {
+            let render_dbfs = self.render.drain_dbfs();
+            tracing::debug!(
+                raw_dbfs,
+                pre_apm_dbfs,
+                post_apm_dbfs,
+                render_dbfs,
+                "mic levels (dBFS)"
+            );
+        } else {
+            tracing::debug!(
+                raw_dbfs,
+                pre_apm_dbfs,
+                post_apm_dbfs,
+                "mic levels (dBFS, AEC off)"
+            );
+        }
+    }
+
+    /// Accumulate received mono samples; once per second log actual vs assumed input rate. A
+    /// mismatch means the device feeds a different rate than we resample for → distorted audio.
+    fn on_input(&mut self, mono: &[f32], assumed_rate: u32) {
+        self.rx_samples += mono.len() as u64;
+        let elapsed = self.rx_since.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        #[allow(clippy::cast_precision_loss)] // sample counts stay well within f64's exact range
+        let actual_rate = self.rx_samples as f64 / elapsed.as_secs_f64();
+        tracing::debug!(assumed_rate, actual_rate, "mic input rate (mono samples/s)");
+        self.rx_samples = 0;
+        self.rx_since = std::time::Instant::now();
+    }
+}
+
+/// Release stub: zero-sized, all methods no-ops — the diagnostics aren't compiled into the binary.
+#[cfg(not(debug_assertions))]
+struct CaptureDiag;
+
+#[cfg(not(debug_assertions))]
+impl CaptureDiag {
+    #[inline]
+    fn new(_echo_cancellation: bool) -> Self {
+        Self
+    }
+    #[inline]
+    fn tap_raw(&mut self, _mono: &[f32]) {}
+    #[inline]
+    fn tap_render(&mut self, _frame: &[f32]) {}
+    #[inline]
+    fn tap_pre(&mut self, _frame: &[f32]) {}
+    #[inline]
+    fn tap_post(&mut self, _out: &[f32]) {}
+    #[inline]
+    fn on_apm_frame(&mut self) {}
+    #[inline]
+    fn on_input(&mut self, _mono: &[f32], _assumed_rate: u32) {}
+}
+
 /// Resample → APM (echo cancellation + noise suppression + AGC) → 20 ms PCM16 framing. Lives on the
 /// capture thread, so the APM (which is `!Send`-agnostic here) never crosses to the realtime
 /// callback. Both the near-end (mic) and far-end (playback) streams are fed at 16 kHz in 10 ms APM
@@ -266,14 +369,8 @@ struct CapturePipeline {
     /// Far-end (render/playback) samples awaiting a full 10 ms APM frame.
     render_in: Vec<f32>,
     out: FrameAccumulator,
-    /// Diagnostic RMS taps: raw mic in, APM input (post-resample), APM output, far-end reference.
-    /// Flushed to a `debug!` line every [`LEVEL_LOG_FRAMES`] APM frames (~1 s).
-    lvl_raw: LevelMeter,
-    lvl_pre_apm: LevelMeter,
-    lvl_post_apm: LevelMeter,
-    lvl_render: LevelMeter,
-    /// APM frames processed since the last level log.
-    frames_since_log: usize,
+    /// Per-second level/rate diagnostics (debug builds only; no-op in release).
+    diag: CaptureDiag,
 }
 
 impl CapturePipeline {
@@ -307,17 +404,13 @@ impl CapturePipeline {
             apm_in: Vec::new(),
             render_in: Vec::new(),
             out: FrameAccumulator::new(frame_samples),
-            lvl_raw: LevelMeter::default(),
-            lvl_pre_apm: LevelMeter::default(),
-            lvl_post_apm: LevelMeter::default(),
-            lvl_render: LevelMeter::default(),
-            frames_since_log: 0,
+            diag: CaptureDiag::new(echo_cancellation),
         }
     }
 
     fn process(&mut self, mono_device: &[f32], frames: &tokio::sync::mpsc::Sender<Vec<i16>>) {
         // Down to 16 kHz, then accumulate 10 ms APM frames.
-        self.lvl_raw.add(mono_device);
+        self.diag.tap_raw(mono_device);
         let pcm = pcm16_from_f32(mono_device);
         let resampled = resample_linear(&pcm, self.device_rate, APM_RATE);
         self.apm_in
@@ -339,55 +432,24 @@ impl CapturePipeline {
                 let _ = self
                     .apm
                     .process_render_f32(&[&render_frame], &mut [&mut render_out]);
-                self.lvl_render.add(&render_frame);
+                self.diag.tap_render(&render_frame);
             }
 
             let frame: Vec<f32> = self.apm_in.drain(..APM_FRAME).collect();
-            self.lvl_pre_apm.add(&frame);
+            self.diag.tap_pre(&frame);
             let mut out = vec![0.0f32; APM_FRAME];
             if self
                 .apm
                 .process_capture_f32(&[&frame], &mut [&mut out])
                 .is_ok()
             {
-                self.lvl_post_apm.add(&out);
+                self.diag.tap_post(&out);
                 for done in self.out.push(&pcm16_from_f32(&out)) {
                     let _ = frames.try_send(done);
                 }
             }
 
-            self.frames_since_log += 1;
-            if self.frames_since_log >= LEVEL_LOG_FRAMES {
-                self.log_levels();
-            }
-        }
-    }
-
-    /// Emit the accumulated RMS taps as one diagnostic line and reset the window. Lets us see at a
-    /// glance whether the mic is too quiet for Gemini's VAD (low `raw`/`pre_apm`) or the APM — most
-    /// likely AEC on speakers — is suppressing the user's voice (`post_apm` far below `pre_apm`).
-    /// Enable with `RUST_LOG=joi_media=debug` (or `logging.level: debug`).
-    fn log_levels(&mut self) {
-        let raw_dbfs = self.lvl_raw.drain_dbfs();
-        let pre_apm_dbfs = self.lvl_pre_apm.drain_dbfs();
-        let post_apm_dbfs = self.lvl_post_apm.drain_dbfs();
-        self.frames_since_log = 0;
-        if self.echo_cancellation {
-            let render_dbfs = self.lvl_render.drain_dbfs();
-            tracing::debug!(
-                raw_dbfs,
-                pre_apm_dbfs,
-                post_apm_dbfs,
-                render_dbfs,
-                "mic levels (dBFS)"
-            );
-        } else {
-            tracing::debug!(
-                raw_dbfs,
-                pre_apm_dbfs,
-                post_apm_dbfs,
-                "mic levels (dBFS, AEC off)"
-            );
+            self.diag.on_apm_frame();
         }
     }
 
