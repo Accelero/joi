@@ -22,6 +22,7 @@ use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
 
 use joi_core::error::SessionError;
 use joi_core::media::{self, VideoFrame};
+use joi_core::metrics::TransportBytes;
 use joi_core::session::event::{
     CloseReason, EventReceiver, EventSender, SessionEvent, Speaker, TurnEvent,
 };
@@ -164,6 +165,11 @@ impl RealtimeSession for GeminiAdapter {
             native_screen_input: false,
             async_tool_calls: false,
         }
+    }
+
+    fn transport_bytes(&self) -> Option<TransportBytes> {
+        let (sent, received) = self.session.as_ref()?.transport_bytes()?;
+        Some(TransportBytes { sent, received })
     }
 }
 

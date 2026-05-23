@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::error::SessionError;
 use crate::history::HistoryTurn;
 use crate::media::{AudioFormat, VideoFrame};
+use crate::metrics::TransportBytes;
 use crate::tools::{ToolCallId, ToolResult, ToolSchema};
 
 pub use event::{
@@ -117,4 +118,11 @@ pub trait RealtimeSession: Send {
 
     /// This provider's capability flags.
     fn capabilities(&self) -> Capabilities;
+
+    /// Cumulative wire-byte counters for the live connection, if this provider measures them.
+    /// `None` (the default) means it doesn't — the [`crate::manager::SessionManager`] then reports
+    /// a payload-level estimate instead. Counts are monotonic for one connection's lifetime.
+    fn transport_bytes(&self) -> Option<TransportBytes> {
+        None
+    }
 }

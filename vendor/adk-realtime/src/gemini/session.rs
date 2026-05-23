@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -212,6 +212,10 @@ pub struct GeminiRealtimeSession {
     receiver: Arc<Mutex<WsSource>>,
     audio_buffer: Arc<ParkingMutex<BytesMut>>,
     event_queue: Arc<Mutex<std::collections::VecDeque<ServerEvent>>>,
+    // PATCH(joi): cumulative WebSocket frame payload bytes (base64+JSON), in each direction, over
+    // the connection's lifetime — surfaced via `transport_bytes` for Joi's throughput meter.
+    bytes_sent: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
 }
 
 impl GeminiRealtimeSession {
@@ -305,17 +309,24 @@ impl GeminiRealtimeSession {
 
         let (mut sink, source) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
+        // PATCH(joi): per-connection transport byte counters (see struct fields).
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
         let (outbound_tx, mut outbound_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let writer_connected = Arc::clone(&connected);
+        let writer_bytes_sent = Arc::clone(&bytes_sent);
         let writer_task = tokio::spawn(async move {
             while let Some(message) = outbound_rx.recv().await {
                 // Close frames are terminal for the writer lifecycle: send once then stop.
                 let should_close = matches!(message, Message::Close(_));
+                // PATCH(joi): record the outbound frame's payload size before `message` is moved.
+                let frame_len = message.len() as u64;
                 if let Err(error) = sink.send(message).await {
                     writer_connected.store(false, Ordering::SeqCst);
                     tracing::warn!(error = %error, "gemini websocket writer send failed");
                     break;
                 }
+                writer_bytes_sent.fetch_add(frame_len, Ordering::Relaxed);
                 if should_close {
                     break;
                 }
@@ -334,6 +345,8 @@ impl GeminiRealtimeSession {
             receiver: Arc::new(Mutex::new(source)),
             audio_buffer: Arc::new(ParkingMutex::new(BytesMut::new())),
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            bytes_sent,
+            bytes_received,
         };
 
         session.send_setup(model, config).await?;
@@ -458,7 +471,12 @@ impl GeminiRealtimeSession {
 
         let mut receiver = self.receiver.lock().await;
 
-        match receiver.next().await {
+        // PATCH(joi): count the inbound frame's payload size (base64+JSON) before it's consumed.
+        let next = receiver.next().await;
+        if let Some(Ok(message)) = &next {
+            self.bytes_received.fetch_add(message.len() as u64, Ordering::Relaxed);
+        }
+        match next {
             Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
                 Ok(events) => {
                     let mut queue = self.event_queue.lock().await;
@@ -656,6 +674,14 @@ impl RealtimeSession for GeminiRealtimeSession {
 
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    // PATCH(joi): report the lifetime WS frame payload byte counts maintained by the writer/reader.
+    fn transport_bytes(&self) -> Option<(u64, u64)> {
+        Some((
+            self.bytes_sent.load(Ordering::Relaxed),
+            self.bytes_received.load(Ordering::Relaxed),
+        ))
     }
 
     async fn send_audio(&self, audio: &AudioChunk) -> Result<()> {

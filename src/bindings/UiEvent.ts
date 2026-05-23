@@ -2,11 +2,15 @@
 import type { AppState } from "./AppState";
 import type { ConnectionStatus } from "./ConnectionStatus";
 import type { HistoryMeta } from "./HistoryMeta";
+import type { MetricsSnapshot } from "./MetricsSnapshot";
 import type { Speaker } from "./Speaker";
 
 /**
  * UI-facing event emitted to the webview (SPEC §11.3). Audio is **not** here — it streams over the
  * binary `tauri::ipc::Channel` (SPEC §11.2).
+ *
+ * Not `Eq`: the `Metrics` payload carries `f64` rates (`MetricsSnapshot`), which have no total
+ * equality. `PartialEq` is kept for tests and change-detection.
  */
 export type UiEvent = { "type": "state", 
 /**
@@ -32,7 +36,7 @@ status: ConnectionStatus,
 /**
  * Optional human-readable detail.
  */
-detail: string | null, } | { "type": "history" } & HistoryMeta | { "type": "error", 
+detail: string | null, } | { "type": "history" } & HistoryMeta | { "type": "metrics" } & MetricsSnapshot | { "type": "error", 
 /**
  * Short machine-ish kind.
  */

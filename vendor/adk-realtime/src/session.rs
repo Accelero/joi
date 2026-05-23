@@ -53,6 +53,13 @@ pub trait RealtimeSession: Send + Sync {
     /// Check if the session is currently connected.
     fn is_connected(&self) -> bool;
 
+    /// PATCH(joi): Cumulative WebSocket frame payload bytes `(sent, received)` over this
+    /// connection's lifetime, if the provider tracks them. `None` = not measured. Joi differences
+    /// successive reads to report wire-level (base64+JSON) throughput in kbit/s.
+    fn transport_bytes(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     /// Send raw audio data to the server.
     ///
     /// The audio should be in the format specified in the session configuration.

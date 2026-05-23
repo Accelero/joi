@@ -10,6 +10,7 @@ const SAMPLES: Record<string, string> = {
   transcript: '{"type":"transcript","speaker":"agent","text":"hi","final":true}',
   connection: '{"type":"connection","status":"connected","detail":null}',
   history: '{"type":"history","turns":2,"token_estimate":12,"budget":32000}',
+  metrics: '{"type":"metrics","up_kbps":256,"down_kbps":384,"tokens_per_sec":12.5}',
   error: '{"type":"error","kind":"auth","message":"invalid key"}',
 };
 
@@ -32,6 +33,11 @@ describe("UiEvent parity", () => {
         case "history":
           expect(ev.turns).toBe(2);
           expect(ev.budget).toBe(32000);
+          break;
+        case "metrics":
+          expect(ev.up_kbps).toBe(256);
+          expect(ev.down_kbps).toBe(384);
+          expect(ev.tokens_per_sec).toBe(12.5);
           break;
         case "error":
           expect(ev.kind).toBe("auth");

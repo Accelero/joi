@@ -25,6 +25,7 @@ pub mod error;
 pub mod history;
 pub mod manager;
 pub mod media;
+pub mod metrics;
 pub mod session;
 pub mod tools;
 

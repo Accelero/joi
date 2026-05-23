@@ -12,16 +12,23 @@
 //! borrow `self` freely.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::clock::Clock;
+use crate::clock::{Clock, UnixMillis};
 use crate::config::Config;
 use crate::error::SessionError;
 use crate::history::{HistoryStore, HistoryTurn, Role, TokenBudget};
 use crate::media::VideoFrame;
+use crate::metrics::{
+    bytes_to_kbps, MetricsSnapshot, ThroughputMeter, TransportBytes, SAMPLE_INTERVAL,
+};
 use crate::session::event::{AppState, CloseReason, ConnectionStatus, SessionEvent, Speaker};
 use crate::session::{RealtimeSession, SessionConfig, UiEvent};
+
+/// Bytes per PCM16 sample — used to weigh audio frames into the throughput meter.
+const BYTES_PER_SAMPLE: u64 = 2;
 
 /// Capacity of the inbound command channel.
 const COMMAND_CHANNEL: usize = 64;
@@ -194,7 +201,6 @@ impl SessionManagerHandle {
 /// The actor. Owns the session, history, and config; serves commands from a single task.
 pub struct SessionManager {
     config: Config,
-    #[allow(dead_code)] // used once lifecycle timing/backoff lands (M3)
     clock: Arc<dyn Clock>,
     history: Arc<dyn HistoryStore>,
     factory: Arc<dyn SessionFactory>,
@@ -207,6 +213,14 @@ pub struct SessionManager {
     /// Accumulates the current transcript line's incremental deltas so the full line can be
     /// appended to history when it finalizes (the provider streams deltas; SPEC §11.3).
     transcript_line: String,
+    /// Rolling payload byte/token tallies, drained into a `UiEvent::Metrics` each `SAMPLE_INTERVAL`.
+    /// Supplies the token rate always, and the up/down rates when the provider can't report wire bytes.
+    meter: ThroughputMeter,
+    /// Clock time of the last metrics sample, so the next rate covers the real elapsed window.
+    last_sample_ms: UnixMillis,
+    /// Provider wire-byte totals at the previous sample, differenced to get the per-window rate.
+    /// `None` until the first sample of a connection (and after stop) so we don't report a spike.
+    last_transport: Option<TransportBytes>,
 }
 
 impl SessionManager {
@@ -222,6 +236,7 @@ impl SessionManager {
         let (audio_tx, _) = broadcast::channel(MEDIA_CHANNEL);
         let (ev_tx, ev_rx) = mpsc::channel(MEDIA_CHANNEL);
 
+        let last_sample_ms = clock.now_ms();
         let actor = SessionManager {
             config,
             clock,
@@ -234,6 +249,9 @@ impl SessionManager {
             mic_muted: false,
             last_resumption_handle: None,
             transcript_line: String::new(),
+            meter: ThroughputMeter::default(),
+            last_sample_ms,
+            last_transport: None,
         };
         tokio::spawn(actor.run(cmd_rx, ev_rx));
         SessionManagerHandle {
@@ -251,6 +269,9 @@ impl SessionManager {
         mut ev_rx: mpsc::Receiver<SessionEvent>,
     ) {
         let mut session: Option<Box<dyn RealtimeSession>> = None;
+        let mut metrics_tick = tokio::time::interval(SAMPLE_INTERVAL);
+        // Don't pile up catch-up ticks if the actor was busy; one late tick is enough.
+        metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 maybe_cmd = cmd_rx.recv() => {
@@ -265,6 +286,9 @@ impl SessionManager {
                 }
                 Some(event) = ev_rx.recv() => {
                     self.handle_event(event).await;
+                }
+                _ = metrics_tick.tick() => {
+                    self.sample_metrics(session.as_deref());
                 }
             }
         }
@@ -291,7 +315,10 @@ impl SessionManager {
             }
             Command::SendText { text, reply } => {
                 let res = match session.as_mut() {
-                    Some(s) => s.send_text(&text).await,
+                    Some(s) => {
+                        self.meter.add_up(text.len() as u64);
+                        s.send_text(&text).await
+                    }
                     None => Err(SessionError::NotConnected),
                 };
                 let _ = reply.send(res);
@@ -300,7 +327,10 @@ impl SessionManager {
                 if !self.mic_muted {
                     // Borrow ends before any teardown so we can drop the dead session below.
                     let result = match session.as_mut() {
-                        Some(s) => Some(s.send_audio(&pcm).await),
+                        Some(s) => {
+                            self.meter.add_up(pcm.len() as u64 * BYTES_PER_SAMPLE);
+                            Some(s.send_audio(&pcm).await)
+                        }
                         None => None,
                     };
                     if let Some(Err(e)) = result {
@@ -314,6 +344,7 @@ impl SessionManager {
             }
             Command::SendFrame { frame } => {
                 if let Some(s) = session.as_mut() {
+                    self.meter.add_up(frame.data.len() as u64);
                     if let Err(e) = s.send_video_frame(&frame).await {
                         self.on_error("frame_send", &e);
                     }
@@ -374,6 +405,11 @@ impl SessionManager {
         });
 
         *session = Some(new_session);
+        // Start the throughput window fresh so the first sample measures from connect, not from a
+        // possibly-long idle gap since the last session.
+        self.meter.reset();
+        self.last_sample_ms = self.clock.now_ms();
+        self.last_transport = None;
         self.set_state(AppState::Listening);
         self.emit_connection(ConnectionStatus::Connected, None);
         Ok(())
@@ -386,6 +422,10 @@ impl SessionManager {
         if self.state != AppState::Stopped {
             self.set_state(AppState::Stopped);
             self.emit_connection(ConnectionStatus::Disconnected, None);
+            // Clear the live indicator: drop any partial window and emit one zero sample.
+            self.meter.reset();
+            self.last_transport = None;
+            self.emit(UiEvent::Metrics(MetricsSnapshot::ZERO));
         }
     }
 
@@ -407,6 +447,7 @@ impl SessionManager {
     async fn handle_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::AudioOutput { pcm } => {
+                self.meter.add_down(pcm.len() as u64 * BYTES_PER_SAMPLE);
                 self.set_state(AppState::Speaking);
                 let _ = self.audio_tx.send(pcm);
             }
@@ -415,6 +456,12 @@ impl SessionManager {
                 text,
                 final_,
             } => {
+                // Transcripts arrive from the provider (down); the agent's words also feed the
+                // token-rate estimate (the user's input transcription does not — it's not output).
+                self.meter.add_down(text.len() as u64);
+                if speaker == Speaker::Agent {
+                    self.meter.add_output_text(&text);
+                }
                 // `text` is an incremental delta: accumulate the line for history, forward the
                 // delta to the UI (which appends it). On finalize, persist the whole line.
                 self.transcript_line.push_str(&text);
@@ -478,6 +525,43 @@ impl SessionManager {
         }
     }
 
+    /// Drain the throughput window into a `UiEvent::Metrics` (called on each `SAMPLE_INTERVAL`
+    /// tick). No-op while stopped — the zero sample emitted at stop already cleared the indicator,
+    /// and we keep the window/clock fresh so the first post-start sample is accurate.
+    ///
+    /// The token rate always comes from the meter. For up/down bytes we prefer the provider's
+    /// **wire** counters (actual WS frame payload — base64+JSON) when it reports them, differencing
+    /// successive totals over the elapsed window; otherwise we fall back to the meter's
+    /// payload-level estimate (e.g. providers/test doubles that don't measure their socket).
+    fn sample_metrics(&mut self, session: Option<&dyn RealtimeSession>) {
+        if self.state == AppState::Stopped {
+            self.meter.reset();
+            self.last_transport = None;
+            self.last_sample_ms = self.clock.now_ms();
+            return;
+        }
+        let now = self.clock.now_ms();
+        let elapsed = Duration::from_millis(now.saturating_sub(self.last_sample_ms));
+        let Some(mut snapshot) = self.meter.sample(elapsed) else {
+            return; // no time elapsed (e.g. a frozen test clock); keep counters for the next tick
+        };
+
+        // Prefer the provider's wire-byte counters, differencing successive totals over the window.
+        if let Some(current) = session.and_then(RealtimeSession::transport_bytes) {
+            let secs = elapsed.as_secs_f64();
+            // The first sample of a connection has no baseline; treat `prev == current` so it
+            // reports zero rather than a spike from the connect/setup handshake.
+            let prev = self.last_transport.unwrap_or(current);
+            snapshot.up_kbps = bytes_to_kbps(current.sent.saturating_sub(prev.sent), secs);
+            snapshot.down_kbps =
+                bytes_to_kbps(current.received.saturating_sub(prev.received), secs);
+            self.last_transport = Some(current);
+        }
+
+        self.last_sample_ms = now;
+        self.emit(UiEvent::Metrics(snapshot));
+    }
+
     fn set_state(&mut self, state: AppState) {
         if self.state != state {
             self.state = state;
@@ -503,7 +587,12 @@ impl SessionManager {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
     use crate::clock::TestClock;
@@ -516,10 +605,15 @@ mod tests {
 
     /// A minimal scripted session: each `send_text`/`send_audio` pushes deterministic events.
     /// `closed` counts `close()` calls so tests can prove Stop tears the session down.
+    /// Externally-controlled `(sent, received)` wire-byte totals a test can drive directly.
+    type WireCounters = (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64);
+
     struct ScriptedSession {
         tx: Option<EventSender>,
         rx: Option<EventReceiver>,
         closed: Arc<std::sync::atomic::AtomicUsize>,
+        /// When set, the session reports these as `transport_bytes` (the wire-metering path).
+        transport: Option<Arc<WireCounters>>,
     }
 
     impl ScriptedSession {
@@ -532,6 +626,14 @@ mod tests {
                 tx: None,
                 rx: None,
                 closed,
+                transport: None,
+            }
+        }
+
+        fn with_transport(transport: Arc<WireCounters>) -> Self {
+            Self {
+                transport: Some(transport),
+                ..Self::new()
             }
         }
     }
@@ -613,17 +715,31 @@ mod tests {
                 async_tool_calls: false,
             }
         }
+
+        fn transport_bytes(&self) -> Option<TransportBytes> {
+            use std::sync::atomic::Ordering;
+            self.transport.as_ref().map(|c| TransportBytes {
+                sent: c.0.load(Ordering::SeqCst),
+                received: c.1.load(Ordering::SeqCst),
+            })
+        }
     }
 
     fn spawn_manager() -> (SessionManagerHandle, Arc<InMemoryHistory>) {
+        let (handle, history, _clock) = spawn_manager_with_clock();
+        (handle, history)
+    }
+
+    fn spawn_manager_with_clock() -> (SessionManagerHandle, Arc<InMemoryHistory>, TestClock) {
         let history = Arc::new(InMemoryHistory::new());
+        let clock = TestClock::new(1_000);
         let handle = SessionManager::spawn(
             Config::default(),
-            Arc::new(TestClock::new(1_000)),
+            Arc::new(clock.clone()),
             history.clone(),
             Arc::new(|| Box::new(ScriptedSession::new()) as Box<dyn RealtimeSession>),
         );
-        (handle, history)
+        (handle, history, clock)
     }
 
     async fn next_ui(rx: &mut broadcast::Receiver<UiEvent>) -> UiEvent {
@@ -632,6 +748,14 @@ mod tests {
                 Ok(Ok(ev)) => return ev,
                 Ok(Err(RecvError::Lagged(_))) => {}
                 other => panic!("expected a UI event, got {other:?}"),
+            }
+        }
+    }
+
+    async fn next_metrics(rx: &mut broadcast::Receiver<UiEvent>) -> MetricsSnapshot {
+        loop {
+            if let UiEvent::Metrics(m) = next_ui(rx).await {
+                return m;
             }
         }
     }
@@ -763,6 +887,94 @@ mod tests {
         }
         assert!(frames >= 5);
         handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_sample_reports_upstream_throughput() {
+        // Send mic audio, advance the clock a full window, and prove the periodic sample surfaces
+        // a non-zero up rate as a `UiEvent::Metrics` the frontend can render.
+        let (handle, _history, clock) = spawn_manager_with_clock();
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        for _ in 0..5 {
+            handle.send_audio(vec![0; 320]).await.unwrap();
+        }
+        // One second of clock time elapses before the next real interval tick fires sample_metrics.
+        clock.advance(1_000);
+
+        let mut up = None;
+        for _ in 0..50 {
+            if let UiEvent::Metrics(m) = next_ui(&mut ui).await {
+                if m.up_kbps > 0.0 {
+                    up = Some(m);
+                    break;
+                }
+            }
+        }
+        let snap = up.expect("a non-zero up-rate metrics sample");
+        // 5 frames * 320 samples * 2 bytes = 3200 bytes over ~1 s.
+        assert!(snap.up_kbps > 0.0, "up rate should be positive: {snap:?}");
+        handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_prefer_provider_wire_bytes_over_payload_estimate() {
+        // The provider reports growing wire totals while *no* mic audio is sent, so a positive
+        // down rate can only come from the wire counters — proving they override the payload meter.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let wire = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+        let clock = TestClock::new(1_000);
+        let factory_wire = Arc::clone(&wire);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_transport(Arc::clone(&factory_wire)))
+                    as Box<dyn RealtimeSession>
+            }),
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+
+        // Phase 1: advance a window so one sample establishes the baseline (no traffic -> zero).
+        clock.advance(1_000);
+        let baseline = next_metrics(&mut ui).await;
+        assert_eq!(baseline.down_kbps, 0.0, "first sample is the baseline");
+
+        // Phase 2: grow only the *received* wire total; the next sample must show a positive down
+        // rate even though no SendAudio ever ran (so it can't come from the payload meter).
+        wire.1.store(2_000, Ordering::SeqCst);
+        clock.advance(1_000);
+        let mut down = 0.0;
+        for _ in 0..50 {
+            let m = next_metrics(&mut ui).await;
+            if m.down_kbps > 0.0 {
+                down = m.down_kbps;
+                break;
+            }
+        }
+        // 2000 bytes over ~1 s = 16 kbit/s.
+        assert!(down > 0.0, "wire down rate should be positive, got {down}");
+        handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_emits_zero_metrics_to_clear_the_indicator() {
+        let (handle, _history, _clock) = spawn_manager_with_clock();
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.stop(false).await.unwrap();
+
+        let mut saw_zero = false;
+        while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(100), ui.recv()).await {
+            if let UiEvent::Metrics(m) = ev {
+                if m == MetricsSnapshot::ZERO {
+                    saw_zero = true;
+                }
+            }
+        }
+        assert!(saw_zero, "stop must emit a zero metrics sample");
     }
 
     #[tokio::test]

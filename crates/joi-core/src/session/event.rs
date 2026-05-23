@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SessionError;
 use crate::history::HistoryMeta;
+use crate::metrics::MetricsSnapshot;
 use crate::tools::ToolCallId;
 
 /// Owned receiver for a session's event stream (SPEC §4 — taken once via `take_events`).
@@ -134,7 +135,10 @@ pub enum ConnectionStatus {
 
 /// UI-facing event emitted to the webview (SPEC §11.3). Audio is **not** here — it streams over the
 /// binary `tauri::ipc::Channel` (SPEC §11.2).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+///
+/// Not `Eq`: the `Metrics` payload carries `f64` rates (`MetricsSnapshot`), which have no total
+/// equality. `PartialEq` is kept for tests and change-detection.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum UiEvent {
@@ -162,6 +166,9 @@ pub enum UiEvent {
     },
     /// History changed (append/prune) — drives the history meta in the UI.
     History(HistoryMeta),
+    /// A throughput sample (up/down kbit/s + tokens/s), emitted roughly once a second while a
+    /// session is live so the UI can render a live bandwidth/generation-speed indicator.
+    Metrics(MetricsSnapshot),
     /// A surfaced error.
     Error {
         /// Short machine-ish kind.
