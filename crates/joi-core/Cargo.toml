@@ -19,6 +19,7 @@ tokio.workspace = true
 tracing.workspace = true
 figment.workspace = true
 directories.workspace = true
+ts-rs.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

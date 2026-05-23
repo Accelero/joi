@@ -17,8 +17,9 @@ pub type EventReceiver = tokio::sync::mpsc::Receiver<SessionEvent>;
 pub type EventSender = tokio::sync::mpsc::Sender<SessionEvent>;
 
 /// Who is speaking in a transcript line (SPEC §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum Speaker {
     /// The human user.
     User,
@@ -96,8 +97,9 @@ pub enum SessionEvent {
 }
 
 /// High-level lifecycle/UI state surfaced to the user at all times (FR-4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum AppState {
     /// No session, no cost.
     Stopped,
@@ -116,8 +118,9 @@ pub enum AppState {
 }
 
 /// Connection status detail surfaced via the `connection` event (SPEC §11.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum ConnectionStatus {
     /// Disconnected.
     Disconnected,
@@ -131,8 +134,9 @@ pub enum ConnectionStatus {
 
 /// UI-facing event emitted to the webview (SPEC §11.3). Audio is **not** here — it streams over the
 /// binary `tauri::ipc::Channel` (SPEC §11.2).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
 pub enum UiEvent {
     /// Lifecycle/UI state change (FR-4).
     State {

@@ -12,6 +12,16 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
 echo "── cargo test ──"
 cargo test --workspace
 
+# `cargo test` regenerates the ts-rs IPC bindings (joi-core `#[ts(export)]` → src/bindings). If the
+# committed copies differ, the Rust types and the frontend's TS contract have drifted — fail loudly.
+echo "── generated TS bindings are up to date (src/bindings) ──"
+if [ -n "$(git status --porcelain src/bindings)" ]; then
+  echo "!! src/bindings is out of date — run 'cargo test -p joi-core' and commit the result" >&2
+  git --no-pager diff -- src/bindings >&2
+  git --no-pager status --porcelain src/bindings >&2
+  exit 1
+fi
+
 echo "── engine stays host-agnostic (joi-app/joi-cli must not depend on Tauri) ──"
 for crate in joi-app joi-cli; do
   if cargo tree -p "$crate" -e no-dev 2>/dev/null | grep -qiE 'tauri|webkit'; then

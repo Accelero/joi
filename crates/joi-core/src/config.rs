@@ -190,7 +190,8 @@ pub struct HistoryCfg {
 }
 
 /// Terminal UI settings (SPEC §8, §13).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct TerminalCfg {
     /// ANSI theme name.
     pub theme: String,
@@ -219,7 +220,8 @@ pub struct MediaCfg {
 }
 
 /// Web-frontend settings — delivered to the UI by the host; not used by the engine itself.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct UiCfg {
     /// Terminal appearance.
     pub terminal: TerminalCfg,

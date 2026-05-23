@@ -7,7 +7,7 @@ import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { Speaker, TerminalConfig } from "../ipc";
+import type { Speaker, TerminalCfg } from "../ipc";
 
 /** Imperative surface the parent drives from `UiEvent`s. */
 export interface TerminalHandle {
@@ -38,7 +38,7 @@ export function Terminal({
   terminal,
 }: {
   ref?: Ref<TerminalHandle>;
-  terminal?: TerminalConfig;
+  terminal?: TerminalCfg;
 }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);

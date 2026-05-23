@@ -11,7 +11,7 @@ import {
   onUiEvent,
   type AppState,
   type ConnectionStatus,
-  type TerminalConfig,
+  type TerminalCfg,
 } from "./ipc";
 
 export function App(): React.JSX.Element {
@@ -21,7 +21,7 @@ export function App(): React.JSX.Element {
   const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState("");
-  const [terminalCfg, setTerminalCfg] = useState<TerminalConfig | undefined>();
+  const [terminalCfg, setTerminalCfg] = useState<TerminalCfg | undefined>();
 
   const running = state !== "stopped" && state !== "error";
   const terminalRef = useRef<TerminalHandle>(null);

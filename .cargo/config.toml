@@ -8,3 +8,9 @@
 # `WEBKIT_DISABLE_COMPOSITING_MODE` yourself if needed.
 [env]
 WEBKIT_DISABLE_DMABUF_RENDERER = "1"
+
+# Base directory ts-rs writes the generated TS IPC bindings into (S5b). `relative = true` resolves it
+# against this file's parent (the repo root) so it's portable across machines/CI. ts-rs reads this at
+# test runtime; the export tests (run by `cargo test`) emit `src/bindings/*.ts` here, and all types
+# share one dir so their cross-imports stay clean (`./Foo`). See crates/joi-core derives `#[ts(export)]`.
+TS_RS_EXPORT_DIR = { value = "src/bindings", relative = true }

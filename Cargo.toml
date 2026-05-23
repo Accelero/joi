@@ -23,6 +23,9 @@ tracing = "0.1"
 figment = { version = "0.10", features = ["env"] }
 directories = "6"
 secrecy = { version = "0.10", features = ["serde"] }
+# Generates the frontend's TS IPC types from the Rust serde types (single source of truth for
+# Seam B). Pure Rust, no OS/IO — fits joi-core's purity rule. Honors `#[serde(...)]` attrs.
+ts-rs = "11"
 
 # dev-dependencies shared across crates
 pretty_assertions = "1"

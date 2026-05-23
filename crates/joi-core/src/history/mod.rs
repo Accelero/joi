@@ -64,7 +64,8 @@ impl HistoryTurn {
 pub struct TokenBudget(pub u32);
 
 /// Summary of the current history, surfaced to the UI (SPEC §11, `history` event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct HistoryMeta {
     /// Number of stored turns.
     pub turns: usize,
