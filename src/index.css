@@ -1,12 +1,489 @@
 @import "tailwindcss";
 
+/* ── Design tokens ────────────────────────────────────────────────────────────────────────────
+   Minimal-mono "command deck" aesthetic: a near-black field, a monochrome text scale, and a single
+   cool accent used sparingly (active state, focus, caret, key highlights). Registered in @theme so
+   they're available both as Tailwind utilities (bg-base, text-fg-dim, border-line) and as raw CSS
+   vars (var(--color-accent)) in the component classes below. */
+@theme {
+  --color-base: #07090c;
+  /* Surface == panel: the deck and the transcript share one flat dark background so the terminal
+     reads as dark as the rest of the UI (only the hairline border separates them). */
+  --color-surface: #090c11;
+  --color-panel: #090c11;
+  --color-line: #44505f;
+  --color-line-soft: #2c3542;
+
+  --color-fg: #f7f9fb;
+  --color-fg-dim: #cdd6e0;
+  --color-fg-faint: #9aa4b0;
+
+  --color-accent: #9aede4;
+  --color-accent-dim: #6fb2aa;
+  --color-danger: #e08c8c;
+  --color-warn: #d8c08a;
+  --color-speak: #c3b6e6;
+  --color-think: #93b2d6;
+
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Chakra Petch", "JetBrains Mono", ui-monospace, monospace;
+}
+
 :root {
   color-scheme: dark;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  background: #0b0e14;
-  color: #cbd5e1;
+  font-family: var(--font-mono);
+  color: var(--color-fg);
+  background-color: var(--color-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(143, 233, 223, 0.22);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2b3441;
+}
+
+/* ── Animations ───────────────────────────────────────────────────────────────────────────────
+   Refined HUD = one orchestrated entrance + quiet ambient life (the live-state dot). Nothing loops
+   loudly. */
+@keyframes deck-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Status dot (color comes from inline currentColor). Soft = calm pulse (listening); active = faster,
+   scaling pulse (speaking); blink = transient states (connecting/reconnecting). */
+@keyframes dot-glow-soft {
+  0%,
+  100% {
+    box-shadow: 0 0 4px 0 currentColor;
+    opacity: 0.8;
+  }
+  50% {
+    box-shadow: 0 0 10px 1px currentColor;
+    opacity: 1;
+  }
+}
+@keyframes dot-glow-active {
+  0%,
+  100% {
+    box-shadow: 0 0 5px 0 currentColor;
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    box-shadow: 0 0 16px 4px currentColor;
+    transform: scale(1.4);
+    opacity: 1;
+  }
+}
+@keyframes dot-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Block caret: hard on/off so it reads like a terminal cursor, not a fade. */
+@keyframes caret-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ── The deck (outer frame) ───────────────────────────────────────────────────────────────────*/
+.deck {
+  position: relative;
+  z-index: 1;
+  /* Full-bleed: fills the window edge-to-edge (no outer margin), so square corners and no floating
+     shadow. A hairline border keeps a crisp frame at the window edge; the faint dotted grid lives
+     here now — atmosphere behind the rails and the panel. */
+  border: 1px solid var(--color-line);
+  background:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.022) 1px, transparent 0) 0 0 / 24px 24px,
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 120px),
+    var(--color-surface);
+  animation: deck-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  overflow: hidden;
+}
+
+/* Corner brackets — the single most "HUD" detail. Four L-marks in the dim accent. */
+.deck-corner {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-color: var(--color-accent-dim);
+  border-style: solid;
+  border-width: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.deck-corner.tl {
+  top: 7px;
+  left: 7px;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+.deck-corner.tr {
+  top: 7px;
+  right: 7px;
+  border-top-width: 1px;
+  border-right-width: 1px;
+}
+.deck-corner.bl {
+  bottom: 7px;
+  left: 7px;
+  border-bottom-width: 1px;
+  border-left-width: 1px;
+}
+.deck-corner.br {
+  bottom: 7px;
+  right: 7px;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
+}
+
+/* ── Top / bottom rails ───────────────────────────────────────────────────────────────────────*/
+.deck-top,
+.deck-bottom {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+}
+.deck-top {
+  border-bottom: 1px solid var(--color-line);
+  background: rgba(255, 255, 255, 0.012);
+}
+.deck-bottom {
+  border-top: 1px solid var(--color-line);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.brand-bar {
+  align-self: center;
+  width: 3px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--color-accent);
+  box-shadow: 0 0 10px -1px var(--color-accent);
+}
+.brand-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.34em;
+  color: var(--color-fg);
+}
+.brand-tag {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
+}
+
+.deck-clock {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1em;
+  color: var(--color-fg-dim);
+}
+
+/* Custom-titlebar window controls (min / maximize / close). Sit at the right of the drag rail; the
+   buttons themselves are not drag regions, so they stay clickable. */
+.win-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.win-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-fg-dim);
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
+}
+.win-btn svg {
+  display: block;
+}
+.win-btn:hover {
+  color: var(--color-fg);
+  background: rgba(255, 255, 255, 0.07);
+}
+.win-btn--close:hover {
+  color: #fff;
+  background: var(--color-danger);
+}
+
+/* ── Controls row ─────────────────────────────────────────────────────────────────────────────*/
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--color-line);
+}
+
+/* Connection dot in the bottom rail (color set inline per status). */
+.state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+/* HUD button: hairline outline, uppercase display micro-label, accent on focus/hover. */
+.hud-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-fg-dim);
+  border: 1px solid var(--color-line);
+  background: transparent;
+  padding: 0.42rem 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+/* Icon-only variant: square padding, the SVG inherits the button's state color via currentColor. */
+.hud-btn--icon {
+  padding: 0.5rem;
+}
+.hud-btn--icon svg {
+  display: block;
+}
+.hud-btn:hover:not(:disabled) {
+  color: var(--color-fg);
+  border-color: #5d6979;
+  background: rgba(255, 255, 255, 0.045);
+}
+.hud-btn:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent-dim);
+}
+.hud-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.hud-btn.is-primary {
+  color: var(--color-accent);
+  border-color: var(--color-accent-dim);
+}
+.hud-btn.is-primary:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 14px -3px rgba(143, 233, 223, 0.5);
+}
+.hud-btn.is-danger {
+  color: var(--color-danger);
+  border-color: #4a3032;
+}
+.hud-btn.is-danger:hover:not(:disabled) {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  box-shadow: 0 0 14px -4px rgba(224, 140, 140, 0.45);
+}
+/* Persistent "on" state for toggles (e.g. screen-share active) — accent fill, not just hover. */
+.hud-btn.is-on {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: rgba(143, 233, 223, 0.1);
+}
+
+.controls-spacer {
+  margin-left: auto;
+}
+
+/* ── Transcript panel ─────────────────────────────────────────────────────────────────────────*/
+.term-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0.85rem;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 5px;
+  background: var(--color-panel);
+  overflow: hidden;
+}
+.panel-label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--color-line-soft);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
+}
+.panel-rule {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--color-line), transparent);
+}
+.term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 0.6rem 0.75rem;
+}
+
+/* ── Terminal foot: JOI status line + TUI input prompt ────────────────────────────────────────
+   Pinned below the scrolling transcript inside the same panel, in the same mono font/bg, so the
+   three read as one terminal. */
+.tui-foot {
+  border-top: 1px solid var(--color-line-soft);
+  padding: 0.5rem 0.75rem 0.6rem;
+}
+
+.tui-status {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding-bottom: 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.tui-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+.tui-state {
+  letter-spacing: 0.04em;
+}
+
+.tui-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  cursor: text;
+}
+.tui-chevron {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-accent);
+  user-select: none;
+}
+.tui-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+/* The mirror (display) and the real <textarea> must share identical metrics + wrapping so the fake
+   block caret lands exactly where the real selection is. */
+.tui-display,
+.tui-input {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tui-display {
+  min-height: 1.5em;
+  color: var(--color-fg);
+}
+.tui-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  outline: none;
+}
+/* Inverted, blinking block caret (renders the char it sits on; a space gives it width at line end). */
+.tui-caret {
+  border-radius: 1px;
+  background: var(--color-accent);
+  color: var(--color-panel);
+  animation: caret-blink 1.06s infinite;
+}
+.tui-placeholder {
+  color: var(--color-fg-faint);
 }

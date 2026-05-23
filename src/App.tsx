@@ -5,7 +5,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Controls } from "./components/Controls";
+import { CloseIcon, MaximizeIcon, MinimizeIcon } from "./components/icons";
+import { Prompt } from "./components/Prompt";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
+import { windowControls } from "./window";
 import {
   commands,
   onUiEvent,
@@ -14,13 +17,26 @@ import {
   type TerminalCfg,
 } from "./ipc";
 
+// Connection states reuse the same desaturated accent vocabulary as the lifecycle states.
+const CONN_COLOR: Record<ConnectionStatus, string> = {
+  disconnected: "var(--color-fg-faint)",
+  connecting: "var(--color-warn)",
+  connected: "var(--color-accent)",
+  reconnecting: "var(--color-warn)",
+};
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(Math.floor(total / 3600))}:${p(Math.floor((total % 3600) / 60))}:${p(total % 60)}`;
+}
+
 export function App(): React.JSX.Element {
   const [state, setState] = useState<AppState>("stopped");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [micMuted, setMicMuted] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState("");
   const [terminalCfg, setTerminalCfg] = useState<TerminalCfg | undefined>();
 
   const running = state !== "stopped" && state !== "error";
@@ -65,6 +81,22 @@ export function App(): React.JSX.Element {
       .catch(() => {});
   }, []);
 
+  // Display-only chrome: a wall clock and the live session uptime for the deck rails. Pure
+  // presentation (no business logic) — one timer ticks `now`, uptime is derived from when the
+  // session last entered a running state.
+  const [now, setNow] = useState(() => Date.now());
+  const startedAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  useEffect(() => {
+    if (running) startedAtRef.current ??= Date.now();
+    else startedAtRef.current = null;
+  }, [running]);
+  const clock = new Date(now).toLocaleTimeString("en-GB", { hour12: false });
+  const uptime = startedAtRef.current !== null ? formatDuration(now - startedAtRef.current) : "--:--:--";
+
   const start = useCallback(async () => {
     setBusy(true);
     try {
@@ -101,53 +133,98 @@ export function App(): React.JSX.Element {
     setSharing(next);
   }, [sharing]);
 
-  const sendDraft = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      const text = draft.trim();
-      if (!text) return;
-      setDraft("");
-      try {
-        await commands.sendText({ text });
-      } catch (err) {
-        terminalRef.current?.writeError(err instanceof Error ? err.message : String(err));
-      }
-    },
-    [draft],
-  );
+  const handleSend = useCallback((text: string) => {
+    // Echo the typed message into the transcript feed immediately (the backend doesn't round-trip
+    // typed input as a transcript event, unlike spoken audio which the provider transcribes).
+    terminalRef.current?.writeTranscript("user", text, true);
+    void commands
+      .sendText({ text })
+      .catch((err) =>
+        terminalRef.current?.writeError(err instanceof Error ? err.message : String(err)),
+      );
+  }, []);
 
   return (
-    <main className="flex h-screen flex-col bg-[#0b0f14]">
-      <Controls
-        state={state}
-        connection={connection}
-        micMuted={micMuted}
-        sharing={sharing}
-        busy={busy}
-        onStart={() => void start()}
-        onStop={() => void stop()}
-        onToggleMute={toggleMute}
-        onToggleShare={toggleShare}
-      />
-      <div className="min-h-0 flex-1 p-2">
-        <Terminal ref={terminalRef} terminal={terminalCfg} />
-      </div>
-      <form onSubmit={sendDraft} className="flex gap-2 border-t border-slate-800 p-2">
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={running ? "Type a message…" : "Press Start to begin"}
-          disabled={!running}
-          className="flex-1 rounded bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 disabled:opacity-50"
+    <main className="flex h-screen">
+      <div className="deck flex min-h-0 flex-1 flex-col">
+        <span className="deck-corner tl" aria-hidden />
+        <span className="deck-corner tr" aria-hidden />
+        <span className="deck-corner bl" aria-hidden />
+        <span className="deck-corner br" aria-hidden />
+
+        {/* Custom titlebar: the OS decorations are off (decorations:false) so this rail is the drag
+            handle, and the window controls on the right replace the native min/max/close. */}
+        <header className="deck-top" data-tauri-drag-region="">
+          <div className="brand" data-tauri-drag-region="">
+            <span className="brand-bar" aria-hidden />
+            <span className="brand-name">JOI</span>
+            <span className="brand-tag">voice · screen companion</span>
+          </div>
+          <span className="deck-clock" data-tauri-drag-region="">
+            {clock}
+          </span>
+          <div className="win-controls">
+            <button
+              type="button"
+              className="win-btn"
+              onClick={windowControls.minimize}
+              aria-label="Minimize window"
+              title="Minimize"
+            >
+              <MinimizeIcon size={15} />
+            </button>
+            <button
+              type="button"
+              className="win-btn"
+              onClick={windowControls.toggleMaximize}
+              aria-label="Maximize window"
+              title="Maximize"
+            >
+              <MaximizeIcon size={13} />
+            </button>
+            <button
+              type="button"
+              className="win-btn win-btn--close"
+              onClick={windowControls.close}
+              aria-label="Close window"
+              title="Close"
+            >
+              <CloseIcon size={15} />
+            </button>
+          </div>
+        </header>
+
+        <Controls
+          state={state}
+          micMuted={micMuted}
+          sharing={sharing}
+          busy={busy}
+          onStart={() => void start()}
+          onStop={() => void stop()}
+          onToggleMute={toggleMute}
+          onToggleShare={toggleShare}
         />
-        <button
-          type="submit"
-          disabled={!running || draft.trim() === ""}
-          className="rounded bg-emerald-600 px-3 py-2 text-sm text-white disabled:opacity-50"
-        >
-          Send
-        </button>
-      </form>
+
+        <section className="term-panel">
+          <div className="panel-label">
+            transcript
+            <span className="panel-rule" aria-hidden />
+          </div>
+          <div className="term-host">
+            <Terminal ref={terminalRef} terminal={terminalCfg} />
+          </div>
+          <Prompt state={state} canSend={running} onSend={handleSend} />
+        </section>
+
+        <footer className="deck-bottom">
+          <span className="inline-flex items-center gap-2" style={{ color: CONN_COLOR[connection] }}>
+            <span className="state-dot" style={{ width: 6, height: 6 }} />
+            <span style={{ color: "var(--color-fg-faint)" }}>{connection}</span>
+          </span>
+          <span className="controls-spacer" />
+          <span>↑ {uptime}</span>
+        </footer>
+      </div>
     </main>
   );
 }

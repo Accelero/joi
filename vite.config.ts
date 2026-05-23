@@ -10,7 +10,14 @@ export default defineConfig({
   // Fixed, uncommon dev port matched by `tauri.conf.json`'s `devUrl`. `strictPort` makes Vite fail
   // loudly if it's taken instead of silently moving to another port — otherwise the Tauri window
   // would load whatever else is sitting on the expected port.
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    // Under `tauri dev` cargo churns ./target while Vite watches the repo root; the watcher chokes
+    // on the rapidly created/deleted incremental files (EINVAL) and crashes the dev server. The
+    // Rust build output and backend crate are never frontend inputs — exclude them from the watch.
+    watch: { ignored: ["**/target/**", "**/src-tauri/**"] },
+  },
   test: {
     environment: "node",
     globals: true,

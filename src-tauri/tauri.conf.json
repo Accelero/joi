@@ -16,7 +16,10 @@
         "title": "Joi",
         "width": 920,
         "height": 680,
-        "resizable": true
+        "minWidth": 560,
+        "minHeight": 420,
+        "resizable": true,
+        "decorations": false
       }
     ],
     "security": {
