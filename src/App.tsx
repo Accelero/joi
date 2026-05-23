@@ -6,7 +6,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Controls } from "./components/Controls";
 import { Terminal, type TerminalHandle } from "./components/Terminal";
-import { commands, onUiEvent, type AppState, type ConnectionStatus } from "./ipc";
+import {
+  commands,
+  onUiEvent,
+  type AppState,
+  type ConnectionStatus,
+  type TerminalConfig,
+} from "./ipc";
 
 export function App(): React.JSX.Element {
   const [state, setState] = useState<AppState>("stopped");
@@ -15,6 +21,7 @@ export function App(): React.JSX.Element {
   const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState("");
+  const [terminalCfg, setTerminalCfg] = useState<TerminalConfig | undefined>();
 
   const running = state !== "stopped" && state !== "error";
   const terminalRef = useRef<TerminalHandle>(null);
@@ -47,6 +54,15 @@ export function App(): React.JSX.Element {
       }
     });
     return () => void ready.then((unlisten) => unlisten());
+  }, []);
+
+  // Pull the configured terminal appearance from the backend once (config lives in Rust; the
+  // webview only renders it). Failure is non-fatal — Terminal falls back to its defaults.
+  useEffect(() => {
+    void commands
+      .getUiConfig()
+      .then((cfg) => setTerminalCfg(cfg.terminal))
+      .catch(() => {});
   }, []);
 
   const start = useCallback(async () => {
@@ -114,7 +130,7 @@ export function App(): React.JSX.Element {
         onToggleShare={toggleShare}
       />
       <div className="min-h-0 flex-1 p-2">
-        <Terminal ref={terminalRef} />
+        <Terminal ref={terminalRef} terminal={terminalCfg} />
       </div>
       <form onSubmit={sendDraft} className="flex gap-2 border-t border-slate-800 p-2">
         <input

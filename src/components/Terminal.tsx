@@ -4,10 +4,10 @@
  * with a newline when finalized. Media never touches this component — only text.
  */
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { Terminal as XTerm } from "@xterm/xterm";
+import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { Speaker } from "../ipc";
+import type { Speaker, TerminalConfig } from "../ipc";
 
 /** Imperative surface the parent drives from `UiEvent`s. */
 export interface TerminalHandle {
@@ -25,7 +25,21 @@ const SPEAKER_COLOR: Record<Speaker, string> = {
 };
 const RESET = "\x1b[0m";
 
-export function Terminal({ ref }: { ref?: Ref<TerminalHandle> }): React.JSX.Element {
+// Resolve a configured theme *name* to concrete xterm colors. This name→colors map is pure
+// presentation, so it lives in the frontend; everything else (which theme, font, scrollback) comes
+// from the backend `ui` config. Unknown names fall back to `joi-dark`.
+const THEMES: Record<string, ITheme> = {
+  "joi-dark": { background: "#0b0f14", foreground: "#cbd5e1" },
+};
+const DEFAULT_THEME = "joi-dark";
+
+export function Terminal({
+  ref,
+  terminal,
+}: {
+  ref?: Ref<TerminalHandle>;
+  terminal?: TerminalConfig;
+}): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   // Speaker of the line currently being streamed, or null when no line is open.
@@ -72,16 +86,22 @@ export function Terminal({ ref }: { ref?: Ref<TerminalHandle> }): React.JSX.Elem
     [],
   );
 
+  // Recreate the xterm instance when the backend `ui` config arrives (it loads once, async, shortly
+  // after mount — before any transcript is written, so nothing is lost).
+  const theme = terminal?.theme ?? DEFAULT_THEME;
+  const font = terminal?.font ?? "JetBrains Mono";
+  const scrollback = terminal?.scrollback ?? 5000;
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const term = new XTerm({
-      fontFamily: "JetBrains Mono, monospace",
+      fontFamily: `${font}, monospace`,
       fontSize: 14,
+      scrollback,
       cursorBlink: false,
       disableStdin: true,
-      theme: { background: "#0b0f14", foreground: "#cbd5e1" },
+      theme: THEMES[theme] ?? THEMES[DEFAULT_THEME],
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -97,7 +117,7 @@ export function Terminal({ ref }: { ref?: Ref<TerminalHandle> }): React.JSX.Elem
       term.dispose();
       termRef.current = null;
     };
-  }, []);
+  }, [theme, font, scrollback]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

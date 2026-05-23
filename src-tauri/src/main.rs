@@ -5,7 +5,7 @@
 //! and the inner crates; this binary holds no engine state of its own.
 
 use joi_app::{JoiApp, MediaMode};
-use joi_core::config::Config;
+use joi_core::config::{Config, UiCfg};
 use serde::Serialize;
 use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -31,6 +31,12 @@ fn has_api_key(app: State<'_, JoiApp>) -> HasApiKeyResult {
     HasApiKeyResult {
         present: app.has_api_key(),
     }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn get_ui_config(app: State<'_, JoiApp>) -> UiCfg {
+    app.ui_config()
 }
 
 #[tauri::command]
@@ -91,6 +97,7 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             ping,
             has_api_key,
+            get_ui_config,
             start,
             stop,
             send_text,

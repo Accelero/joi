@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use joi_core::clock::SystemClock;
-use joi_core::config::Config;
+use joi_core::config::{Config, UiCfg};
 use joi_core::error::SessionError;
 use joi_core::history::InMemoryHistory;
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
@@ -38,6 +38,8 @@ pub struct JoiApp {
     handle: Option<SessionManagerHandle>,
     media: Option<MediaEngine>,
     has_key: bool,
+    /// Web-frontend settings, surfaced to hosts via [`JoiApp::ui_config`] (Seam B's `get_ui_config`).
+    ui: UiCfg,
 }
 
 impl JoiApp {
@@ -46,6 +48,8 @@ impl JoiApp {
     #[must_use]
     pub fn build(config: Config, media_mode: MediaMode) -> Self {
         let has_key = config.live_api.gemini.api_key.is_set();
+        // Keep the UI section before `config` is moved into the manager (cheap clone).
+        let ui = config.ui.clone();
         match joi_providers::build_session_factory(&config) {
             Ok(factory) => {
                 let factory: Arc<dyn SessionFactory> = Arc::from(factory);
@@ -69,6 +73,7 @@ impl JoiApp {
                     handle: Some(handle),
                     media,
                     has_key,
+                    ui,
                 }
             }
             Err(e) => {
@@ -77,6 +82,7 @@ impl JoiApp {
                     handle: None,
                     media: None,
                     has_key,
+                    ui,
                 }
             }
         }
@@ -143,6 +149,13 @@ impl JoiApp {
     #[must_use]
     pub fn has_api_key(&self) -> bool {
         self.has_key
+    }
+
+    /// The web-frontend settings (the `ui` config section) for a host to hand to its UI. Engine
+    /// logic never reads these — they exist only to be delivered to the presentation layer.
+    #[must_use]
+    pub fn ui_config(&self) -> UiCfg {
+        self.ui.clone()
     }
 
     /// Subscribe to UI events (`None` if no session is configured).

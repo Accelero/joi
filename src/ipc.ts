@@ -62,6 +62,20 @@ export interface HasApiKeyResult {
   present: boolean;
 }
 
+// ── ui config (mirror joi-core::config::UiCfg / TerminalCfg) ───────────────────────────────────
+// Delivered by `get_ui_config` so the webview renders the configured appearance instead of
+// hard-coding it. (Superseded by S5b's generated bindings.)
+
+export interface TerminalConfig {
+  theme: string;
+  font: string;
+  scrollback: number;
+}
+
+export interface UiConfig {
+  terminal: TerminalConfig;
+}
+
 // Mirrors `generate_handler!` in src-tauri/src/main.rs 1:1 — keep them in sync (SPEC §11.1).
 export const commands = {
   start: (args: StartArgs) => tauriInvoke<{ session_id: string }>("start", args),
@@ -71,5 +85,6 @@ export const commands = {
   startScreenshare: () => tauriInvoke<void>("start_screenshare"),
   stopScreenshare: () => tauriInvoke<void>("stop_screenshare"),
   hasApiKey: () => tauriInvoke<HasApiKeyResult>("has_api_key"),
+  getUiConfig: () => tauriInvoke<UiConfig>("get_ui_config"),
   ping: () => tauriInvoke<string>("ping"),
 } as const;

@@ -448,6 +448,43 @@ match arms if names differ.)
 
 ---
 
+## Stage S5 — Round out the seams (was "out of scope")
+
+**Outcome:** the three deferred follow-ups, each its own commit, each behavior-preserving for the
+desktop app and each leaving `./scripts/check.sh` green.
+
+### S5a — Deliver the `ui` config section to the frontend (`get_ui_config`)
+The `ui: {terminal}` section (S2) is loaded but the webview still hard-codes theme/font/scrollback.
+Close the loop **the architecture-correct way** — config flows out of Rust; TS only renders it.
+- `crates/joi-app/src/lib.rs`: store the `UiCfg` (cheap clone before `config` is moved into the
+  manager) and add `pub fn ui_config(&self) -> UiCfg`.
+- `src-tauri/src/main.rs`: add `get_ui_config(app) -> UiCfg` and register it in `generate_handler!`.
+- `src/ipc.ts`: add the `getUiConfig` command (+ `UiConfig`/`TerminalConfig` types — superseded by
+  S5b's generated types).
+- `src/App.tsx`: fetch it once on mount; pass `terminal` to `<Terminal>`.
+- `src/components/Terminal.tsx`: apply `font` + `scrollback`; resolve the theme **name** to concrete
+  xterm colors via a small presentation map (legitimately frontend — it's styling, not logic).
+
+### S5b — Generate the TS IPC types from Rust (single source of truth)
+Replace the hand-maintained `UiEvent`/enums in `ipc.ts` with types generated from `joi-core`.
+- Add `ts-rs` to `[workspace.dependencies]` and as a `joi-core` dependency (pure Rust, no OS/IO — fits
+  core's purity rule). Derive `TS` (via the existing serde attrs) on `Speaker`, `AppState`,
+  `ConnectionStatus`, `HistoryMeta`, `UiEvent`, `TerminalCfg`, `UiCfg`, exporting to
+  `../../src/bindings/`. ts-rs honors `#[serde(tag/rename_all/rename)]` so the JSON shape is preserved.
+- Generation runs in the normal `cargo test` (so `check.sh` regenerates); `ipc.ts` imports + re-exports
+  from `./bindings/`. Keep `ipc.test.ts` as a runtime guard.
+- `scripts/check.sh`: after the Rust tests, `git diff --exit-code src/bindings` so stale bindings fail CI.
+
+### S5c — HTTP/WS host (`crates/joi-server`)
+A third host (besides Tauri + CLI) proving Seam A over the network — the documented "later, separate
+adapter."
+- New bin crate depending on `joi-app`/`joi-core` + `axum` (ws) + `tokio`(net) + `serde_json`/
+  `futures-util`/`anyhow`/`tracing-subscriber`. `MediaMode::None` (headless; audio-over-WS is a future
+  extension). Bind addr from `JOI_SERVER_ADDR` (host runtime config, like the dev port — not engine YAML).
+- `/ws`: per-connection `subscribe_events()` → forward each `UiEvent` as a JSON text frame; inbound
+  JSON `{"cmd":"start|stop|text", ...}` → `JoiApp` calls.
+- Add `joi-server` to the no-Tauri guard loop in `scripts/check.sh` and the member list + docs.
+
 ## Acceptance criteria (whole runbook)
 - `cargo build -p joi-app` and `cargo build -p joi-cli` succeed with **no** Tauri/webkit in their
   dependency trees.
@@ -462,6 +499,7 @@ match arms if names differ.)
 
 ## Out of scope (do not do unless asked)
 - Moving config structs out of `joi-core` into per-module crates (kept central deliberately).
-- Building an HTTP/WS host (the CLI is the proof; a server is a later, separate adapter).
-- Generating TS types from Rust, `get_ui_config` delivery of the `ui` section, multi-provider config,
-  or any change to audio/transcript/AEC behavior.
+- Multi-provider config, or any change to audio/transcript/AEC behavior.
+- Streaming binary audio over the WS host (S5c is JSON commands + the `UiEvent` stream only).
+
+> The HTTP/WS host, TS-types-from-Rust, and `get_ui_config` delivery moved **into scope** as Stage S5.
