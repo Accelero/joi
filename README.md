@@ -7,6 +7,20 @@ start/stop/pause/resume lifecycle with bounded, restorable history.
 See [`SPEC.md`](./SPEC.md) for *what* it must do and [`PLAN.md`](./PLAN.md) for the *how* (milestone
 plan M0–M5). This README covers the current build.
 
+## Architecture — three layers
+
+Joi is split into three independently-compilable layers (see
+[`PLAN-MODULARIZATION.md`](./PLAN-MODULARIZATION.md)):
+
+| Layer | Crates / dirs | Notes |
+|---|---|---|
+| **JOI engine** (host-agnostic, no Tauri) | `crates/joi-core`, `joi-providers`, `joi-media`, `joi-app` | Owns all logic, media (cpal/xcap), provider sessions, config, history. `joi-app` exposes **`JoiApp`** — the API a host drives (**Seam A**). |
+| **Headless host** | `crates/joi-cli` | Text-only CLI over `JoiApp`; proves the engine runs with no GUI. |
+| **Tauri backend** | `src-tauri` | Thin adapter: `#[tauri::command]`s → `JoiApp`; pumps its `UiEvent` stream to the webview as `ui_event` (**Seam B**, JSON IPC). |
+| **Web frontend** | `src/` | React UI; depends on no Rust crate, only the IPC contract in `src/ipc.ts`. |
+
+`./scripts/check.sh` guards that `joi-app`/`joi-cli` pull in **no** Tauri/WebKit.
+
 ## What's implemented
 
 The verifiable, fully-tested backbone (M0 foundation + the M1 core loop on a mock):
@@ -54,9 +68,15 @@ Full setup for the eventual Tauri build (system deps + tauri-cli):
 ### Config
 
 Config is a **YAML** file at `~/.config/joi/joi.yaml`; Joi writes it with defaults on first run if
-it's missing (see `config/joi.example.yaml` for the documented schema). Every field can be set in
-the file **or** via a `JOI_`-prefixed env var (nested with `__`, e.g. `JOI_AUDIO__FRAME_MS=30`), and
-**env takes precedence over the file**.
+it's missing (see `config/joi.example.yaml` for the documented schema). Top-level sections map to
+modules: `live_api` / `history` / `logging` (engine), `media: {audio, screen}` (joi-media),
+`ui: {terminal}` (frontend). Every field can be set in the file **or** via a `JOI_`-prefixed env var
+(nested with `__`, e.g. `JOI_MEDIA__AUDIO__FRAME_MS=30`), and **env takes precedence over the file**.
+
+> **Migration:** audio/screen settings now live under `media:` and terminal under `ui:` (they used to
+> be top-level). An old config's top-level `audio`/`screen`/`terminal` keys are ignored (defaults
+> used); move them under `media`/`ui`, or delete the file to regenerate. `live_api` (incl. the key)
+> is unchanged.
 
 The Gemini API key lives at `live_api.gemini.api_key`. It can be set in the YAML, but **prefer the
 environment** so it isn't stored in plaintext on disk:

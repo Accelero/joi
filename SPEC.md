@@ -95,9 +95,16 @@ Two processes inside one Tauri app, plus the provider over the network.
 ```
 
 **Placement rule (DESIGN §4):** the realtime connection, agent loop, history/persistence,
-secrets, and (later) tools/gate/exec live in **Rust**. The webview only captures media, plays
-audio, and renders the terminal UI + controls. No API key, conversation logic, or (future)
-command string is ever decided in the webview.
+secrets, and (later) tools/gate/exec live in **Rust**. The webview only renders the terminal UI +
+controls. No API key, conversation logic, or command string is ever decided in the webview.
+
+> **Implementation note (current).** Media is **native** now — capture/playback/screen are in
+> `crates/joi-media`, not the webview (see §7). The codebase is split into three independently-
+> compilable layers (`PLAN-MODULARIZATION.md`): the **JOI engine** (`joi-core`/`joi-providers`/
+> `joi-media`/`joi-app`, host-agnostic, no Tauri) exposing **`JoiApp`** (Seam A); the **Tauri
+> backend** (`src-tauri`) as a thin adapter; and the **web frontend** (`src/`). The IPC below is
+> Seam B. The diagram above is the original design sketch; the API key lives in config (§13, SEC-5),
+> not a keychain.
 
 ### 2.1 Backend module layout
 
@@ -637,12 +644,14 @@ controls are specified now so they exist *before* the first tool lands.
 ## 13. Configuration & settings
 
 All settings live in the YAML config or env (env wins). The API key may be set in config but is
-**preferably provided via `GEMINI_API_KEY`** to avoid plaintext on disk (SEC-5).
-- Live-API provider + exact model id; voice; system instruction / persona (under `live_api.gemini`).
-- Mic device; audio output device.
-- Screen: source preference, capture path (auto/webview/native), fps, resolution cap, quality.
-- Terminal: theme / color scheme, font, scrollback.
-- History: token budget (default = model context window + headroom).
+**preferably provided via `GEMINI_API_KEY`** to avoid plaintext on disk (SEC-5). Top-level YAML
+sections map 1:1 to modules (env nests with `JOI_` + `__`, e.g. `JOI_MEDIA__AUDIO__FRAME_MS`):
+- `live_api` — provider + exact model id, key, voice, system instruction, transcription (`gemini.*`).
+- `history` — token budget (Live session input limit, §6.2).
+- `logging` — level, file.
+- `media` — `audio` (devices, sample rates, frame_ms, echo_cancellation) and `screen` (source/path,
+  fps, resolution cap, quality).
+- `ui` — `terminal` theme / font / scrollback (a frontend concern, delivered to the UI by the host).
 - `[POST]` Gate: read-only auto-allow toggle, approval timeout, allowlist management.
 
 ---

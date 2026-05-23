@@ -16,18 +16,35 @@ with a Rust backend and a thin web (React/TS) frontend.
 - When adding a feature, default to: new logic in a crate → exposed via a `SessionManagerHandle`/
   engine method → surfaced over IPC → thin TS that calls it and renders the result.
 
+## Three layers, two interfaces
+
+The project is split so each layer compiles on its own (see `PLAN-MODULARIZATION.md`):
+
+1. **JOI engine** — host-agnostic, **no Tauri** (`joi-core`/`joi-providers`/`joi-media`/`joi-app`).
+2. **Tauri backend** (`src-tauri`) — a thin adapter over the engine.
+3. **Web frontend** (`src/`) — pure UI, depends on no Rust crate.
+
+- **Seam A** (engine ↔ host): the **`JoiApp`** Rust API in `crates/joi-app` — `build(Config, MediaMode)`
+  + `start/stop/send_text/send_audio/set_mic_muted/screenshare/has_api_key` + `subscribe_events`/
+  `subscribe_audio`. No Tauri/HTTP/CLI types cross it. `crates/joi-cli` is a headless host that proves it.
+- **Seam B** (Tauri ↔ web): the JSON IPC below.
+
+`./scripts/check.sh` asserts `joi-app`/`joi-cli` have **no** Tauri/WebKit in their dependency trees.
+
 ## Workspace layout
 
 | Crate | Responsibility |
 |---|---|
-| `crates/joi-core` | Pure domain: `Config` (YAML file + `JOI_`/`GEMINI_*` env, env wins; written with defaults on first run; provider key at `live_api.gemini.api_key` as a redacting `ApiKey`), `Clock`, `RealtimeSession`/`SessionEvent`/`UiEvent`, `HistoryStore`, `ScreenSource`, pure `media` DSP (framing, resample, `JitterBuffer`, PCM/float), and the **`SessionManager`** actor + `SessionManagerHandle`. No OS/audio/IO deps. |
-| `crates/joi-media` | Native I/O behind the **`MediaEngine`** interface: cpal capture (with NS+AGC) and playback, xcap screen capture. Bound to a `SessionManagerHandle`; keeps OS/audio deps out of `joi-core`. |
+| `crates/joi-core` | Pure domain: `Config` (YAML file + `JOI_`/`GEMINI_*` env, env wins; per-module sections `live_api`/`history`/`logging`/`media`/`ui`; provider key at `live_api.gemini.api_key` as a redacting `ApiKey`), `Clock`, `RealtimeSession`/`SessionEvent`/`UiEvent`, `HistoryStore`, `ScreenSource`, pure `media` DSP, and the **`SessionManager`** actor + `SessionManagerHandle`. No OS/audio/IO deps. |
 | `crates/joi-providers` | Realtime provider adapters (Gemini Live via adk-rust; OpenAI stub) + `build_session_factory`. |
+| `crates/joi-media` | Native I/O behind the **`MediaEngine`** interface: cpal capture (NS+AGC+AEC) and playback, xcap screen. Bound to a `SessionManagerHandle`. |
+| `crates/joi-app` | **Seam A** — `JoiApp`: host-agnostic composition + command API + event/audio streams. The boundary any host drives. No Tauri. |
+| `crates/joi-cli` | Headless host (text-only, `MediaMode::None`) — proves the engine runs with no GUI. |
 | `crates/joi-testkit` | Test doubles/helpers. |
-| `src-tauri` | **Thin** composition root: loads config/secrets, builds the manager + `MediaEngine`, exposes `#[tauri::command]`s, and pumps `UiEvent`s to the webview. No domain logic here. |
+| `src-tauri` | **Thin** Tauri adapter: `#[tauri::command]`s delegate to `JoiApp`; one task pumps its `UiEvent` stream to the webview as `ui_event`. No domain logic or composition. |
 | `src/` | React UI: `App.tsx` (wires events↔commands), `components/Terminal.tsx` (xterm), `components/Controls.tsx`, `ipc.ts` (typed IPC boundary). |
 
-## IPC boundary
+## IPC boundary (Seam B)
 
 JSON only — no media crosses IPC (SPEC §11). Two directions:
 - **Commands** (`invoke`): `ipc.ts`'s `commands` object mirrors **exactly** the `generate_handler!`
