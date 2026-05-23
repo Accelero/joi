@@ -34,23 +34,25 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     let inner = deck.inner(area);
     frame.render_widget(deck, area);
 
-    // Top→bottom: controls bar, transcript panel (label + body), status line, prompt, footer —
-    // mirroring the web deck (Controls row, term-panel with its label, status+prompt, bottom rail).
+    // Top→bottom: controls bar, divider, transcript (fills), divider, status line, prompt, footer.
+    // The two dividers bracket the transcript — one under the controls, one above the input zone.
     let rows = Layout::vertical([
         Constraint::Length(1), // controls
-        Constraint::Length(1), // panel label / rule
+        Constraint::Length(1), // divider
         Constraint::Min(0),    // transcript
+        Constraint::Length(1), // divider
         Constraint::Length(1), // status line
         Constraint::Length(1), // prompt
         Constraint::Length(1), // footer
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(controls_line(model)), rows[0]);
-    frame.render_widget(Paragraph::new(panel_label(rows[1].width)), rows[1]);
+    frame.render_widget(Paragraph::new(divider(rows[1].width)), rows[1]);
     render_transcript(frame, rows[2], model);
-    frame.render_widget(Paragraph::new(status_line(model)), rows[3]);
-    render_prompt(frame, rows[4], model);
-    frame.render_widget(Paragraph::new(footer_line(model)), rows[5]);
+    frame.render_widget(Paragraph::new(divider(rows[3].width)), rows[3]);
+    frame.render_widget(Paragraph::new(status_line(model)), rows[4]);
+    render_prompt(frame, rows[5], model);
+    frame.render_widget(Paragraph::new(footer_line(model)), rows[6]);
 
     // HUD corner brackets over the deck's rounded corners (echoes the web `.deck-corner` crop marks).
     draw_corners(frame, area);
@@ -124,14 +126,9 @@ fn draw_corners(frame: &mut Frame, area: Rect) {
     }
 }
 
-/// The transcript panel label: `transcript` followed by a soft rule filling the row.
-fn panel_label(width: u16) -> Line<'static> {
-    let label = "transcript ";
-    let rule = "─".repeat((width as usize).saturating_sub(label.len()));
-    Line::from(vec![
-        Span::styled(label, Style::new().fg(theme::FG_FAINT)),
-        Span::styled(rule, Style::new().fg(theme::LINE_SOFT)),
-    ])
+/// A full-width horizontal rule.
+fn divider(width: u16) -> Line<'static> {
+    Line::from("─".repeat(width as usize)).style(Style::new().fg(theme::LINE_SOFT))
 }
 
 /// The session controls row: F2 start/stop · F3 mute · F4 share, each styled by its state.
@@ -225,6 +222,9 @@ fn slice_by_cols(s: &str, start: usize, width: usize) -> String {
     out
 }
 
+/// Width of the speaker-label column (`JOI:`/`User:` left-padded so the text after them aligns).
+const LABEL_W: usize = 6;
+
 /// Render the transcript, wrapped to width and anchored to the bottom (newest visible), offset by
 /// `transcript_scroll` lines. Clamps the stored scroll against the real content height — the only
 /// thing render mutates on the model.
@@ -236,13 +236,31 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     }
 
     // Pre-wrap every entry into display rows so we can slice an exact window (no reliance on
-    // Paragraph's internal scroll/line-count). Each entry is one color (label + text).
+    // Paragraph's internal scroll/line-count). Layout per line: a fixed-width label column, then the
+    // word-wrapped text. The speaker label (`JOI:`/`User:`) is shown only when the speaker *changes*
+    // — consecutive lines from the same speaker are unlabeled — and wrapped/continuation lines are
+    // indented to align under the text, never under the label.
+    let indent = " ".repeat(LABEL_W);
+    let text_width = width.saturating_sub(LABEL_W).max(1);
     let mut lines: Vec<Line> = Vec::new();
+    let mut prev_kind: Option<LineKind> = None;
     for entry in model.transcript.entries() {
         let style = Style::new().fg(kind_color(entry.kind));
-        let content = format!("{} {}", kind_label(entry.kind), entry.text);
-        for piece in textwrap::wrap(&content, width) {
-            lines.push(Line::from(piece.into_owned()).style(style));
+        let first_prefix = if prev_kind == Some(entry.kind) {
+            indent.clone() // same speaker continuing — no repeated label
+        } else {
+            format!("{:<w$}", kind_label(entry.kind), w = LABEL_W)
+        };
+        prev_kind = Some(entry.kind);
+
+        let wrapped = textwrap::wrap(&entry.text, text_width);
+        if wrapped.is_empty() {
+            lines.push(Line::from(first_prefix).style(style));
+        } else {
+            for (i, piece) in wrapped.iter().enumerate() {
+                let prefix = if i == 0 { &first_prefix } else { &indent };
+                lines.push(Line::from(format!("{prefix}{piece}")).style(style));
+            }
         }
     }
 
@@ -388,8 +406,10 @@ mod tests {
     use ratatui::Terminal;
 
     /// Render a model into a fixed-size off-screen buffer and flatten it to text for assertions.
+    /// Tall enough that the chrome rows (controls, two dividers, status, prompt, footer) leave the
+    /// transcript several visible lines.
     fn render_to_string(mut model: AppModel) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(64, 10)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(64, 16)).unwrap();
         terminal.draw(|f| render(f, &mut model)).unwrap();
         terminal
             .backend()
@@ -436,13 +456,40 @@ mod tests {
     }
 
     #[test]
-    fn deck_has_corner_brackets_and_panel_label() {
+    fn deck_has_corner_brackets_and_dividers() {
         let text = render_to_string(AppModel::new(true));
         assert!(
             text.contains('⌜') && text.contains('⌟'),
             "corners missing: {text}"
         );
-        assert!(text.contains("transcript"), "panel label missing: {text}");
+        assert!(text.contains('─'), "divider rule missing: {text}");
+    }
+
+    #[test]
+    fn consecutive_same_speaker_lines_are_labeled_once() {
+        use joi_core::session::event::Speaker;
+        let mut model = AppModel::new(true);
+        model
+            .transcript
+            .push_transcript(Speaker::Agent, "first".into(), true);
+        model
+            .transcript
+            .push_transcript(Speaker::Agent, "second".into(), true);
+        model
+            .transcript
+            .push_transcript(Speaker::User, "hi".into(), true);
+        let text = render_to_string(model);
+        assert_eq!(
+            text.matches("JOI:").count(),
+            1,
+            "JOI: should label once: {text}"
+        );
+        assert_eq!(
+            text.matches("User:").count(),
+            1,
+            "User: should label once: {text}"
+        );
+        assert!(text.contains("second"), "continuation line missing: {text}");
     }
 
     #[test]

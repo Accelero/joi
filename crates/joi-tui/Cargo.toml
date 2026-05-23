@@ -24,6 +24,7 @@ textwrap = "0.16"
 unicode-width = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1"
+libc = "0.2"
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

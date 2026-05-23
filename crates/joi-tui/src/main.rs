@@ -14,6 +14,7 @@ mod ui;
 
 use std::ffi::OsStr;
 use std::io::{self, Stdout};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -41,6 +42,11 @@ async fn main() -> anyhow::Result<()> {
     // A ratatui app owns the alternate screen; any log line written to stdout/stderr would shred the
     // frame. So logging goes to a file for the whole life of the process (PLAN-TUI §2).
     let (_guard, log_path) = init_logging()?;
+    // Native audio/screen libraries (ALSA, libjack, PipeWire, cpal) write warnings straight to the
+    // process's stderr (fd 2), bypassing Rust's logging. A GUI host never notices — they go to the
+    // launching console — but for the TUI, stderr *is* the screen, so they shred the frame. Point
+    // fd 2 at the log file for the whole run so the deck stays clean and the warnings are still kept.
+    redirect_stderr_to(&log_path);
     tracing::info!(path = %log_path.display(), "joi-tui starting");
 
     let config = Config::load(None)?;
@@ -83,7 +89,11 @@ async fn run(
                 Some(Err(e)) => { tracing::warn!("terminal input error: {e}"); model.should_quit = true; }
                 None => model.should_quit = true, // stdin closed
             },
-            event = next_ui_event(events) => model.on_ui_event(event),
+            event = next_ui_event(events) => {
+                if let Some(command) = model.on_ui_event(event) {
+                    run_command(app, command).await;
+                }
+            }
             _ = tick.tick() => model.tick = model.tick.wrapping_add(1),
         }
         if model.should_quit {
@@ -180,6 +190,26 @@ fn init_logging() -> anyhow::Result<(WorkerGuard, PathBuf)> {
         )
         .init();
     Ok((guard, path))
+}
+
+/// Point the process's stderr (fd 2) at the log file for the whole run, so native-library warnings
+/// (ALSA/libjack/PipeWire/cpal) that write directly to fd 2 land in the log instead of corrupting
+/// the alternate screen. Best-effort: a failure here just leaves stderr as-is. Stdout (fd 1) is left
+/// alone — that's where ratatui draws the deck.
+fn redirect_stderr_to(path: &Path) {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // SAFETY: `file` owns a valid fd for the duration of the call; `dup2` duplicates it onto
+    // STDERR_FILENO. We then leak `file` so its fd stays open for the process lifetime.
+    unsafe {
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+    }
+    std::mem::forget(file);
 }
 
 /// Resolve the log file: `$JOI_TUI_LOG` if set, else `<state-dir>/joi/joi-tui.log` (falling back to

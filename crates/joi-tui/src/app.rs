@@ -203,18 +203,25 @@ impl AppModel {
         Some(Command::SendText(text))
     }
 
-    /// Fold one engine `UiEvent` into the model. Owned payloads (transcript text, error strings) are
-    /// moved out of the event, so it is taken by value.
-    pub fn on_ui_event(&mut self, event: UiEvent) {
+    /// Fold one engine `UiEvent` into the model, returning any side effect for the loop to run.
+    /// Owned payloads (transcript text, error strings) are moved out of the event, so it is taken by
+    /// value.
+    pub fn on_ui_event(&mut self, event: UiEvent) -> Option<Command> {
         match event {
             UiEvent::State { state } => {
                 self.state = state;
-                // Mirror App.tsx: a stopped/error session clears uptime, share, and metrics; a
-                // running one starts the uptime clock (once).
+                // Mirror App.tsx: a stopped/error session clears uptime and metrics, and tears down
+                // screen-share. The engine's `stop` does *not* stop screenshare on its own, so we
+                // must emit StopScreenshare here — otherwise a disconnect mid-share leaves the
+                // backend capturing with no way to turn it off (the share toggle needs a live
+                // session).
                 if matches!(state, AppState::Stopped | AppState::Error) {
                     self.started_at = None;
-                    self.sharing = false;
                     self.metrics = None;
+                    if self.sharing {
+                        self.sharing = false;
+                        return Some(Command::StopScreenshare);
+                    }
                 } else {
                     self.started_at.get_or_insert_with(Instant::now);
                 }
@@ -231,6 +238,7 @@ impl AppModel {
             }
             UiEvent::History(_) => {}
         }
+        None
     }
 }
 
@@ -349,9 +357,11 @@ mod tests {
         m.sharing = true;
         m.metrics = Some(MetricsSnapshot::ZERO);
         assert!(m.started_at.is_some());
-        m.on_ui_event(UiEvent::State {
+        // Stopping while sharing must emit StopScreenshare so the backend capture actually ends.
+        let cmd = m.on_ui_event(UiEvent::State {
             state: AppState::Stopped,
         });
+        assert_eq!(cmd, Some(Command::StopScreenshare));
         assert!(m.started_at.is_none());
         assert!(!m.sharing);
         assert!(m.metrics.is_none());
