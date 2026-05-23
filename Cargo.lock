@@ -2415,6 +2415,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "joi-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "joi-app",
+ "joi-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "joi-core"
 version = "0.1.0"
 dependencies = [
