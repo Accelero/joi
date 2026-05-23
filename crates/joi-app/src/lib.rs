@@ -53,11 +53,12 @@ impl JoiApp {
                 let history = Arc::new(InMemoryHistory::new());
                 // Read what local media needs from `config` before moving it into the manager.
                 let media_config = MediaConfig {
-                    frame_samples: AudioFormat::INPUT.samples_per_frame(config.audio.frame_ms),
-                    screen_fps: config.screen.fps,
-                    screen_max_width: config.screen.max_width,
-                    screen_quality: config.screen.quality,
-                    echo_cancellation: config.audio.echo_cancellation,
+                    frame_samples: AudioFormat::INPUT
+                        .samples_per_frame(config.media.audio.frame_ms),
+                    screen_fps: config.media.screen.fps,
+                    screen_max_width: config.media.screen.max_width,
+                    screen_quality: config.media.screen.quality,
+                    echo_cancellation: config.media.audio.echo_cancellation,
                 };
                 let handle = SessionManager::spawn(config, clock, history, factory);
                 let media = match media_mode {

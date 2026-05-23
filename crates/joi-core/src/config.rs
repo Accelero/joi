@@ -209,21 +209,35 @@ pub struct LoggingCfg {
     pub file: Option<PathBuf>,
 }
 
-/// The complete, validated application configuration.
+/// Native media I/O settings — the `joi-media` module's slice (audio + screen).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct Config {
-    /// Live-API provider selection + per-provider settings.
-    pub live_api: LiveApiCfg,
+pub struct MediaCfg {
     /// Audio I/O.
     pub audio: AudioCfg,
     /// Screen capture.
     pub screen: ScreenCfg,
-    /// History persistence.
-    pub history: HistoryCfg,
-    /// Terminal UI.
+}
+
+/// Web-frontend settings — delivered to the UI by the host; not used by the engine itself.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct UiCfg {
+    /// Terminal appearance.
     pub terminal: TerminalCfg,
-    /// Logging.
+}
+
+/// The complete, validated application configuration. Top-level fields are per-module sections.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Config {
+    /// Live-API provider selection + per-provider settings (`joi-providers`).
+    pub live_api: LiveApiCfg,
+    /// History persistence (`joi-core`).
+    pub history: HistoryCfg,
+    /// Logging (`joi-core`).
     pub logging: LoggingCfg,
+    /// Native media I/O (`joi-media`): audio + screen.
+    pub media: MediaCfg,
+    /// Web-frontend settings.
+    pub ui: UiCfg,
 }
 
 impl Default for Config {
@@ -240,35 +254,39 @@ impl Default for Config {
                     output_transcription: true,
                 },
             },
-            audio: AudioCfg {
-                input_sample_rate: 16_000,
-                output_sample_rate: 24_000,
-                frame_ms: 20,
-                input_device: "default".to_string(),
-                output_device: "default".to_string(),
-                echo_cancellation: true,
-            },
-            screen: ScreenCfg {
-                enabled: false,
-                capture_path: CapturePath::Auto,
-                fps: 1.0,
-                // Sized to the provider's per-frame video resolution. Gemini Live tiles each frame
-                // to ~768 px (one 768x768 tile / ~258 tokens); sending more is downsampled away.
-                max_width: 768,
-                quality: 80,
-            },
             history: HistoryCfg {
                 dir: None,
                 token_budget: 32_000,
             },
-            terminal: TerminalCfg {
-                theme: "joi-dark".to_string(),
-                font: "JetBrains Mono".to_string(),
-                scrollback: 5_000,
-            },
             logging: LoggingCfg {
                 level: LogLevel::Info,
                 file: None,
+            },
+            media: MediaCfg {
+                audio: AudioCfg {
+                    input_sample_rate: 16_000,
+                    output_sample_rate: 24_000,
+                    frame_ms: 20,
+                    input_device: "default".to_string(),
+                    output_device: "default".to_string(),
+                    echo_cancellation: true,
+                },
+                screen: ScreenCfg {
+                    enabled: false,
+                    capture_path: CapturePath::Auto,
+                    fps: 1.0,
+                    // Sized to the provider's per-frame video resolution. Gemini Live tiles each
+                    // frame to ~768 px (one 768x768 tile / ~258 tokens); more is downsampled away.
+                    max_width: 768,
+                    quality: 80,
+                },
+            },
+            ui: UiCfg {
+                terminal: TerminalCfg {
+                    theme: "joi-dark".to_string(),
+                    font: "JetBrains Mono".to_string(),
+                    scrollback: 5_000,
+                },
             },
         }
     }
@@ -414,20 +432,25 @@ impl Config {
         if self.live_api.gemini.model.trim().is_empty() {
             return Err(invalid("live_api.gemini.model", "must not be empty"));
         }
-        if self.audio.input_sample_rate == 0 || self.audio.output_sample_rate == 0 {
-            return Err(invalid("audio.*_sample_rate", "must be > 0"));
+        let audio = &self.media.audio;
+        let screen = &self.media.screen;
+        if audio.input_sample_rate == 0 || audio.output_sample_rate == 0 {
+            return Err(invalid("media.audio.*_sample_rate", "must be > 0"));
         }
-        if !(5..=60).contains(&self.audio.frame_ms) {
-            return Err(invalid("audio.frame_ms", "must be between 5 and 60 ms"));
+        if !(5..=60).contains(&audio.frame_ms) {
+            return Err(invalid(
+                "media.audio.frame_ms",
+                "must be between 5 and 60 ms",
+            ));
         }
-        if !(self.screen.fps.is_finite() && self.screen.fps > 0.0 && self.screen.fps <= 60.0) {
-            return Err(invalid("screen.fps", "must be in (0, 60]"));
+        if !(screen.fps.is_finite() && screen.fps > 0.0 && screen.fps <= 60.0) {
+            return Err(invalid("media.screen.fps", "must be in (0, 60]"));
         }
-        if self.screen.max_width == 0 {
-            return Err(invalid("screen.max_width", "must be > 0"));
+        if screen.max_width == 0 {
+            return Err(invalid("media.screen.max_width", "must be > 0"));
         }
-        if !(1..=100).contains(&self.screen.quality) {
-            return Err(invalid("screen.quality", "must be between 1 and 100"));
+        if !(1..=100).contains(&screen.quality) {
+            return Err(invalid("media.screen.quality", "must be between 1 and 100"));
         }
         if self.history.token_budget < 1_000 {
             return Err(invalid("history.token_budget", "must be at least 1000"));
@@ -504,17 +527,18 @@ live_api:
   provider: mock
   gemini:
     model: test-model
-audio:
-  frame_ms: 40
+media:
+  audio:
+    frame_ms: 40
 ",
             )?;
             let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.provider, ProviderName::Mock);
             assert_eq!(cfg.live_api.gemini.model, "test-model");
-            assert_eq!(cfg.audio.frame_ms, 40);
+            assert_eq!(cfg.media.audio.frame_ms, 40);
             // unspecified nested fields keep their defaults (deep merge)
             assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
-            assert_eq!(cfg.audio.input_sample_rate, 16_000);
+            assert_eq!(cfg.media.audio.input_sample_rate, 16_000);
             Ok(())
         });
     }
@@ -590,10 +614,10 @@ live_api:
 ",
             )?;
             jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "from-env");
-            jail.set_env("JOI_AUDIO__FRAME_MS", "30");
+            jail.set_env("JOI_MEDIA__AUDIO__FRAME_MS", "30");
             let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.gemini.model, "from-env");
-            assert_eq!(cfg.audio.frame_ms, 30);
+            assert_eq!(cfg.media.audio.frame_ms, 30);
             Ok(())
         });
     }
@@ -604,8 +628,9 @@ live_api:
             jail.create_file(
                 "joi.yaml",
                 r"
-audio:
-  frame_ms: 500
+media:
+  audio:
+    frame_ms: 500
 ",
             )?;
             let err = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap_err();

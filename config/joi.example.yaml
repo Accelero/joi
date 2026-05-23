@@ -5,11 +5,13 @@
 # (Joi also writes a defaults file there on first run if it's missing.) Every field can be set in
 # the file OR overridden by an environment variable; ENV ALWAYS WINS over the file.
 #
-# Env mapping: nested keys chain with `JOI_` + `__`, e.g. JOI_AUDIO__FRAME_MS=30 sets audio.frame_ms.
-# The Gemini key/model also have the conventional shortcuts GEMINI_API_KEY and GEMINI_MODEL.
+# Top-level sections map to modules: live_api/history/logging (engine), media (joi-media),
+# ui (web frontend). Env mapping: nested keys chain with `JOI_` + `__`, e.g.
+# JOI_MEDIA__AUDIO__FRAME_MS=30 sets media.audio.frame_ms. The Gemini key/model also have the
+# conventional shortcuts GEMINI_API_KEY and GEMINI_MODEL.
 
 live_api:
-  provider: gemini                # only gemini is supported today
+  provider: gemini                  # only gemini is supported today
   gemini:
     # Exact model id — set the one your API key has access to (a bidiGenerateContent / Live model).
     model: gemini-live-2.5-flash-native-audio
@@ -18,36 +20,37 @@ live_api:
     api_key: ""
     voice: Aoede
     system_instruction: You are Joi, a concise local voice companion.
-    input_transcription: true     # FR-3: render the user transcript
-    output_transcription: true    # FR-3: render the agent transcript
-
-audio:
-  input_sample_rate: 16000        # to provider (16 kHz mono PCM16)
-  output_sample_rate: 24000       # from provider (24 kHz mono PCM16)
-  frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
-  input_device: default
-  output_device: default
-  # Acoustic echo cancellation: subtract Joi's own voice from the mic so it doesn't hear itself
-  # (and interrupt itself) on speakers. Set false if you use headphones (no echo to cancel).
-  echo_cancellation: true
-
-screen:
-  enabled: false
-  capture_path: auto              # auto | webview | native
-  fps: 1.0
-  # Gemini Live downsamples each video frame to ~768 px (one tile); sending more is wasted bytes.
-  max_width: 768
-  quality: 80                     # 1-100
+    input_transcription: true       # FR-3: render the user transcript
+    output_transcription: true      # FR-3: render the agent transcript
 
 history:
-  dir: null                       # null → XDG data dir (~/.local/share/joi/history)
-  token_budget: 32000             # approx tokens; Live session input budget (SPEC §6.2)
-
-terminal:
-  theme: joi-dark
-  font: JetBrains Mono
-  scrollback: 5000
+  dir: null                         # null → XDG data dir (~/.local/share/joi/history)
+  token_budget: 32000               # approx tokens; Live session input budget (SPEC §6.2)
 
 logging:
-  level: info                     # error | warn | info | debug | trace ; RUST_LOG overrides
-  file: null                      # null → XDG state dir (~/.local/state/joi/joi.log)
+  level: info                       # error | warn | info | debug | trace ; RUST_LOG overrides
+  file: null                        # null → XDG state dir (~/.local/state/joi/joi.log)
+
+media:                              # native device I/O (joi-media)
+  audio:
+    input_sample_rate: 16000        # to provider (16 kHz mono PCM16)
+    output_sample_rate: 24000       # from provider (24 kHz mono PCM16)
+    frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
+    input_device: default
+    output_device: default
+    # Acoustic echo cancellation: subtract Joi's own voice from the mic so it doesn't hear itself
+    # (and interrupt itself) on speakers. Set false if you use headphones (no echo to cancel).
+    echo_cancellation: true
+  screen:
+    enabled: false
+    capture_path: auto              # auto | webview | native
+    fps: 1.0
+    # Gemini Live downsamples each video frame to ~768 px (one tile); sending more is wasted bytes.
+    max_width: 768
+    quality: 80                     # 1-100
+
+ui:                                 # web frontend (loaded by the engine, applied by the UI)
+  terminal:
+    theme: joi-dark
+    font: JetBrains Mono
+    scrollback: 5000
