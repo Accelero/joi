@@ -15,11 +15,11 @@ Joi is split into three independently-compilable layers (see
 | Layer | Crates / dirs | Notes |
 |---|---|---|
 | **JOI engine** (host-agnostic, no Tauri) | `crates/joi-core`, `joi-providers`, `joi-media`, `joi-app` | Owns all logic, media (cpal/xcap), provider sessions, config, history. `joi-app` exposes **`JoiApp`** — the API a host drives (**Seam A**). |
-| **Headless host** | `crates/joi-cli` | Text-only CLI over `JoiApp`; proves the engine runs with no GUI. |
+| **Headless hosts** | `crates/joi-cli`, `crates/joi-server` | `joi-cli` is a text-only stdin host; `joi-server` exposes `JoiApp` over a WebSocket (`/ws`) with the same JSON-command + `UiEvent`-stream contract. Both prove the engine runs with no GUI. |
 | **Tauri backend** | `src-tauri` | Thin adapter: `#[tauri::command]`s → `JoiApp`; pumps its `UiEvent` stream to the webview as `ui_event` (**Seam B**, JSON IPC). |
-| **Web frontend** | `src/` | React UI; depends on no Rust crate, only the IPC contract in `src/ipc.ts`. |
+| **Web frontend** | `src/` | React UI; depends on no Rust crate, only the IPC contract in `src/ipc.ts` (whose types are generated from `joi-core` by ts-rs into `src/bindings/`). |
 
-`./scripts/check.sh` guards that `joi-app`/`joi-cli` pull in **no** Tauri/WebKit.
+`./scripts/check.sh` guards that `joi-app`/`joi-cli`/`joi-server` pull in **no** Tauri/WebKit, and that `src/bindings` stays in sync with the Rust types.
 
 ## What's implemented
 

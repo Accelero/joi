@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/joi-core", "crates/joi-providers", "crates/joi-testkit", "crates/joi-media", "crates/joi-app", "crates/joi-cli", "src-tauri"]
+members = ["crates/joi-core", "crates/joi-providers", "crates/joi-testkit", "crates/joi-media", "crates/joi-app", "crates/joi-cli", "crates/joi-server", "src-tauri"]
 exclude = ["vendor"]
 
 [workspace.package]

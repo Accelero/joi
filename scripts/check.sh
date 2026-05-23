@@ -22,8 +22,8 @@ if [ -n "$(git status --porcelain src/bindings)" ]; then
   exit 1
 fi
 
-echo "── engine stays host-agnostic (joi-app/joi-cli must not depend on Tauri) ──"
-for crate in joi-app joi-cli; do
+echo "── engine stays host-agnostic (joi-app/joi-cli/joi-server must not depend on Tauri) ──"
+for crate in joi-app joi-cli joi-server; do
   if cargo tree -p "$crate" -e no-dev 2>/dev/null | grep -qiE 'tauri|webkit'; then
     echo "!! $crate must not depend on Tauri/WebKit — the JOI engine must be host-agnostic" >&2
     exit 1
