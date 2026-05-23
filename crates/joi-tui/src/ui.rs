@@ -34,25 +34,28 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     let inner = deck.inner(area);
     frame.render_widget(deck, area);
 
-    // Top→bottom: controls bar, divider, transcript (fills), divider, status line, prompt, footer.
-    // The two dividers bracket the transcript — one under the controls, one above the input zone.
+    // Top→bottom: controls, divider, transcript (fills), JOI's status line, divider, prompt,
+    // divider, footer. The status line sits with the transcript (it's JOI's state, not the user's
+    // input); dividers fence off the prompt above and the bottom rail below.
     let rows = Layout::vertical([
         Constraint::Length(1), // controls
         Constraint::Length(1), // divider
         Constraint::Min(0),    // transcript
+        Constraint::Length(1), // status line (JOI's)
         Constraint::Length(1), // divider
-        Constraint::Length(1), // status line
         Constraint::Length(1), // prompt
-        Constraint::Length(1), // footer
+        Constraint::Length(1), // divider
+        Constraint::Length(1), // footer (connection / uptime / metrics)
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(controls_line(model)), rows[0]);
     frame.render_widget(Paragraph::new(divider(rows[1].width)), rows[1]);
     render_transcript(frame, rows[2], model);
-    frame.render_widget(Paragraph::new(divider(rows[3].width)), rows[3]);
-    frame.render_widget(Paragraph::new(status_line(model)), rows[4]);
+    frame.render_widget(Paragraph::new(status_line(model)), rows[3]);
+    frame.render_widget(Paragraph::new(divider(rows[4].width)), rows[4]);
     render_prompt(frame, rows[5], model);
-    frame.render_widget(Paragraph::new(footer_line(model)), rows[6]);
+    frame.render_widget(Paragraph::new(divider(rows[6].width)), rows[6]);
+    frame.render_widget(Paragraph::new(footer_line(model)), rows[7]);
 
     // HUD corner brackets over the deck's rounded corners (echoes the web `.deck-corner` crop marks).
     draw_corners(frame, area);
@@ -176,17 +179,8 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
     let base = Style::new().bg(theme::PANEL);
     let chevron = Span::styled("❯ ", Style::new().fg(theme::ACCENT).bg(theme::PANEL));
 
-    if model.input.is_empty() {
-        let line = Line::from(vec![
-            chevron,
-            Span::styled("message JOI…", Style::new().fg(theme::FG_FAINT)),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(base), area);
-        frame.set_cursor_position((area.x + CHEVRON_COLS, area.y));
-        return;
-    }
-
-    // Scroll horizontally just enough to keep the caret in view at the right edge.
+    // Scroll horizontally just enough to keep the caret in view at the right edge. An empty prompt
+    // is just the chevron + the block cursor — no placeholder text.
     let caret_col = model.input.caret_display_col();
     let h_scroll = caret_col.saturating_sub(avail.saturating_sub(1));
     let visible = slice_by_cols(model.input.value(), h_scroll, avail);
@@ -295,16 +289,10 @@ fn kind_color(kind: LineKind) -> Color {
 }
 
 fn brand_line() -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            " JOI ",
-            Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "voice · screen companion ",
-            Style::new().fg(theme::FG_FAINT),
-        ),
-    ])
+    Line::from(Span::styled(
+        " JOI ",
+        Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// The lifecycle status line (above the prompt): a glowing dot + state label, like the web
@@ -449,10 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_shows_placeholder() {
+    fn empty_prompt_is_just_the_chevron() {
         let text = render_to_string(AppModel::new(true));
         assert!(text.contains('❯'), "chevron missing: {text}");
-        assert!(text.contains("message JOI"), "placeholder missing: {text}");
+        assert!(
+            !text.contains("message JOI"),
+            "placeholder should be gone: {text}"
+        );
     }
 
     #[test]

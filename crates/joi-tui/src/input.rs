@@ -16,10 +16,6 @@ impl Input {
         &self.value
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.value.is_empty()
-    }
-
     pub fn clear(&mut self) {
         self.value.clear();
         self.caret = 0;

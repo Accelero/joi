@@ -277,7 +277,7 @@ mod tests {
         });
         let cmd = m.on_action(Action::Submit);
         assert_eq!(cmd, Some(Command::SendText("hi".to_string())));
-        assert!(m.input.is_empty(), "input cleared after submit");
+        assert!(m.input.value().is_empty(), "input cleared after submit");
         assert_eq!(m.transcript.entries().len(), 1, "user line echoed");
     }
 
@@ -345,7 +345,7 @@ mod tests {
             m.on_action(Action::Insert(c));
         });
         m.on_action(Action::Escape); // help closed → clears the prompt
-        assert!(m.input.is_empty());
+        assert!(m.input.value().is_empty());
     }
 
     #[test]
