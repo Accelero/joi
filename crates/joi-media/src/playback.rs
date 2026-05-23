@@ -3,12 +3,14 @@
 //! Provider audio is 24 kHz mono PCM16 ([`AudioFormat::OUTPUT`]); we resample to the device rate on
 //! enqueue and let the realtime output callback pull fixed blocks (silence on underrun).
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use joi_core::media::{resample_linear, AudioFormat, JitterBuffer};
 
+use crate::engine::RenderSink;
 use crate::MediaError;
 
 /// Control messages for the playback engine.
@@ -23,19 +25,28 @@ pub enum PlaybackCmd {
 /// sender for feeding it. If the audio device can't be opened the thread logs and exits; sends then
 /// no-op, so playback failure never takes down the app.
 #[must_use]
-pub fn spawn_playback() -> Sender<PlaybackCmd> {
+pub fn spawn_playback(
+    device_name: String,
+    render_sink: RenderSink,
+    playback_rate: Arc<AtomicU32>,
+) -> Sender<PlaybackCmd> {
     let (tx, rx) = std::sync::mpsc::channel::<PlaybackCmd>();
     let spawned = std::thread::Builder::new()
         .name("joi-playback".to_string())
-        .spawn(move || run(&rx));
+        .spawn(move || run(&rx, &device_name, &render_sink, &playback_rate));
     if let Err(e) = spawned {
         tracing::error!("failed to spawn playback thread: {e}");
     }
     tx
 }
 
-fn run(rx: &Receiver<PlaybackCmd>) {
-    let engine = match Playback::start() {
+fn run(
+    rx: &Receiver<PlaybackCmd>,
+    device_name: &str,
+    render_sink: &RenderSink,
+    playback_rate: &Arc<AtomicU32>,
+) {
+    let engine = match Playback::start(device_name, render_sink, playback_rate) {
         Ok(engine) => engine,
         Err(e) => {
             tracing::error!("native playback unavailable: {e}");
@@ -53,6 +64,28 @@ fn run(rx: &Receiver<PlaybackCmd>) {
     }
 }
 
+/// Resolve the configured output-device name to a cpal device — mirror of capture's input picker.
+/// `"default"` uses the host default; any other name matches a device's cpal name exactly, falling
+/// back to the default (with a warning) if absent. Available names are logged once at `info`.
+fn pick_output_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    let available: Vec<(String, cpal::Device)> = host
+        .output_devices()
+        .map(|it| it.filter_map(|d| d.name().ok().map(|n| (n, d))).collect())
+        .unwrap_or_default();
+    let names: Vec<&str> = available.iter().map(|(n, _)| n.as_str()).collect();
+    tracing::info!(requested = name, available = ?names, "available output devices");
+    if name != "default" {
+        if let Some((_, dev)) = available.into_iter().find(|(n, _)| n == name) {
+            return Some(dev);
+        }
+        tracing::warn!(
+            requested = name,
+            "output_device not found; using host default"
+        );
+    }
+    host.default_output_device()
+}
+
 /// Owns the output stream and the buffer shared with its realtime callback.
 struct Playback {
     _stream: cpal::Stream,
@@ -61,11 +94,13 @@ struct Playback {
 }
 
 impl Playback {
-    fn start() -> Result<Self, MediaError> {
+    fn start(
+        device_name: &str,
+        render_sink: &RenderSink,
+        playback_rate: &Arc<AtomicU32>,
+    ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(MediaError::NoOutputDevice)?;
+        let device = pick_output_device(&host, device_name).ok_or(MediaError::NoOutputDevice)?;
         let supported = device
             .default_output_config()
             .map_err(|e| MediaError::Backend(e.to_string()))?;
@@ -75,42 +110,49 @@ impl Playback {
         let sample_format = supported.sample_format();
         let config = supported.config();
 
+        // Publish our rate so capture knows the rate of the AEC reference it'll receive.
+        playback_rate.store(device_rate, Ordering::Relaxed);
+
         let buffer = Arc::new(Mutex::new(JitterBuffer::new()));
         let cb_buffer = Arc::clone(&buffer);
         let err_fn = |e| tracing::error!("playback stream error: {e}");
 
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                &config,
-                move |out: &mut [f32], _| {
-                    for (i, s) in pull(&cb_buffer, out.len() / channels.max(1))
-                        .iter()
-                        .enumerate()
-                    {
-                        let v = f32::from(*s) / 32768.0;
-                        for c in 0..channels {
-                            out[i * channels + c] = v;
+            cpal::SampleFormat::F32 => {
+                let (cb_buffer, render) = (Arc::clone(&buffer), Arc::clone(render_sink));
+                device.build_output_stream(
+                    &config,
+                    move |out: &mut [f32], _| {
+                        let mono = pull(&cb_buffer, out.len() / channels.max(1));
+                        forward_render(&render, &mono);
+                        for (i, s) in mono.iter().enumerate() {
+                            let v = f32::from(*s) / 32768.0;
+                            for c in 0..channels {
+                                out[i * channels + c] = v;
+                            }
                         }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
-                move |out: &mut [i16], _| {
-                    for (i, s) in pull(&cb_buffer, out.len() / channels.max(1))
-                        .iter()
-                        .enumerate()
-                    {
-                        for c in 0..channels {
-                            out[i * channels + c] = *s;
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let render = Arc::clone(render_sink);
+                device.build_output_stream(
+                    &config,
+                    move |out: &mut [i16], _| {
+                        let mono = pull(&cb_buffer, out.len() / channels.max(1));
+                        forward_render(&render, &mono);
+                        for (i, s) in mono.iter().enumerate() {
+                            for c in 0..channels {
+                                out[i * channels + c] = *s;
+                            }
                         }
-                    }
-                },
-                err_fn,
-                None,
-            ),
+                    },
+                    err_fn,
+                    None,
+                )
+            }
             other => return Err(MediaError::UnsupportedFormat(format!("{other:?}"))),
         }
         .map_err(|e| MediaError::Backend(e.to_string()))?;
@@ -135,6 +177,19 @@ impl Playback {
     fn flush(&self) {
         if let Ok(mut jb) = self.buffer.lock() {
             jb.flush();
+        }
+    }
+}
+
+/// Forward the just-emitted playback samples (device-rate mono) to the AEC far-end reference, if a
+/// capture session has wired one. Called from the realtime output callback, so it must not block:
+/// the channel is unbounded (`send` never waits) and the lock is uncontended except at a session's
+/// start/stop. This is the reference *actually* emitted (post jitter-buffer), so it stays aligned
+/// with the echo the mic picks up — unlike feeding raw provider audio as it arrives.
+fn forward_render(render_sink: &RenderSink, mono: &[i16]) {
+    if let Ok(sink) = render_sink.lock() {
+        if let Some(tx) = sink.as_ref() {
+            let _ = tx.send(mono.to_vec());
         }
     }
 }

@@ -57,6 +57,8 @@ impl JoiApp {
                 let history = Arc::new(InMemoryHistory::new());
                 // Read what local media needs from `config` before moving it into the manager.
                 let media_config = MediaConfig {
+                    input_device: config.media.audio.input_device.clone(),
+                    output_device: config.media.audio.output_device.clone(),
                     frame_samples: AudioFormat::INPUT
                         .samples_per_frame(config.media.audio.frame_ms),
                     screen_fps: config.media.screen.fps,

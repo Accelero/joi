@@ -36,6 +36,10 @@ media:                              # native device I/O (joi-media)
     input_sample_rate: 16000        # to provider (16 kHz mono PCM16)
     output_sample_rate: 24000       # from provider (24 kHz mono PCM16)
     frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
+    # Audio devices. "default" = follow the OS/desktop default device (what your system mixer or
+    # taskbar selects). Set an exact device name to pin a specific mic/speaker and ignore the OS
+    # default — useful to bypass a virtual/processed default (e.g. a PipeWire echo-cancel source).
+    # Names are the host's device names (logged at startup as "available input/output devices").
     input_device: default
     output_device: default
     # Mic conditioning. Turn these off when an OS/server APM already conditions the input (e.g.

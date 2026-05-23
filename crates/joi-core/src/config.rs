@@ -153,9 +153,12 @@ pub struct AudioCfg {
     pub output_sample_rate: u32,
     /// Mic frame size in milliseconds (20 ms = 320 samples at 16 kHz).
     pub frame_ms: u32,
-    /// Input device name, or `default`.
+    /// Mic capture device. `"default"` follows the OS/desktop default input device; any other value
+    /// pins that exact device by name (the host device names are logged at startup), letting Joi
+    /// bypass a virtual/processed default such as a PipeWire echo-cancel source.
     pub input_device: String,
-    /// Output device name, or `default`.
+    /// Playback device. `"default"` follows the OS/desktop default output device; any other value
+    /// pins that exact device by name. See [`Self::input_device`].
     pub output_device: String,
     /// Acoustic echo cancellation: subtract Joi's own playback from the mic so the model doesn't
     /// hear itself (and interrupt itself) on speakers. Turn off when using headphones, or when an

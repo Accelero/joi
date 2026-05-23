@@ -4,14 +4,14 @@
 //! [`SessionManagerHandle`] API it binds to is unchanged — the engine simply takes the role the
 //! webview used to play.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use joi_core::manager::SessionManagerHandle;
-use joi_core::media::VideoFrame;
+use joi_core::media::{AudioFormat, VideoFrame};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::capture::{spawn_capture, ApmConfig, CaptureHandle};
+use crate::capture::{spawn_capture, ApmConfig, CaptureHandle, RenderRef};
 use crate::playback::{spawn_playback, PlaybackCmd};
 use crate::screen::{spawn_screen_capture, ScreenHandle};
 
@@ -19,11 +19,17 @@ use crate::screen::{spawn_screen_capture, ScreenHandle};
 /// `Some` only while capturing; the playback pump forwards each chunk so the capture APM can
 /// subtract Joi's own voice from the mic (AEC). A `std::sync::mpsc` channel bridges the async pump
 /// to the synchronous capture thread.
-type RenderSink = Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<i16>>>>>;
+pub(crate) type RenderSink = Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<i16>>>>>;
 
 /// Native-media settings, sourced from `Config` by the composition root.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MediaConfig {
+    /// Mic capture device name, or `"default"`. A specific name lets Joi bypass a flaky/virtual
+    /// system-default source (e.g. a PipeWire `echo-cancel-source`) and own its own audio path.
+    pub input_device: String,
+    /// Playback device name, or `"default"`. Pair with `input_device` to keep the in-app AEC's
+    /// far-end reference equal to what's actually played (don't route output through a separate APM).
+    pub output_device: String,
     /// Samples per mic frame (e.g. 320 at 16 kHz / 20 ms).
     pub frame_samples: usize,
     /// Screen-capture frame rate.
@@ -58,6 +64,10 @@ pub struct MediaEngine {
     screen: Mutex<Option<ScreenHandle>>,
     /// Echo-cancellation reference sink for the active capture (see [`RenderSink`]).
     render_sink: RenderSink,
+    /// Playback device sample rate, published by the playback engine once its stream opens. The
+    /// AEC reference is tapped at the playback output at this rate; capture resamples it to the APM
+    /// rate. `0` until playback has started.
+    playback_rate: Arc<AtomicU32>,
 }
 
 impl MediaEngine {
@@ -70,8 +80,14 @@ impl MediaEngine {
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<VideoFrame>(8);
         let mic_muted = Arc::new(AtomicBool::new(false));
         let render_sink: RenderSink = Arc::new(Mutex::new(None));
+        let playback_rate = Arc::new(AtomicU32::new(0));
 
-        spawn_playback_pump(&handle, Arc::clone(&render_sink));
+        spawn_playback_pump(
+            &handle,
+            config.output_device.clone(),
+            Arc::clone(&render_sink),
+            Arc::clone(&playback_rate),
+        );
         spawn_audio_drain(handle.clone(), cap_rx);
         spawn_frame_drain(handle, frame_rx);
 
@@ -83,6 +99,7 @@ impl MediaEngine {
             frame_tx,
             screen: Mutex::new(None),
             render_sink,
+            playback_rate,
         }
     }
 
@@ -103,11 +120,22 @@ impl MediaEngine {
             if let Ok(mut sink) = self.render_sink.lock() {
                 *sink = self.config.echo_cancellation.then_some(render_tx);
             }
+            // The AEC reference arrives at the playback device rate (tapped at the output callback);
+            // capture resamples it to the APM rate. Fall back to the provider rate if playback hasn't
+            // published its rate yet (no playback => no reference anyway).
+            let render_rate = match self.playback_rate.load(Ordering::Relaxed) {
+                0 => AudioFormat::OUTPUT.sample_rate,
+                r => r,
+            };
             *cap = Some(spawn_capture(
+                self.config.input_device.clone(),
                 self.cap_tx.clone(),
                 self.config.frame_samples,
                 Arc::clone(&self.mic_muted),
-                render_rx,
+                RenderRef {
+                    rx: render_rx,
+                    rate: render_rate,
+                },
                 ApmConfig {
                     echo_cancellation: self.config.echo_cancellation,
                     noise_suppression: self.config.noise_suppression,
@@ -158,10 +186,17 @@ impl MediaEngine {
 }
 
 /// Provider audio → native cpal playback. The manager's empty-frame is the barge-in sentinel →
-/// flush the playback buffer immediately (FR-2). Each non-empty chunk is also forwarded to the
-/// active capture's echo-cancellation reference (so the mic's copy of Joi's own voice is removed).
-fn spawn_playback_pump(handle: &SessionManagerHandle, render_sink: RenderSink) {
-    let playback_tx = spawn_playback();
+/// flush the playback buffer immediately (FR-2). The AEC reference is **not** fed here: provider
+/// audio arrives in bursts, but the echo the mic hears is the jitter-buffered, real-time playback —
+/// so the reference is tapped inside the playback engine at the output callback (what's actually
+/// emitted), keeping it aligned with the near-end echo for AEC3.
+fn spawn_playback_pump(
+    handle: &SessionManagerHandle,
+    output_device: String,
+    render_sink: RenderSink,
+    playback_rate: Arc<AtomicU32>,
+) {
+    let playback_tx = spawn_playback(output_device, render_sink, playback_rate);
     let mut audio_rx = handle.subscribe_audio();
     tokio::spawn(async move {
         loop {
@@ -172,12 +207,6 @@ fn spawn_playback_pump(handle: &SessionManagerHandle, render_sink: RenderSink) {
                     }
                 }
                 Ok(pcm) => {
-                    // Feed the AEC reference (what we're about to play) before playing it.
-                    if let Ok(sink) = render_sink.lock() {
-                        if let Some(tx) = sink.as_ref() {
-                            let _ = tx.send(pcm.clone());
-                        }
-                    }
                     if playback_tx.send(PlaybackCmd::Pcm(pcm)).is_err() {
                         break;
                     }
