@@ -11,7 +11,7 @@ use joi_core::manager::SessionManagerHandle;
 use joi_core::media::VideoFrame;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::capture::{spawn_capture, CaptureHandle};
+use crate::capture::{spawn_capture, ApmConfig, CaptureHandle};
 use crate::playback::{spawn_playback, PlaybackCmd};
 use crate::screen::{spawn_screen_capture, ScreenHandle};
 
@@ -35,6 +35,10 @@ pub struct MediaConfig {
     /// Acoustic echo cancellation on the mic (subtract Joi's own playback). Off → no far-end
     /// reference is wired and the canceller is disabled.
     pub echo_cancellation: bool,
+    /// Noise suppression on the mic.
+    pub noise_suppression: bool,
+    /// Automatic gain control on the mic.
+    pub auto_gain: bool,
 }
 
 /// Owns all native media for one app instance. Construct once with [`MediaEngine::new`] (within a
@@ -104,7 +108,11 @@ impl MediaEngine {
                 self.config.frame_samples,
                 Arc::clone(&self.mic_muted),
                 render_rx,
-                self.config.echo_cancellation,
+                ApmConfig {
+                    echo_cancellation: self.config.echo_cancellation,
+                    noise_suppression: self.config.noise_suppression,
+                    auto_gain: self.config.auto_gain,
+                },
             ));
         }
     }

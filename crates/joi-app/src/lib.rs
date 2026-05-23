@@ -63,6 +63,8 @@ impl JoiApp {
                     screen_max_width: config.media.screen.max_width,
                     screen_quality: config.media.screen.quality,
                     echo_cancellation: config.media.audio.echo_cancellation,
+                    noise_suppression: config.media.audio.noise_suppression,
+                    auto_gain: config.media.audio.auto_gain,
                 };
                 let handle = SessionManager::spawn(config, clock, history, factory);
                 let media = match media_mode {

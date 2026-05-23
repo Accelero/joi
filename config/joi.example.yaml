@@ -38,9 +38,13 @@ media:                              # native device I/O (joi-media)
     frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
     input_device: default
     output_device: default
-    # Acoustic echo cancellation: subtract Joi's own voice from the mic so it doesn't hear itself
-    # (and interrupt itself) on speakers. Set false if you use headphones (no echo to cancel).
-    echo_cancellation: true
+    # Mic conditioning. Turn these off when an OS/server APM already conditions the input (e.g.
+    # routing through PipeWire's echo-cancel source) so you don't double-process — and note an AGC
+    # without a co-located echo canceller is echo-blind and can amplify residual echo into false
+    # barge-ins.
+    echo_cancellation: true           # subtract Joi's own playback from the mic (speakers)
+    noise_suppression: true           # WebRTC noise suppression
+    auto_gain: true                   # automatic gain control (AGC2)
   screen:
     enabled: false
     capture_path: auto              # auto | webview | native

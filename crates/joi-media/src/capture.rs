@@ -37,6 +37,19 @@ pub struct CaptureHandle {
     _stop: Sender<()>,
 }
 
+/// Which APM (audio processing) stages to run on the mic. Each is independent so conditioning can be
+/// moved to an OS/server APM (e.g. PipeWire's echo-cancel source) instead — turn the matching stage
+/// off here to avoid double-processing.
+#[derive(Debug, Clone, Copy)]
+pub struct ApmConfig {
+    /// Acoustic echo cancellation (needs the far-end render reference).
+    pub echo_cancellation: bool,
+    /// Noise suppression.
+    pub noise_suppression: bool,
+    /// Automatic gain control (AGC2).
+    pub auto_gain: bool,
+}
+
 /// Spawn mic capture on its own thread (owns the `!Send` input stream and the APM). 16 kHz mono
 /// PCM16 frames of `frame_samples` are pushed to `frames`, dropped on overflow. While `muted` is
 /// set, no audio is captured. Capture stops when the returned [`CaptureHandle`] is dropped.
@@ -48,20 +61,13 @@ pub fn spawn_capture(
     frame_samples: usize,
     muted: Arc<AtomicBool>,
     render_rx: Receiver<Vec<i16>>,
-    echo_cancellation: bool,
+    apm: ApmConfig,
 ) -> CaptureHandle {
     let (stop_tx, stop_rx) = channel::<()>();
     let spawned = std::thread::Builder::new()
         .name("joi-capture".to_string())
         .spawn(move || {
-            if let Err(e) = run_capture(
-                &frames,
-                frame_samples,
-                &muted,
-                &stop_rx,
-                &render_rx,
-                echo_cancellation,
-            ) {
+            if let Err(e) = run_capture(&frames, frame_samples, &muted, &stop_rx, &render_rx, apm) {
                 tracing::error!("native capture unavailable: {e}");
             }
         });
@@ -77,7 +83,7 @@ fn run_capture(
     muted: &Arc<AtomicBool>,
     stop_rx: &std::sync::mpsc::Receiver<()>,
     render_rx: &Receiver<Vec<i16>>,
-    echo_cancellation: bool,
+    apm: ApmConfig,
 ) -> Result<(), MediaError> {
     let host = cpal::default_host();
     let device = host
@@ -133,11 +139,13 @@ fn run_capture(
     tracing::info!(
         device_rate,
         channels,
-        echo_cancellation,
-        "native mic capture started (NS + AGC)"
+        echo_cancellation = apm.echo_cancellation,
+        noise_suppression = apm.noise_suppression,
+        auto_gain = apm.auto_gain,
+        "native mic capture started"
     );
 
-    let mut pipeline = CapturePipeline::new(device_rate, frame_samples, echo_cancellation);
+    let mut pipeline = CapturePipeline::new(device_rate, frame_samples, apm);
     loop {
         // Buffer the far-end reference (what we're playing); `process` consumes it 1:1 with capture
         // frames so the AEC sees both at the same cadence. Drains all that's queued; ends quietly
@@ -177,13 +185,16 @@ struct CapturePipeline {
 }
 
 impl CapturePipeline {
-    fn new(device_rate: u32, frame_samples: usize, echo_cancellation: bool) -> Self {
+    fn new(device_rate: u32, frame_samples: usize, apm: ApmConfig) -> Self {
+        let echo_cancellation = apm.echo_cancellation;
         let config = Config {
             // AEC3: remove Joi's own playback (picked up by the mic) so it doesn't read as speech.
-            // Off when `audio.echo_cancellation = false` (e.g. when using headphones).
-            echo_canceller: echo_cancellation.then(EchoCanceller::default),
-            noise_suppression: Some(NoiseSuppression::default()),
-            gain_controller2: Some(GainController2::default()),
+            // Off when `audio.echo_cancellation = false` (e.g. headphones, or an OS APM does it).
+            echo_canceller: apm.echo_cancellation.then(EchoCanceller::default),
+            // NS/AGC are independently switchable: turn them off when an echo-aware OS APM does the
+            // conditioning, so a co-located AGC isn't echo-blind here (which amplifies residual echo).
+            noise_suppression: apm.noise_suppression.then(NoiseSuppression::default),
+            gain_controller2: apm.auto_gain.then(GainController2::default),
             ..Default::default()
         };
         let sc = ApmStreamConfig::new(APM_RATE, 1);

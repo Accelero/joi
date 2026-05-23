@@ -158,8 +158,16 @@ pub struct AudioCfg {
     /// Output device name, or `default`.
     pub output_device: String,
     /// Acoustic echo cancellation: subtract Joi's own playback from the mic so the model doesn't
-    /// hear itself (and interrupt itself) on speakers. Turn off when using headphones.
+    /// hear itself (and interrupt itself) on speakers. Turn off when using headphones, or when an
+    /// OS/server APM (e.g. PipeWire's echo-cancel source) already does it.
     pub echo_cancellation: bool,
+    /// Noise suppression on the mic. Disable when an OS/server APM already conditions the input, to
+    /// avoid double-processing.
+    pub noise_suppression: bool,
+    /// Automatic gain control on the mic. Disable when an OS APM does the conditioning: an AGC stage
+    /// *without* a co-located echo canceller is echo-blind and will amplify residual echo during
+    /// playback into false barge-ins.
+    pub auto_gain: bool,
 }
 
 /// Screen-capture settings (SPEC §7.3, FR-11).
@@ -272,6 +280,8 @@ impl Default for Config {
                     input_device: "default".to_string(),
                     output_device: "default".to_string(),
                     echo_cancellation: true,
+                    noise_suppression: true,
+                    auto_gain: true,
                 },
                 screen: ScreenCfg {
                     enabled: false,
