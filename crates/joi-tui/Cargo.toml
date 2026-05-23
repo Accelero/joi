@@ -1,0 +1,33 @@
+[package]
+name = "joi-tui"
+description = "Native terminal-UI host for the JOI engine (ratatui/crossterm). No Tauri."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "joi-tui"
+path = "src/main.rs"
+
+[dependencies]
+joi-app = { path = "../joi-app" }
+joi-core = { path = "../joi-core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+textwrap = "0.16"
+unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+directories = { workspace = true }
+
+[dev-dependencies]
+joi-testkit = { path = "../joi-testkit" }

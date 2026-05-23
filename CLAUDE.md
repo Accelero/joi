@@ -26,11 +26,11 @@ The project is split so each layer compiles on its own (see `PLAN-MODULARIZATION
 
 - **Seam A** (engine ↔ host): the **`JoiApp`** Rust API in `crates/joi-app` — `build(Config, MediaMode)`
   + `start/stop/send_text/send_audio/set_mic_muted/screenshare/has_api_key/ui_config` + `subscribe_events`/
-  `subscribe_audio`. No Tauri/HTTP/CLI types cross it. `crates/joi-cli` (stdin) and `crates/joi-server`
-  (WebSocket) are headless hosts that prove it.
+  `subscribe_audio`. No Tauri/HTTP/CLI types cross it. `crates/joi-cli` (stdin), `crates/joi-server`
+  (WebSocket), and `crates/joi-tui` (native ratatui terminal UI) are non-Tauri hosts that prove it.
 - **Seam B** (Tauri ↔ web): the JSON IPC below.
 
-`./scripts/check.sh` asserts `joi-app`/`joi-cli`/`joi-server` have **no** Tauri/WebKit in their dependency trees.
+`./scripts/check.sh` asserts `joi-app`/`joi-cli`/`joi-server`/`joi-tui` have **no** Tauri/WebKit in their dependency trees.
 
 ## Workspace layout
 
@@ -42,6 +42,7 @@ The project is split so each layer compiles on its own (see `PLAN-MODULARIZATION
 | `crates/joi-app` | **Seam A** — `JoiApp`: host-agnostic composition + command API + event/audio streams. The boundary any host drives. No Tauri. |
 | `crates/joi-cli` | Headless host (text-only, `MediaMode::None`) — proves the engine runs with no GUI. |
 | `crates/joi-server` | Headless **HTTP/WS** host (axum, `MediaMode::None`): `/ws` exposes the same JSON-command + `UiEvent`-stream contract as the Tauri IPC over a WebSocket. |
+| `crates/joi-tui` | Native **terminal-UI** host (ratatui/crossterm) driving `JoiApp` in `MediaMode::LocalDevices` — full voice/screen parity with the desktop, no webview. Pure model/reducers (`app`/`transcript`/`input`) + thin render (`ui`/`theme`/`keys`). See `PLAN-TUI.md`. |
 | `crates/joi-testkit` | Test doubles/helpers. |
 | `src-tauri` | **Thin** Tauri adapter: `#[tauri::command]`s delegate to `JoiApp`; one task pumps its `UiEvent` stream to the webview as `ui_event`. No domain logic or composition. |
 | `src/` | React UI: `App.tsx` (wires events↔commands), `components/Terminal.tsx` (xterm), `components/Controls.tsx`, `ipc.ts` (typed IPC boundary). |
