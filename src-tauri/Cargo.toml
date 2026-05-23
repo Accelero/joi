@@ -18,8 +18,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 joi-core = { path = "../crates/joi-core" }
-joi-providers = { path = "../crates/joi-providers" }
-joi-media = { path = "../crates/joi-media" }
+joi-app = { path = "../crates/joi-app" }
 tauri = { version = "2", features = [] }
 tokio = { workspace = true }
 serde = { workspace = true }

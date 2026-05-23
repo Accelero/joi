@@ -1,0 +1,17 @@
+[package]
+name = "joi-app"
+description = "Host-agnostic composition + API for the JOI engine (no Tauri/UI)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+joi-core = { path = "../joi-core" }
+joi-providers = { path = "../joi-providers" }
+joi-media = { path = "../joi-media" }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -1,40 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! Joi Tauri shell: the composition root that wires [`Config`] and the [`SessionManager`] actor
-//! together, plus the IPC command surface mirrored by `src/ipc.ts` (SPEC §11). All provider/session
-//! logic lives in the inner crates; this binary is the thin edge. The provider API key is part of
-//! the config (`live_api.gemini.api_key`, from the YAML file or the environment).
+//! Joi Tauri shell: a thin host adapter over the [`JoiApp`] engine (Seam A). It only translates
+//! `#[tauri::command]`s into `JoiApp` calls and fans the `UiEvent` stream out to the webview as the
+//! `"ui_event"` IPC channel (Seam B, SPEC §11). All composition and domain logic live in `joi-app`
+//! and the inner crates; this binary holds no engine state of its own.
 
-use std::sync::Arc;
-
-use joi_core::clock::SystemClock;
+use joi_app::{JoiApp, MediaMode};
 use joi_core::config::Config;
-use joi_core::history::InMemoryHistory;
-use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
-use joi_core::media::AudioFormat;
-use joi_media::{MediaConfig, MediaEngine};
 use serde::Serialize;
 use tauri::{async_runtime, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
-
-/// Shared application context held in Tauri-managed state. Domain work lives in the inner crates;
-/// this struct just holds the handles the commands dispatch to. `handle`/`media` are `None` until a
-/// provider is configured (e.g. no API key at startup) — the window still opens and session
-/// commands return a clear error rather than crashing.
-struct AppCtx {
-    handle: Option<SessionManagerHandle>,
-    /// Whether `config.live_api.gemini.api_key` was set at load (file or env); drives `has_api_key`.
-    has_key: bool,
-    media: Option<MediaEngine>,
-}
-
-impl AppCtx {
-    fn session(&self) -> Result<&SessionManagerHandle, String> {
-        self.handle.as_ref().ok_or_else(|| {
-            "No API key configured. Set GEMINI_API_KEY (or live_api.gemini.api_key) and restart Joi."
-                .to_string()
-        })
-    }
-}
 
 #[derive(Serialize)]
 struct HasApiKeyResult {
@@ -53,69 +27,48 @@ fn ping() -> &'static str {
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri commands take `State` by value
-fn has_api_key(ctx: State<'_, AppCtx>) -> HasApiKeyResult {
-    // The key is configured (file or env), not set via IPC — this is a read-only check.
+fn has_api_key(app: State<'_, JoiApp>) -> HasApiKeyResult {
     HasApiKeyResult {
-        present: ctx.has_key,
+        present: app.has_api_key(),
     }
 }
 
 #[tauri::command]
-async fn start(resume: bool, ctx: State<'_, AppCtx>) -> Result<StartResult, String> {
-    // Audio/screen I/O is native (joi-media's MediaEngine) — nothing crosses to the webview.
-    ctx.session()?
-        .start(resume)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(media) = &ctx.media {
-        media.start_capture();
-    }
+async fn start(resume: bool, app: State<'_, JoiApp>) -> Result<StartResult, String> {
+    app.start(resume).await.map_err(|e| e.to_string())?;
     Ok(StartResult {
         session_id: "session".to_string(),
     })
 }
 
 #[tauri::command]
-async fn stop(pause: bool, ctx: State<'_, AppCtx>) -> Result<(), String> {
-    if let Some(media) = &ctx.media {
-        media.stop_capture(); // stop mic capture before tearing down the session
-    }
-    ctx.session()?.stop(pause).await.map_err(|e| e.to_string())
+async fn stop(pause: bool, app: State<'_, JoiApp>) -> Result<(), String> {
+    app.stop(pause).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn send_text(text: String, ctx: State<'_, AppCtx>) -> Result<(), String> {
-    ctx.session()?
-        .send_text(text)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[allow(clippy::needless_pass_by_value)] // Tauri commands take `State` by value
-fn set_mic_muted(muted: bool, ctx: State<'_, AppCtx>) {
-    if let Some(media) = &ctx.media {
-        media.set_mic_muted(muted);
-    }
+async fn send_text(text: String, app: State<'_, JoiApp>) -> Result<(), String> {
+    app.send_text(&text).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-fn start_screenshare(ctx: State<'_, AppCtx>) {
-    if let Some(media) = &ctx.media {
-        media.start_screenshare();
-    }
+fn set_mic_muted(muted: bool, app: State<'_, JoiApp>) {
+    app.set_mic_muted(muted);
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-fn stop_screenshare(ctx: State<'_, AppCtx>) {
-    if let Some(media) = &ctx.media {
-        media.stop_screenshare();
-    }
+fn start_screenshare(app: State<'_, JoiApp>) {
+    app.start_screenshare();
 }
 
-#[allow(clippy::too_many_lines)] // composition root: linear wiring reads better in one place
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn stop_screenshare(app: State<'_, JoiApp>) {
+    app.stop_screenshare();
+}
+
 fn main() -> anyhow::Result<()> {
     // (WebKitGTK's blank-window workaround lives in `.cargo/config.toml [env]` — it must be set
     // before the process starts, so it can't be done here.)
@@ -133,14 +86,6 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load(None)?;
-    let has_key = config.live_api.gemini.api_key.is_set();
-    let media_config = MediaConfig {
-        frame_samples: AudioFormat::INPUT.samples_per_frame(config.audio.frame_ms),
-        screen_fps: config.screen.fps,
-        screen_max_width: config.screen.max_width,
-        screen_quality: config.screen.quality,
-        echo_cancellation: config.audio.echo_cancellation,
-    };
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -153,36 +98,14 @@ fn main() -> anyhow::Result<()> {
             start_screenshare,
             stop_screenshare
         ])
-        .setup(move |app| {
-            let cfg = config.clone();
-            // Build the manager and its MediaEngine together inside the runtime: both spawn tasks
-            // with `tokio::spawn`, which needs the runtime context this block enters. The key now
-            // lives in `cfg` (file/env). A missing key (or any factory error) is non-fatal: the
-            // window still opens and session commands report it.
-            let (handle, media): (Option<SessionManagerHandle>, Option<MediaEngine>) =
-                async_runtime::block_on(async move {
-                    match joi_providers::build_session_factory(&cfg) {
-                        Ok(factory) => {
-                            let factory: Arc<dyn SessionFactory> = Arc::from(factory);
-                            let clock = Arc::new(SystemClock);
-                            let history = Arc::new(InMemoryHistory::new());
-                            let handle =
-                                SessionManager::spawn(cfg.clone(), clock, history, factory);
-                            let media = MediaEngine::new(handle.clone(), media_config);
-                            (Some(handle), Some(media))
-                        }
-                        Err(e) => {
-                            tracing::warn!("session unavailable until configured: {e}");
-                            (None, None)
-                        }
-                    }
-                });
+        .setup(move |tauri_app| {
+            // Build the engine inside the runtime (it spawns tasks). Desktop = local devices.
+            let app =
+                async_runtime::block_on(async { JoiApp::build(config, MediaMode::LocalDevices) });
 
-            // The one media-adjacent task that genuinely belongs to the shell: fan provider/UI
-            // events out to the webview (SPEC §11.3). All native media lives in the MediaEngine.
-            if let Some(handle) = &handle {
-                let emitter = app.handle().clone();
-                let mut ui_rx = handle.subscribe();
+            // The one Tauri-specific bridge: fan UiEvents out to the webview (SPEC §11.3).
+            if let Some(mut ui_rx) = app.subscribe_events() {
+                let emitter = tauri_app.handle().clone();
                 async_runtime::spawn(async move {
                     loop {
                         match ui_rx.recv().await {
@@ -196,11 +119,7 @@ fn main() -> anyhow::Result<()> {
                 });
             }
 
-            app.manage(AppCtx {
-                handle,
-                has_key,
-                media,
-            });
+            tauri_app.manage(app);
             Ok(())
         })
         .run(tauri::generate_context!())?;
