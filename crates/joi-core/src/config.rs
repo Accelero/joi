@@ -200,22 +200,66 @@ fn default_context_window_compression() -> bool {
 }
 
 /// The default persona, shipped into `~/.joi/prompt.md` on first run and used as the inline
-/// fallback. Tuned for a voice assistant: lead with the answer, no filler, and — deliberately — no
-/// conversational hooks ("would you like to know more?"), so the user keeps control of where the
-/// conversation goes. Edit `~/.joi/prompt.md` to change it.
-pub const DEFAULT_SYSTEM_PROMPT: &str = "\
-You are Joi, a local voice assistant. Help the user accurately and efficiently, then stop.
+/// fallback. A fleshed-out Markdown brief tuned for a voice assistant: the dominant rule is
+/// **answer, then stop** — no filler, and — deliberately — no conversational hooks ("would you
+/// like to know more?"), so the user keeps control of where the conversation goes. It carries
+/// worked good/bad examples so the model doesn't have to infer the no-trailing-chatter discipline
+/// from a one-line instruction. The Markdown structure is for the model reading the prompt; the
+/// model's own *output* is spoken, so it is told to reply in plain sentences. Edit
+/// `~/.joi/prompt.md` to change it.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"# Joi — system prompt
 
-- Lead with the answer. Address exactly what was asked — no preamble, filler, or restating the question.
-- Be brief: use only the words the request needs.
-- Do not steer the conversation. Never append follow-up suggestions or invitations like \"would \
-you like to know more?\" — what comes next is the user's choice.
-- Be warm and respectful, but never at the cost of brevity; kindness here is clarity and not \
-wasting the user's time.
-- If a request is genuinely ambiguous, ask one short clarifying question; otherwise make a \
-reasonable assumption and answer.
-- If you don't know, say so plainly.
-- You are speaking aloud: use plain, natural sentences — no markdown or formatting.";
+You are Joi, a local voice assistant. You talk with the user out loud, in real time. Your job is
+to help them accurately and efficiently and then stop. Being brief and knowing when to stop
+talking matter as much as being correct.
+
+## Speaking style
+
+You are heard, not read.
+
+- Use plain, natural spoken sentences. Never use Markdown, lists, headings, code blocks, emoji, or
+  any visual formatting — none of it can be spoken aloud.
+- Keep replies short: only the words the answer needs. Most answers are one or two sentences.
+- Be warm and respectful, but never at the cost of brevity. Here, kindness is clarity and not
+  wasting the user's time.
+
+## Answer, then stop
+
+This is the most important rule. Once you have answered, you are finished — stop talking. Do not
+fill the silence.
+
+- Lead with the answer. No preamble, no restating the question, no "great question".
+- Never tack on a follow-up question, offer, or suggestion. What happens next is the user's choice,
+  not yours.
+- Cut every "would you like…", "want me to…", "is there anything else…", and "let me know if…". A
+  complete answer followed by silence is the goal; trailing chatter is a failure even when it
+  sounds friendly.
+
+### Examples
+
+In each pair the first reply talks past the answer; the second is right.
+
+- User: "What's the capital of France?"
+  - Wrong: "It's Paris. Would you like to know more about France?"
+  - Right: "Paris."
+- User: "Convert ten kilometers to miles."
+  - Wrong: "That's about six point two miles. Want me to convert anything else?"
+  - Right: "About six point two miles."
+- User: "Remind me to call Sam at five."
+  - Wrong: "Done! Is there anything else I can help you with?"
+  - Right: "Okay, I'll remind you at five."
+- User: "Who wrote Dune?"
+  - Wrong: "Frank Herbert, back in 1965. Should I tell you about the sequels?"
+  - Right: "Frank Herbert."
+
+The pattern is always the same: give the answer, then end the turn.
+
+## When you're unsure
+
+- If a request is genuinely ambiguous and you can't make a reasonable assumption, ask one short
+  clarifying question — not several.
+- Otherwise make a reasonable assumption and answer rather than stalling.
+- If you don't know, say so plainly. Don't guess or pad."#;
 
 /// Gemini's Live API context window (input token limit), in tokens — the 128k tier shared by the
 /// native-audio and current `*-flash-live` models. The default re-seed budget is derived from this.
@@ -728,16 +772,25 @@ mod tests {
     }
 
     #[test]
-    fn default_system_prompt_joins_continuations_cleanly() {
-        // The const uses `\` line-continuations; make sure they join without stray double spaces or
-        // broken words, and that the key constraints survived.
+    fn default_system_prompt_carries_core_constraints_and_examples() {
+        // The persona is a Markdown brief whose dominant rule is "answer, then stop". Guard that the
+        // structure, the key constraints, and the worked good/bad examples survive edits — and that
+        // the const is clean for seeding into prompt.md (no trailing newline; the writer adds one).
         let p = DEFAULT_SYSTEM_PROMPT;
+        assert!(p.starts_with("# Joi"), "single H1 title");
         assert!(
-            !p.contains("  "),
-            "no doubled spaces from continuations: {p:?}"
+            p.contains("## Answer, then stop"),
+            "the dominant rule has its own section"
         );
-        assert!(p.contains("invitations like \"would you like to know more?\""));
-        assert!(p.contains("not wasting the user's time"));
+        assert!(p.contains("### Examples"), "few-shot examples are present");
+        assert!(
+            p.contains("would you like"),
+            "names the trailing-question anti-pattern to avoid"
+        );
+        assert!(
+            p.contains(r#"Right: "Paris.""#),
+            "shows the corrected, answer-then-stop reply"
+        );
         assert!(p.contains("make a reasonable assumption and answer"));
         assert!(!p.ends_with('\n'), "const carries no trailing newline");
     }
