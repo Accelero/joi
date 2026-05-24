@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::SessionError;
 use crate::history::HistoryMeta;
 use crate::metrics::MetricsSnapshot;
+use crate::settings::SettingsSnapshot;
 use crate::tools::ToolCallId;
 
 /// Owned receiver for a session's event stream (taken once via `take_events`).
@@ -188,6 +189,14 @@ pub enum UiEvent {
     },
     /// History changed (append/prune) — drives the history meta in the UI.
     History(HistoryMeta),
+    /// The editable-settings surface changed (or was re-broadcast after a change). Carries the full
+    /// snapshot so the frontend re-renders its settings panel without tracking deltas. Each
+    /// descriptor's `apply` timing lets the UI show "applies on reconnect" / "restart to apply"
+    /// generically.
+    Settings {
+        /// The full editable-settings snapshot.
+        settings: SettingsSnapshot,
+    },
     /// A throughput sample (up/down kbit/s + tokens/s), emitted roughly once a second while a
     /// session is live so the UI can render a live bandwidth/generation-speed indicator.
     Metrics(MetricsSnapshot),
@@ -225,6 +234,19 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         let back: UiEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn settings_event_roundtrips_as_tagged_json() {
+        // The settings snapshot must survive the JSON boundary a future frontend deserializes.
+        let ev = UiEvent::Settings {
+            settings: crate::settings::settings_schema(&crate::config::Config::default()),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "settings");
+        assert!(json["settings"].is_array());
+        let back: UiEvent = serde_json::from_value(json).unwrap();
         assert_eq!(ev, back);
     }
 }

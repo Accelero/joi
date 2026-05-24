@@ -64,6 +64,25 @@ pub enum HistoryError {
     Serde(String),
 }
 
+/// Failure changing a runtime setting via [`crate::settings`].
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    /// The setting exists but isn't editable at runtime (file/env only).
+    #[error("setting is not editable: {0}")]
+    NotEditable(String),
+    /// The supplied value was the wrong type or out of range for this setting.
+    #[error("invalid value for {setting}: {reason}")]
+    InvalidValue {
+        /// Which setting was being changed.
+        setting: String,
+        /// Why the value was rejected.
+        reason: String,
+    },
+    /// Persisting the changed config to disk failed.
+    #[error("could not persist settings: {0}")]
+    Io(String),
+}
+
 /// Failure on a [`crate::media::ScreenSource`].
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {

@@ -12,15 +12,19 @@
 //! [`send_audio`](JoiApp::send_audio) / [`subscribe_audio`](JoiApp::subscribe_audio) raw-audio
 //! transport.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use joi_core::clock::SystemClock;
-use joi_core::config::{Config, UiCfg};
-use joi_core::error::SessionError;
+use joi_core::config::{Config, ProjectPaths, UiCfg};
+use joi_core::error::{SessionError, SettingsError};
 use joi_core::history::{HistoryStore, HistoryTurn, InMemoryHistory, SessionStore, SessionSummary};
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
 use joi_core::media::AudioFormat;
 use joi_core::session::event::UiEvent;
+use joi_core::settings::{
+    apply_setting, settings_schema as build_schema, SettingDescriptor, SettingId, SettingValue,
+};
 use joi_media::{MediaConfig, MediaEngine};
 use tokio::sync::broadcast;
 
@@ -51,14 +55,41 @@ pub struct JoiApp {
     /// Persisted-session repository for list/resume/new, shared with the manager (it appends turns
     /// to the same store). `None` when sessions aren't persisted (no key, or in-memory fallback).
     sessions: Option<Arc<SessionStore>>,
+    /// Authoritative config copy for the runtime settings interface. The manager keeps its own copy,
+    /// resynced via [`SessionManagerHandle::update_config`] on each change — no shared lock reaches
+    /// into the actor. Holds the full config (incl. the in-memory API key); the key is blanked only
+    /// when written to disk.
+    config: RwLock<Config>,
+    /// Where to persist config changes (`~/.joi/config.json`). `None` when no path resolves, in
+    /// which case [`update_setting`](JoiApp::update_setting) reports an error rather than silently
+    /// dropping the change.
+    config_path: Option<PathBuf>,
 }
 
 impl JoiApp {
     /// Composition root. **Must be called inside a Tokio runtime** — the session manager and the
     /// media engine spawn tasks with `tokio::spawn`.
+    ///
+    /// Runtime settings changes are persisted to the default `~/.joi/config.json`. (A host that
+    /// loaded config from a non-default path can use [`build_with_config_path`](Self::build_with_config_path).)
     #[must_use]
     pub fn build(config: Config, media_mode: MediaMode) -> Self {
+        let config_path = ProjectPaths::resolve().ok().map(|p| p.config_file);
+        Self::build_with_config_path(config, media_mode, config_path)
+    }
+
+    /// Composition root with an explicit path for persisting runtime settings changes (`None` to
+    /// disable persistence). [`build`](Self::build) is this with the default `~/.joi/config.json`.
+    #[must_use]
+    pub fn build_with_config_path(
+        config: Config,
+        media_mode: MediaMode,
+        config_path: Option<PathBuf>,
+    ) -> Self {
         let has_key = config.live_api.gemini.api_key.is_set();
+        // Authoritative copy for the settings surface, kept in sync with the manager via
+        // `update_config`. Cloned before `config` is moved into the manager below.
+        let config_for_app = config.clone();
         // Keep the UI section before `config` is moved into the manager (cheap clone).
         let ui = config.ui.clone();
         match joi_providers::build_session_factory(&config) {
@@ -109,6 +140,8 @@ impl JoiApp {
                     has_key,
                     ui,
                     sessions,
+                    config: RwLock::new(config_for_app),
+                    config_path,
                 }
             }
             Err(e) => {
@@ -119,6 +152,8 @@ impl JoiApp {
                     has_key,
                     ui,
                     sessions: None,
+                    config: RwLock::new(config_for_app),
+                    config_path,
                 }
             }
         }
@@ -264,6 +299,67 @@ impl JoiApp {
     #[must_use]
     pub fn ui_config(&self) -> UiCfg {
         self.ui.clone()
+    }
+
+    /// The curated runtime-editable settings, with current values + apply-timing — the data a host
+    /// renders its settings panel from. See [`update_setting`](Self::update_setting) to change one.
+    #[must_use]
+    pub fn settings_schema(&self) -> Vec<SettingDescriptor> {
+        let cfg = self
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        build_schema(&cfg)
+    }
+
+    /// Change one runtime setting (Seam A). Validates the new value, persists the whole config to
+    /// `config.json` **atomically** (with the API key blanked — Joi never writes the secret), then
+    /// resyncs the running manager, which re-broadcasts the settings snapshot as
+    /// [`UiEvent::Settings`] for the frontend to fold.
+    ///
+    /// On a validation error the config is left untouched and nothing is written, so the host can
+    /// surface the message and keep its current state. Errors with [`SettingsError::Io`] if no
+    /// config path is available to persist to.
+    pub async fn update_setting(
+        &self,
+        id: SettingId,
+        value: SettingValue,
+    ) -> Result<(), SettingsError> {
+        // Work on a clone so a rejected change never mutates the live config.
+        let mut next = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.clone()
+        };
+        apply_setting(&mut next, id, &value)?; // validates; returns early on bad value
+
+        // Durably persist before adopting the change, so the on-disk config always reflects what
+        // the engine is running. `write_json` is atomic and blanks the API key.
+        let path = self
+            .config_path
+            .as_ref()
+            .ok_or_else(|| SettingsError::Io("no config path to persist to".to_string()))?;
+        next.write_json(path)
+            .map_err(|e| SettingsError::Io(e.to_string()))?;
+
+        // Adopt it locally…
+        {
+            let mut cfg = self
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *cfg = next.clone();
+        }
+        // …and resync the manager (it emits UiEvent::Settings). No manager (no key) → the on-disk
+        // change still stands; there are simply no event subscribers to notify.
+        if let Some(h) = &self.handle {
+            h.update_config(next)
+                .await
+                .map_err(|e| SettingsError::Io(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Subscribe to UI events (`None` if no session is configured).

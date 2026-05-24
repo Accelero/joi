@@ -10,6 +10,7 @@ use joi_app::{JoiApp, MediaMode};
 use joi_core::config::{Config, ProviderName};
 use joi_core::history::Role;
 use joi_core::session::event::{Speaker, UiEvent};
+use joi_core::settings::{SettingId, SettingValue};
 use tokio::sync::broadcast::error::RecvError;
 
 /// A config that drives the scripted Mock provider with no persisted sessions (in-memory history).
@@ -97,6 +98,80 @@ async fn no_api_key_falls_back_without_panicking() {
     assert!(app.list_sessions().await.is_empty());
     assert!(app.current_session().await.is_none());
     assert!(app.new_session().await.is_err());
+}
+
+#[tokio::test]
+async fn update_setting_persists_resyncs_and_rebroadcasts() {
+    // The runtime settings loop end-to-end over Seam A: change Voice → it's validated, persisted to
+    // config.json atomically (key blanked), the schema reflects it, and the manager re-broadcasts a
+    // UiEvent::Settings the frontend would fold.
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    let mut config = mock_config();
+    // `update_setting` runs `Config::validate()` as a safety net, which requires a model.
+    config.live_api.gemini.model = "mock-model".to_string();
+    let app = JoiApp::build_with_config_path(config, MediaMode::None, Some(config_path.clone()));
+    let mut events = app.subscribe_events().expect("events");
+
+    // The curated surface is present, Voice starts at the default (Aoede).
+    let voice_value = |app: &JoiApp| {
+        app.settings_schema()
+            .into_iter()
+            .find(|d| d.id == SettingId::Voice)
+            .map(|d| d.value)
+    };
+    assert_eq!(
+        voice_value(&app),
+        Some(SettingValue::Text("Aoede".to_string()))
+    );
+
+    app.update_setting(SettingId::Voice, SettingValue::Text("Charon".to_string()))
+        .await
+        .expect("voice is editable");
+
+    // The in-memory schema reflects the change…
+    assert_eq!(
+        voice_value(&app),
+        Some(SettingValue::Text("Charon".to_string()))
+    );
+
+    // …it was persisted to config.json (valid JSON, new voice, no secret on disk)…
+    let written = std::fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(json["live_api"]["gemini"]["voice"], "Charon");
+    assert_eq!(json["live_api"]["gemini"]["api_key"], "");
+
+    // …and the manager re-broadcast the snapshot for the frontend to fold.
+    let mut rebroadcast = None;
+    for _ in 0..20 {
+        if let UiEvent::Settings { settings } = next_ui(&mut events).await {
+            rebroadcast = settings
+                .into_iter()
+                .find(|d| d.id == SettingId::Voice)
+                .map(|d| d.value);
+            break;
+        }
+    }
+    assert_eq!(
+        rebroadcast,
+        Some(SettingValue::Text("Charon".to_string())),
+        "manager should re-broadcast the updated settings snapshot"
+    );
+
+    // A bad value type is rejected, leaves the config untouched, and writes nothing new.
+    let err = app
+        .update_setting(SettingId::Accent, SettingValue::Bool(true))
+        .await
+        .expect_err("wrong value type is rejected");
+    assert!(matches!(
+        err,
+        joi_core::error::SettingsError::InvalidValue { .. }
+    ));
+    let after_reject = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(
+        after_reject, written,
+        "a rejected change must not rewrite config.json"
+    );
 }
 
 #[tokio::test]

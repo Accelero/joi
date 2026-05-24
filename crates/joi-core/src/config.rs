@@ -1,12 +1,20 @@
-//! Layered configuration (defaults → YAML file → `JOI_` env), loaded once at startup.
+//! Layered configuration (defaults → JSON file → `JOI_` env), loaded once at startup.
 //!
-//! Precedence, lowest to highest (PLAN §6.2): built-in [`Config::default`], a YAML file, then
-//! `JOI_`-prefixed environment variables (nested via `__`) — **env always wins over the file** —
-//! and finally the conventional shortcuts `GEMINI_API_KEY` / `GEMINI_MODEL`. CLI flags
-//! (`--config`/`--log`) are applied by the binary *before* this loader runs.
+//! Precedence, lowest to highest (PLAN §6.2): built-in [`Config::default`], a JSON file
+//! (`~/.joi/config.json`), then `JOI_`-prefixed environment variables (nested via `__`) — **env
+//! always wins over the file** — and finally the conventional shortcuts `GEMINI_API_KEY` /
+//! `GEMINI_MODEL`. CLI flags (`--config`/`--log`) are applied by the binary *before* this loader
+//! runs.
+//!
+//! The file is **JSON** (the engine reads *and writes* it — see the runtime settings interface in
+//! `doc/SETTINGS.md` — and JSON round-trips deterministically for machine writing). A pre-JSON
+//! `~/.joi/config` (YAML) is migrated to `config.json` once, on first run after the upgrade.
 //!
 //! On startup the binary writes a defaults file to the config path if none exists
-//! ([`Config::write_default_if_missing`]), so users have a documented YAML to edit.
+//! ([`Config::write_default_if_missing`]), so users have a starting file to edit (the annotated
+//! field reference lives in `doc/CONFIG.md`). Every write goes through
+//! [`crate::util::atomic_write`], so a crash can't corrupt the config, and the API key is **never**
+//! written to disk (it comes from the environment).
 //!
 //! The provider API key may be set in the file (`live_api.gemini.api_key`) or, preferably, via the
 //! `GEMINI_API_KEY` (or `JOI_LIVE_API__GEMINI__API_KEY`) environment variable — env wins. It is held
@@ -378,8 +386,11 @@ impl Default for Config {
 /// one `~/.joi` directory (config + per-session logs + logs), so it's easy to find, back up, or wipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
-    /// Config file (`~/.joi/config`) — YAML, despite the extensionless name.
+    /// Config file (`~/.joi/config.json`) — JSON.
     pub config_file: PathBuf,
+    /// Pre-JSON config file (`~/.joi/config`, YAML). Read only to **migrate** it to `config.json`
+    /// once when the latter is absent; never written.
+    pub legacy_config_file: PathBuf,
     /// Joi root data directory (`~/.joi`).
     pub data_dir: PathBuf,
     /// Per-session conversation logs + the session index (`~/.joi/sessions`).
@@ -403,7 +414,8 @@ impl ProjectPaths {
             })?;
         let root = home.join(".joi");
         Ok(Self {
-            config_file: root.join("config"),
+            config_file: root.join("config.json"),
+            legacy_config_file: root.join("config"),
             sessions_dir: root.join("sessions"),
             log_dir: root.join("logs"),
             prompt_file: root.join("prompt.md"),
@@ -421,6 +433,14 @@ impl Config {
     pub fn load(cli_path: Option<&Path>) -> Result<Self, ConfigError> {
         let paths = ProjectPaths::resolve()?;
         let file = cli_path.map_or_else(|| paths.config_file.clone(), Path::to_path_buf);
+        // One-shot migration: when using the default location and only the pre-JSON `~/.joi/config`
+        // (YAML) exists, convert it to `config.json` before loading. The legacy file is left in
+        // place as a backup; `config.json` takes precedence from here on.
+        if cli_path.is_none() && !file.exists() && paths.legacy_config_file.exists() {
+            if let Err(e) = Self::migrate_legacy_to_json(&paths.legacy_config_file, &file) {
+                tracing::warn!("could not migrate legacy config: {e}");
+            }
+        }
         if let Err(e) = Self::write_default_if_missing(&file) {
             tracing::warn!("could not write default config to {}: {e}", file.display());
         }
@@ -464,43 +484,85 @@ impl Config {
         }
     }
 
-    /// Write the built-in defaults as YAML to `path` if no config file exists there yet (creating
-    /// parent dirs). Gives the user a documented file to edit; never overwrites an existing one.
-    /// This is the one place Joi writes config — secrets are never included (they come from the
-    /// environment).
+    /// Write the built-in defaults as JSON to `path` if no config file exists there yet. Gives the
+    /// user a starting file to edit (annotated reference: `doc/CONFIG.md`); never overwrites an
+    /// existing one. The API key is never included — it comes from the environment.
     pub fn write_default_if_missing(path: &Path) -> Result<(), ConfigError> {
         if path.exists() {
             return Ok(());
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Path {
-                path: parent.to_path_buf(),
-                reason: e.to_string(),
-            })?;
-        }
-        let yaml = serde_norway::to_string(&Config::default())
-            .map_err(|e| ConfigError::Load(e.to_string()))?;
-        std::fs::write(path, yaml).map_err(|e| ConfigError::Path {
+        Config::default().write_json(path)?;
+        tracing::info!("wrote default config to {}", path.display());
+        Ok(())
+    }
+
+    /// Atomically (re)write this config as pretty JSON to `path`, with the API key blanked.
+    ///
+    /// This is the single config write path — used by the defaults bootstrap, the legacy migration,
+    /// and the runtime settings interface ([`crate::settings`]). It routes through
+    /// [`crate::util::atomic_write`] (temp + fsync + rename), so a crash can never corrupt the file,
+    /// and it always redacts the secret, so Joi never persists the key (SEC-1).
+    pub fn write_json(&self, path: &Path) -> Result<(), ConfigError> {
+        let json = self.to_redacted_json()?;
+        crate::util::atomic_write(path, json.as_bytes()).map_err(|e| ConfigError::Path {
             path: path.to_path_buf(),
             reason: e.to_string(),
-        })?;
-        tracing::info!("wrote default config to {}", path.display());
+        })
+    }
+
+    /// Pretty-JSON serialization with the API key blanked out. The key belongs in the environment,
+    /// never on disk (SEC-1), so every persisted form omits it.
+    fn to_redacted_json(&self) -> Result<String, ConfigError> {
+        let mut redacted = self.clone();
+        redacted.live_api.gemini.api_key = ApiKey::default();
+        serde_json::to_string_pretty(&redacted).map_err(|e| ConfigError::Load(e.to_string()))
+    }
+
+    /// Convert a pre-JSON `~/.joi/config` (YAML) into `config.json` (JSON), once. The legacy file is
+    /// parsed and merged over the defaults (so it tolerates partial files and drops keys no longer
+    /// in the schema), then written via the redacting [`write_json`](Self::write_json). A key found
+    /// in the legacy file is **not** carried over — it must live in the environment.
+    fn migrate_legacy_to_json(legacy: &Path, target: &Path) -> Result<(), ConfigError> {
+        let contents = std::fs::read_to_string(legacy)
+            .map_err(|e| ConfigError::Load(format!("{}: {e}", legacy.display())))?;
+        let value: serde_norway::Value =
+            serde_norway::from_str(&contents).map_err(|e| ConfigError::Load(e.to_string()))?;
+        let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Serialized::defaults(value))
+            .extract()
+            .map_err(|e| ConfigError::Load(e.to_string()))?;
+        if cfg.live_api.gemini.api_key.is_set() {
+            tracing::warn!(
+                "legacy config {} held an API key; it was NOT copied to config.json — set \
+                 GEMINI_API_KEY in your environment instead",
+                legacy.display()
+            );
+        }
+        cfg.write_json(target)?;
+        tracing::info!(
+            "migrated legacy config {} → {}",
+            legacy.display(),
+            target.display()
+        );
         Ok(())
     }
 
     /// The path-resolution + figment merge used by [`Config::load`], with paths injected so it is
     /// testable without touching the real environment.
     ///
-    /// The YAML file is parsed with `serde_norway` and merged (deep, over the defaults) via figment;
-    /// `JOI_` env vars are layered last and win. A missing file is treated as empty.
+    /// The JSON file is parsed with `serde_json` and merged (deep, over the defaults) via figment;
+    /// `JOI_` env vars are layered last and win. A missing or blank file is treated as empty.
     pub fn load_from(file: &Path, paths: &ProjectPaths) -> Result<Self, ConfigError> {
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
         if file.exists() {
             let contents = std::fs::read_to_string(file)
                 .map_err(|e| ConfigError::Load(format!("{}: {e}", file.display())))?;
-            let value: serde_norway::Value =
-                serde_norway::from_str(&contents).map_err(|e| ConfigError::Load(e.to_string()))?;
-            figment = figment.merge(Serialized::defaults(value));
+            // A blank file means "all defaults" — `serde_json` would reject the empty string.
+            if !contents.trim().is_empty() {
+                let value: serde_json::Value = serde_json::from_str(&contents)
+                    .map_err(|e| ConfigError::Load(format!("{}: {e}", file.display())))?;
+                figment = figment.merge(Serialized::defaults(value));
+            }
         }
         let mut cfg: Config = figment
             .merge(Env::prefixed("JOI_").split("__"))
@@ -605,7 +667,8 @@ mod tests {
 
     fn test_paths() -> ProjectPaths {
         ProjectPaths {
-            config_file: PathBuf::from("/nonexistent/config"),
+            config_file: PathBuf::from("/nonexistent/config.json"),
+            legacy_config_file: PathBuf::from("/nonexistent/config"),
             data_dir: PathBuf::from("/data"),
             sessions_dir: PathBuf::from("/data/sessions"),
             log_dir: PathBuf::from("/state"),
@@ -622,7 +685,7 @@ mod tests {
             std::fs::write(&prompt, "  You are a pirate.\n").unwrap();
             let mut paths = test_paths();
             paths.prompt_file = prompt;
-            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.json"), &paths).unwrap();
             // The file (trimmed) wins over the built-in default persona.
             assert_eq!(cfg.live_api.gemini.system_instruction, "You are a pirate.");
             Ok(())
@@ -638,7 +701,7 @@ mod tests {
             std::fs::write(&prompt, "   \n\t\n").unwrap(); // whitespace-only → ignored
             let mut paths = test_paths();
             paths.prompt_file = prompt;
-            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.json"), &paths).unwrap();
             assert_eq!(
                 cfg.live_api.gemini.system_instruction,
                 Config::default().live_api.gemini.system_instruction
@@ -701,12 +764,12 @@ mod tests {
 
     #[test]
     fn example_config_loads_and_validates() {
-        // Guards config/joi.example.yaml against drift from the Config schema. Run inside a `Jail`
+        // Guards config/joi.example.json against drift from the Config schema. Run inside a `Jail`
         // so it shares figment's global env lock with the other env-mutating tests below — otherwise
         // a concurrent test that sets `JOI_LIVE_API__GEMINI__API_KEY` leaks into this `load_from`
         // (which always merges the `JOI_` env layer) and trips the empty-key assertion.
         figment::Jail::expect_with(|_jail| {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.yaml");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.json");
             let cfg = Config::load_from(&path, &test_paths()).unwrap();
             assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
             assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
@@ -723,7 +786,7 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "test-model");
             let paths = test_paths();
-            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.json"), &paths).unwrap();
             assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
             assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/sessions")));
             assert_eq!(cfg.logging.file, Some(PathBuf::from("/state/joi.log")));
@@ -735,12 +798,15 @@ mod tests {
     fn writes_default_file_when_missing_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         // A nested path exercises parent-dir creation.
-        let path = dir.path().join("nested/joi.yaml");
+        let path = dir.path().join("nested/config.json");
         assert!(!path.exists());
         Config::write_default_if_missing(&path).unwrap();
         assert!(path.exists());
-        // The written file round-trips back to the defaults; a model is supplied via env since none
-        // is shipped by default.
+        // The bootstrap file is valid JSON (and carries no secret).
+        let written = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(value["live_api"]["gemini"]["api_key"], "");
+        // It round-trips back to the defaults; a model is supplied via env since none is shipped.
         figment::Jail::expect_with(|jail| {
             jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "m");
             let cfg = Config::load_from(&path, &test_paths()).unwrap();
@@ -752,22 +818,73 @@ mod tests {
     }
 
     #[test]
+    fn config_round_trips_through_json() {
+        // A non-default config serializes to JSON and loads back identically (minus the redacted
+        // key, which Joi never persists). This is the property the runtime settings interface and
+        // the bootstrap both rely on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.model = "gemini-3.1-flash-live-preview".to_string();
+        cfg.live_api.gemini.voice = Some("Charon".to_string());
+        cfg.media.audio.frame_ms = 30;
+        cfg.ui.terminal.accent = "#ff0066".to_string();
+        cfg.write_json(&path).unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let loaded = Config::load_from(&path, &test_paths()).unwrap();
+            assert_eq!(loaded.live_api.gemini.voice.as_deref(), Some("Charon"));
+            assert_eq!(loaded.media.audio.frame_ms, 30);
+            assert_eq!(loaded.ui.terminal.accent, "#ff0066");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn legacy_yaml_config_is_migrated_to_json() {
+        // FR/SETTINGS: a pre-JSON `~/.joi/config` (YAML) is converted to `config.json` the first
+        // time `load` runs against the default location, leaving the legacy file as a backup.
+        figment::Jail::expect_with(|jail| {
+            let dir = jail.directory().to_path_buf();
+            let legacy = dir.join("config"); // YAML, extensionless (the old layout)
+            let target = dir.join("config.json");
+            std::fs::write(
+                &legacy,
+                "live_api:\n  gemini:\n    model: migrated-model\n    voice: Fenrir\n",
+            )
+            .unwrap();
+
+            let mut paths = test_paths();
+            paths.config_file = target.clone();
+            paths.legacy_config_file = legacy.clone();
+            assert!(!target.exists());
+
+            // The migration runs inside `load`'s logic; exercise it directly via the helper +
+            // load_from (load() resolves real ~/.joi paths, which we can't use under a Jail).
+            Config::migrate_legacy_to_json(&legacy, &target).unwrap();
+            assert!(target.exists(), "config.json written");
+            assert!(legacy.exists(), "legacy file kept as a backup");
+            // The migrated file is JSON and carries the legacy values.
+            let cfg = Config::load_from(&target, &paths).unwrap();
+            assert_eq!(cfg.live_api.gemini.model, "migrated-model");
+            assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Fenrir"));
+            Ok(())
+        });
+    }
+
+    #[test]
     fn file_overrides_defaults() {
         figment::Jail::expect_with(|jail| {
-            // YAML body starts at column 0 — indentation is significant.
             jail.create_file(
-                "joi.yaml",
-                r"
-live_api:
-  provider: mock
-  gemini:
-    model: test-model
-media:
-  audio:
-    frame_ms: 40
-",
+                "joi.json",
+                r#"
+{
+  "live_api": { "provider": "mock", "gemini": { "model": "test-model" } },
+  "media": { "audio": { "frame_ms": 40 } }
+}
+"#,
             )?;
-            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            let cfg = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.provider, ProviderName::Mock);
             assert_eq!(cfg.live_api.gemini.model, "test-model");
             assert_eq!(cfg.media.audio.frame_ms, 40);
@@ -783,31 +900,21 @@ media:
         // In the file…
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.yaml",
-                r"
-live_api:
-  gemini:
-    model: m
-    api_key: file-key
-",
+                "joi.json",
+                r#"{ "live_api": { "gemini": { "model": "m", "api_key": "file-key" } } }"#,
             )?;
-            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            let cfg = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.gemini.api_key.get(), Some("file-key"));
             Ok(())
         });
         // …and the nested JOI_ env form wins over the file.
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.yaml",
-                r"
-live_api:
-  gemini:
-    model: m
-    api_key: file-key
-",
+                "joi.json",
+                r#"{ "live_api": { "gemini": { "model": "m", "api_key": "file-key" } } }"#,
             )?;
             jail.set_env("JOI_LIVE_API__GEMINI__API_KEY", "env-key");
-            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            let cfg = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.gemini.api_key.get(), Some("env-key"));
             Ok(())
         });
@@ -842,17 +949,12 @@ live_api:
     fn env_overrides_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.yaml",
-                r"
-live_api:
-  provider: mock
-  gemini:
-    model: from-file
-",
+                "joi.json",
+                r#"{ "live_api": { "provider": "mock", "gemini": { "model": "from-file" } } }"#,
             )?;
             jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "from-env");
             jail.set_env("JOI_MEDIA__AUDIO__FRAME_MS", "30");
-            let cfg = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap();
+            let cfg = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap();
             assert_eq!(cfg.live_api.gemini.model, "from-env");
             assert_eq!(cfg.media.audio.frame_ms, 30);
             Ok(())
@@ -863,17 +965,10 @@ live_api:
     fn invalid_value_is_rejected() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
-                "joi.yaml",
-                r"
-live_api:
-  gemini:
-    model: m
-media:
-  audio:
-    frame_ms: 500
-",
+                "joi.json",
+                r#"{ "live_api": { "gemini": { "model": "m" } }, "media": { "audio": { "frame_ms": 500 } } }"#,
             )?;
-            let err = Config::load_from(Path::new("joi.yaml"), &test_paths()).unwrap_err();
+            let err = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap_err();
             assert!(matches!(err, ConfigError::Invalid { .. }));
             Ok(())
         });

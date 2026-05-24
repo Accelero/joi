@@ -28,12 +28,18 @@ pub mod manager;
 pub mod media;
 pub mod metrics;
 pub mod session;
+pub mod settings;
 pub mod tools;
+pub mod util;
 
 pub use clock::{Clock, SystemClock};
 pub use config::Config;
 pub use connectivity::{ConnectivityProbe, ProbeOutcome};
-pub use error::{CaptureError, ConfigError, HistoryError, SessionError};
+pub use error::{CaptureError, ConfigError, HistoryError, SessionError, SettingsError};
 pub use manager::{Command, SessionFactory, SessionManager, SessionManagerHandle};
 pub use session::event::{SessionEvent, Speaker, TurnEvent, UiEvent};
 pub use session::{Capabilities, RealtimeSession, SessionConfig};
+pub use settings::{
+    apply_setting, settings_schema, ApplyTiming, SettingDescriptor, SettingId, SettingKind,
+    SettingValue,
+};

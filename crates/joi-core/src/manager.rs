@@ -98,6 +98,13 @@ pub enum Command {
         /// Reply with the state.
         reply: oneshot::Sender<AppState>,
     },
+    /// Replace the actor's [`Config`] after a runtime settings change (boxed — it's large relative
+    /// to the other variants). `NextSession` fields take effect on the next [`Command::Start`];
+    /// the actor re-broadcasts the editable-settings snapshot so subscribers re-render.
+    UpdateConfig {
+        /// The new configuration.
+        config: Box<Config>,
+    },
     /// Stop and shut the actor down.
     Shutdown,
 }
@@ -187,6 +194,18 @@ impl SessionManagerHandle {
     pub async fn set_mic_muted(&self, muted: bool) -> Result<(), SessionError> {
         self.cmd_tx
             .send(Command::SetMicMuted { muted })
+            .await
+            .map_err(|_| Self::dead())
+    }
+
+    /// Replace the actor's config after a runtime settings change. The actor re-broadcasts the
+    /// editable-settings snapshot on the event stream once applied. `NextSession` fields take effect
+    /// on the next [`start`](Self::start).
+    pub async fn update_config(&self, config: Config) -> Result<(), SessionError> {
+        self.cmd_tx
+            .send(Command::UpdateConfig {
+                config: Box::new(config),
+            })
             .await
             .map_err(|_| Self::dead())
     }
@@ -414,6 +433,16 @@ impl SessionManager {
             }
             Command::QueryState { reply } => {
                 let _ = reply.send(self.state);
+            }
+            Command::UpdateConfig { config } => {
+                // Swap in the new config. `NextSession` fields (voice, model, transcription, budget,
+                // compression) are read fresh by `do_start`, so they apply on the next connect; the
+                // live session is untouched. Re-broadcast the editable snapshot so the frontend
+                // re-renders (and picks up `Immediate` UI fields).
+                self.config = *config;
+                self.emit(UiEvent::Settings {
+                    settings: crate::settings::settings_schema(&self.config),
+                });
             }
             Command::Shutdown => {
                 self.do_stop(session).await;
@@ -1307,6 +1336,32 @@ mod tests {
         let got = tokio::time::timeout(Duration::from_millis(200), audio.recv()).await;
         assert!(got.is_err(), "expected no audio when muted, got {got:?}");
         handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_config_rebroadcasts_settings_snapshot() {
+        use crate::settings::{SettingId, SettingValue};
+        let (handle, _history) = spawn_manager();
+        let mut ui = handle.subscribe();
+
+        // Change the voice and push the new config in.
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.model = "m".to_string();
+        cfg.live_api.gemini.voice = Some("Charon".to_string());
+        handle.update_config(cfg).await.unwrap();
+
+        // The actor re-broadcasts the editable snapshot reflecting the change.
+        let mut voice = None;
+        for _ in 0..20 {
+            if let UiEvent::Settings { settings } = next_ui(&mut ui).await {
+                voice = settings
+                    .into_iter()
+                    .find(|d| d.id == SettingId::Voice)
+                    .map(|d| d.value);
+                break;
+            }
+        }
+        assert_eq!(voice, Some(SettingValue::Text("Charon".to_string())));
     }
 
     #[tokio::test]

@@ -17,8 +17,9 @@ export GEMINI_API_KEY=...        # your Gemini Live API key
 cargo run -p joi-tui             # launch the terminal UI
 ```
 
-On first run Joi writes a documented config to `~/.joi/config` (see
-[`config/joi.example.yaml`](config/joi.example.yaml) for every field). Sessions are stored under
+On first run Joi writes a config to `~/.joi/config.json` (see
+[`config/joi.example.json`](config/joi.example.json) for every field, and
+[`doc/CONFIG.md`](doc/CONFIG.md) for the annotated reference). Sessions are stored under
 `~/.joi/sessions`, logs under `~/.joi/logs`.
 
 ### Keys

@@ -1745,6 +1745,7 @@ dependencies = [
  "joi-core",
  "joi-media",
  "joi-providers",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
