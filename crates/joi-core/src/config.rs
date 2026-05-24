@@ -12,6 +12,10 @@
 //! `GEMINI_API_KEY` (or `JOI_LIVE_API__GEMINI__API_KEY`) environment variable — env wins. It is held
 //! as a redacting [`ApiKey`] so it never leaks into logs (SEC-1).
 //!
+//! The system prompt / persona lives in `~/.joi/prompt.md` (bootstrapped from the configured persona
+//! on first run). When that file is present and non-blank it is the authoritative
+//! `live_api.gemini.system_instruction`, overriding the inline config value.
+//!
 //! `joi-core` is the single source of truth for paths (PLAN §6.3): the binary must pass these
 //! resolved paths in rather than re-deriving them, to avoid divergent locations.
 
@@ -183,6 +187,24 @@ fn default_context_window_compression() -> bool {
     true
 }
 
+/// The default persona, shipped into `~/.joi/prompt.md` on first run and used as the inline
+/// fallback. Tuned for a voice assistant: lead with the answer, no filler, and — deliberately — no
+/// conversational hooks ("would you like to know more?"), so the user keeps control of where the
+/// conversation goes. Edit `~/.joi/prompt.md` to change it.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are Joi, a local voice assistant. Help the user accurately and efficiently, then stop.
+
+- Lead with the answer. Address exactly what was asked — no preamble, filler, or restating the question.
+- Be brief: use only the words the request needs.
+- Do not steer the conversation. Never append follow-up suggestions or invitations like \"would \
+you like to know more?\" — what comes next is the user's choice.
+- Be warm and respectful, but never at the cost of brevity; kindness here is clarity and not \
+wasting the user's time.
+- If a request is genuinely ambiguous, ask one short clarifying question; otherwise make a \
+reasonable assumption and answer.
+- If you don't know, say so plainly.
+- You are speaking aloud: use plain, natural sentences — no markdown or formatting.";
+
 /// Gemini's Live API context window (input token limit), in tokens — the 128k tier shared by the
 /// native-audio and current `*-flash-live` models. The default re-seed budget is derived from this.
 pub const GEMINI_LIVE_CONTEXT_WINDOW: u32 = 131_072;
@@ -192,6 +214,14 @@ pub const GEMINI_LIVE_CONTEXT_WINDOW: u32 = 131_072;
 /// default), the server slides the oldest turns out if this is ever exceeded.
 fn default_token_budget() -> u32 {
     GEMINI_LIVE_CONTEXT_WINDOW * 9 / 10
+}
+
+/// Read a system-prompt file, returning its trimmed contents — or `None` when the file is absent,
+/// unreadable, or blank (so the caller falls back to the inline `system_instruction`).
+fn read_prompt_file(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let trimmed = contents.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Audio I/O settings (PLAN §7.1).
@@ -303,7 +333,7 @@ impl Default for Config {
                     model: String::new(),
                     api_key: ApiKey::default(),
                     voice: Some("Aoede".to_string()),
-                    system_instruction: "You are Joi, a concise local voice companion.".to_string(),
+                    system_instruction: DEFAULT_SYSTEM_PROMPT.to_string(),
                     input_transcription: true,
                     output_transcription: true,
                     context_window_compression: true,
@@ -356,6 +386,10 @@ pub struct ProjectPaths {
     pub sessions_dir: PathBuf,
     /// Log directory (`~/.joi/logs`).
     pub log_dir: PathBuf,
+    /// System-prompt / persona file (`~/.joi/prompt.md`). When present and non-blank it is the
+    /// authoritative `live_api.gemini.system_instruction` (the persona lives in a file you can edit
+    /// without touching the config).
+    pub prompt_file: PathBuf,
 }
 
 impl ProjectPaths {
@@ -372,6 +406,7 @@ impl ProjectPaths {
             config_file: root.join("config"),
             sessions_dir: root.join("sessions"),
             log_dir: root.join("logs"),
+            prompt_file: root.join("prompt.md"),
             data_dir: root,
         })
     }
@@ -393,6 +428,18 @@ impl Config {
         // Conventional provider env shortcuts win over the file (the nested `JOI_LIVE_API__GEMINI__*`
         // form is already handled by `load_from`'s figment env layer).
         cfg.apply_provider_env_overrides();
+        // Move the persona into an editable `~/.joi/prompt.md` on first run (seeded from whatever the
+        // config resolved to, so a custom persona is preserved). On later runs `load_from` reads it
+        // back as the authoritative system instruction.
+        if let Err(e) = Self::write_default_prompt_if_missing(
+            &paths.prompt_file,
+            &cfg.live_api.gemini.system_instruction,
+        ) {
+            tracing::warn!(
+                "could not write default prompt to {}: {e}",
+                paths.prompt_file.display()
+            );
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -467,8 +514,38 @@ impl Config {
             cfg.logging.file = Some(paths.log_dir.join("joi.log"));
         }
 
+        // A present, non-blank prompt file is the authoritative persona — it overrides the inline
+        // `system_instruction` from the config/env (the one documented exception to "env wins": a
+        // dedicated prompt file is a more explicit choice than an env var). Missing/blank/unreadable
+        // → keep whatever the config resolved to.
+        if let Some(prompt) = read_prompt_file(&paths.prompt_file) {
+            cfg.live_api.gemini.system_instruction = prompt;
+        }
+
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Write the current persona to `path` if no prompt file exists there yet (best-effort, creating
+    /// parent dirs). Seeded from the **resolved** `system_instruction` so an existing config persona
+    /// is moved into the file rather than overwritten by the built-in default. Never clobbers an
+    /// existing file.
+    pub fn write_default_prompt_if_missing(path: &Path, persona: &str) -> Result<(), ConfigError> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Path {
+                path: parent.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        }
+        std::fs::write(path, format!("{}\n", persona.trim())).map_err(|e| ConfigError::Path {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        tracing::info!("wrote default prompt to {}", path.display());
+        Ok(())
     }
 
     /// Reject out-of-range values and bad enums before they reach the rest of the system.
@@ -532,7 +609,57 @@ mod tests {
             data_dir: PathBuf::from("/data"),
             sessions_dir: PathBuf::from("/data/sessions"),
             log_dir: PathBuf::from("/state"),
+            prompt_file: PathBuf::from("/nonexistent/prompt.md"),
         }
+    }
+
+    #[test]
+    fn prompt_file_overrides_system_instruction_when_present() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "m");
+            let dir = jail.directory().to_path_buf();
+            let prompt = dir.join("prompt.md");
+            std::fs::write(&prompt, "  You are a pirate.\n").unwrap();
+            let mut paths = test_paths();
+            paths.prompt_file = prompt;
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            // The file (trimmed) wins over the built-in default persona.
+            assert_eq!(cfg.live_api.gemini.system_instruction, "You are a pirate.");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn blank_or_missing_prompt_file_keeps_inline_persona() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "m");
+            let dir = jail.directory().to_path_buf();
+            let prompt = dir.join("prompt.md");
+            std::fs::write(&prompt, "   \n\t\n").unwrap(); // whitespace-only → ignored
+            let mut paths = test_paths();
+            paths.prompt_file = prompt;
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            assert_eq!(
+                cfg.live_api.gemini.system_instruction,
+                Config::default().live_api.gemini.system_instruction
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn default_system_prompt_joins_continuations_cleanly() {
+        // The const uses `\` line-continuations; make sure they join without stray double spaces or
+        // broken words, and that the key constraints survived.
+        let p = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            !p.contains("  "),
+            "no doubled spaces from continuations: {p:?}"
+        );
+        assert!(p.contains("invitations like \"would you like to know more?\""));
+        assert!(p.contains("not wasting the user's time"));
+        assert!(p.contains("make a reasonable assumption and answer"));
+        assert!(!p.ends_with('\n'), "const carries no trailing newline");
     }
 
     #[test]

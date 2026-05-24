@@ -25,6 +25,8 @@ live_api:
     # Native-audio models expose more — see Google's Live API voice list. Unknown names fall back to
     # the model default. (Env: JOI_LIVE_API__GEMINI__VOICE.)
     voice: Aoede
+    # Persona / system prompt. Overridden by ~/.joi/prompt.md when that file exists (the persona is
+    # bootstrapped into prompt.md on first run, so edit the file rather than this line).
     system_instruction: You are Joi, a concise local voice companion.
     input_transcription: true       # FR-3: render the user transcript
     output_transcription: true      # FR-3: render the agent transcript
