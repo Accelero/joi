@@ -124,7 +124,13 @@ async fn run_command(app: &JoiApp, model: &mut app::AppModel, command: app::Comm
         Command::SetMicMuted(muted) => app.set_mic_muted(muted),
         Command::StartScreenshare => app.start_screenshare(),
         Command::StopScreenshare => app.stop_screenshare(),
-        Command::OpenPicker => model.open_picker(app.list_sessions().await),
+        Command::OpenPicker => {
+            // Fetch the list *and* which session is current, so the picker can highlight the active
+            // one and land the cursor on it.
+            let sessions = app.list_sessions().await;
+            let current_id = app.current_session().await.map(|s| s.id);
+            model.open_picker(sessions, current_id);
+        }
         Command::ResumeSession(id) => match app.resume_session(&id).await {
             Ok(_) => log_command_err("start", app.start(true).await),
             Err(e) => tracing::warn!("resume_session failed: {e}"),

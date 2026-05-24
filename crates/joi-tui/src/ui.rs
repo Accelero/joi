@@ -111,8 +111,9 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
     frame.render_widget(Paragraph::new(body).block(block), rect);
 }
 
-/// The `/resume` session picker overlay: a centered list of sessions, newest-activity first, with
-/// the highlighted row in the accent color. ↑/↓ move, Enter resumes, Esc cancels.
+/// The `/resume` session picker overlay: a centered list of sessions, newest-activity first. The
+/// cursor row is in the accent color; the currently-active session is highlighted in `theme::CURRENT`
+/// and tagged `● current` (the two can coincide). ↑/↓ move, Enter resumes, Esc cancels.
 fn render_picker(frame: &mut Frame, area: Rect, model: &AppModel) {
     let Some(picker) = model.picker.as_ref() else {
         return;
@@ -131,18 +132,30 @@ fn render_picker(frame: &mut Frame, area: Rect, model: &AppModel) {
             .enumerate()
             .map(|(i, s)| {
                 let selected = i == picker.selected();
+                // The session you're currently in — highlighted in its own color so it reads even
+                // when the cursor is elsewhere.
+                let current = picker.current_id() == Some(s.id.as_str());
                 let marker = if selected { "❯ " } else { "  " };
                 let name = s.meta.name.as_deref().unwrap_or("(unnamed session)");
                 let when = format_when(s.meta.last_updated);
+                // Cursor selection (accent) wins for the name color; an unselected current row still
+                // stands out in the "current" color. The trailing tag marks the active session
+                // unambiguously even when it is the selected row.
                 let style = if selected {
                     Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+                } else if current {
+                    Style::new().fg(theme::CURRENT)
                 } else {
                     Style::new().fg(theme::FG_DIM)
                 };
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{marker}{name}"), style),
                     Span::styled(format!("  {when}"), Style::new().fg(theme::FG_FAINT)),
-                ])
+                ];
+                if current {
+                    spans.push(Span::styled("  ● current", Style::new().fg(theme::CURRENT)));
+                }
+                Line::from(spans)
             })
             .collect()
     };
@@ -618,15 +631,18 @@ mod tests {
     fn picker_overlay_lists_sessions() {
         use joi_core::history::{SessionMeta, SessionSummary};
         let mut model = AppModel::new(true);
-        model.open_picker(vec![SessionSummary {
-            id: "abc".into(),
-            meta: SessionMeta {
-                name: Some("morning chat".into()),
-                created_at: 0,
-                last_opened: 0,
-                last_updated: 0,
-            },
-        }]);
+        model.open_picker(
+            vec![SessionSummary {
+                id: "abc".into(),
+                meta: SessionMeta {
+                    name: Some("morning chat".into()),
+                    created_at: 0,
+                    last_opened: 0,
+                    last_updated: 0,
+                },
+            }],
+            None,
+        );
         let text = render_to_string(model);
         assert!(
             text.contains("resume session"),
@@ -635,6 +651,37 @@ mod tests {
         assert!(
             text.contains("morning chat"),
             "session name missing: {text}"
+        );
+    }
+
+    #[test]
+    fn picker_marks_the_current_session() {
+        use joi_core::history::{SessionMeta, SessionSummary};
+        let meta = |name: &str| SessionMeta {
+            name: Some(name.into()),
+            created_at: 0,
+            last_opened: 0,
+            last_updated: 0,
+        };
+        let mut model = AppModel::new(true);
+        model.open_picker(
+            vec![
+                SessionSummary {
+                    id: "new".into(),
+                    meta: meta("newest"),
+                },
+                SessionSummary {
+                    id: "active".into(),
+                    meta: meta("the active one"),
+                },
+            ],
+            Some("active".to_string()),
+        );
+        let text = render_to_string(model);
+        // The active session carries the "current" tag; the other row does not.
+        assert!(
+            text.contains("current"),
+            "active session not marked: {text}"
         );
     }
 
