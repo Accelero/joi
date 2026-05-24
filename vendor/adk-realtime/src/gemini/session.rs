@@ -619,10 +619,26 @@ impl GeminiRealtimeSession {
                 }
             }
 
+            // PATCH(joi): input transcription — the *user's* spoken words as text. Gemini sends it
+            // incrementally in `serverContent.inputTranscription.text` (only when requested in
+            // setup). Surface as InputTranscriptDelta so the client can attribute it to the user,
+            // distinct from the model's outputTranscription below.
+            if let Some(text) = content
+                .get("inputTranscription")
+                .and_then(|t| t.get("text"))
+                .and_then(|t| t.as_str())
+            {
+                if !text.is_empty() {
+                    events.push(ServerEvent::InputTranscriptDelta {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        delta: text.to_string(),
+                    });
+                }
+            }
+
             // PATCH(joi): output transcription — the model's spoken response as text. Gemini sends
             // it incrementally in `serverContent.outputTranscription.text` (only when requested in
-            // setup). Surface as TranscriptDelta (the agent's output transcript). (Input
-            // transcription, `inputTranscription`, is requested but not yet surfaced — follow-up.)
+            // setup). Surface as TranscriptDelta (the agent's output transcript).
             if let Some(text) = content
                 .get("outputTranscription")
                 .and_then(|t| t.get("text"))

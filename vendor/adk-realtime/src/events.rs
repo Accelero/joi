@@ -411,6 +411,18 @@ pub enum ServerEvent {
         transcript: String,
     },
 
+    /// PATCH(joi): Transcript delta of the *user's* input audio. Distinct from [`TranscriptDelta`],
+    /// which carries the model's *output* transcript — this lets a client attribute the words to the
+    /// user. Gemini emits it in `serverContent.inputTranscription` when input transcription is
+    /// requested in setup.
+    #[serde(rename = "conversation.item.input_audio_transcription.delta")]
+    InputTranscriptDelta {
+        /// Unique event ID.
+        event_id: String,
+        /// Transcript delta.
+        delta: String,
+    },
+
     /// Function call arguments delta.
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallDelta {

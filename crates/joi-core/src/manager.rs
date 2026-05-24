@@ -223,9 +223,12 @@ pub struct SessionManager {
     state: AppState,
     mic_muted: bool,
     last_resumption_handle: Option<String>,
-    /// Accumulates the current transcript line's incremental deltas so the full line can be
+    /// Accumulates the in-flight agent transcript line's incremental deltas so the full line can be
     /// appended to history when it finalizes (the provider streams deltas; SPEC §11.3).
-    transcript_line: String,
+    agent_line: String,
+    /// Accumulates the in-flight user (input-transcription) line the same way. Kept separate from
+    /// `agent_line` so an interleaved user/agent delta order can't splice the two together.
+    user_line: String,
     /// Rolling payload byte/token tallies, drained into a `UiEvent::Metrics` each `SAMPLE_INTERVAL`.
     /// Supplies the token rate always, and the up/down rates when the provider can't report wire bytes.
     meter: ThroughputMeter,
@@ -287,7 +290,8 @@ impl SessionManager {
             state: AppState::Stopped,
             mic_muted: false,
             last_resumption_handle: None,
-            transcript_line: String::new(),
+            agent_line: String::new(),
+            user_line: String::new(),
             meter: ThroughputMeter::default(),
             last_sample_ms,
             last_transport: None,
@@ -465,6 +469,10 @@ impl SessionManager {
         });
 
         *session = Some(new_session);
+        // Drop any half-finished transcript line from a prior connection so it can't bleed into the
+        // new session's first turn.
+        self.user_line.clear();
+        self.agent_line.clear();
         // Start the throughput window fresh so the first sample measures from connect, not from a
         // possibly-long idle gap since the last session.
         self.meter.reset();
@@ -524,17 +532,26 @@ impl SessionManager {
                 if speaker == Speaker::Agent {
                     self.meter.add_output_text(&text);
                 }
-                // `text` is an incremental delta: accumulate the line for history, forward the
-                // delta to the UI (which appends it). On finalize, persist the whole line.
-                self.transcript_line.push_str(&text);
+                // `text` is an incremental delta: accumulate the line (per speaker) for history,
+                // forward the delta to the UI (which appends it). On finalize, persist the whole
+                // line — skipping empties so a bare commit doesn't write a blank turn.
+                match speaker {
+                    Speaker::User => self.user_line.push_str(&text),
+                    Speaker::Agent => self.agent_line.push_str(&text),
+                }
                 self.emit(UiEvent::Transcript {
                     speaker,
                     text,
                     final_,
                 });
                 if final_ {
-                    let line = std::mem::take(&mut self.transcript_line);
-                    self.append_turn(speaker, line).await;
+                    let line = match speaker {
+                        Speaker::User => std::mem::take(&mut self.user_line),
+                        Speaker::Agent => std::mem::take(&mut self.agent_line),
+                    };
+                    if !line.is_empty() {
+                        self.append_turn(speaker, line).await;
+                    }
                 }
             }
             SessionEvent::TurnEvent(turn) => {
@@ -694,6 +711,9 @@ mod tests {
         transport: Option<Arc<WireCounters>>,
         /// When set, the session reports these as `token_usage` `(up, down)` cumulative totals.
         tokens: Option<Arc<WireCounters>>,
+        /// When set, `send_audio` emits a streamed user (input-transcription) line instead of audio,
+        /// to exercise the manager's per-speaker transcript accumulation.
+        user_stream: bool,
     }
 
     impl ScriptedSession {
@@ -709,6 +729,7 @@ mod tests {
                 audio_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 transport: None,
                 tokens: None,
+                user_stream: false,
             }
         }
 
@@ -732,6 +753,13 @@ mod tests {
                 ..Self::new()
             }
         }
+
+        fn with_user_transcript() -> Self {
+            Self {
+                user_stream: true,
+                ..Self::new()
+            }
+        }
     }
 
     #[async_trait]
@@ -745,6 +773,27 @@ mod tests {
 
         async fn send_audio(&mut self, _pcm: &[i16]) -> Result<(), SessionError> {
             let tx = self.tx.as_ref().ok_or(SessionError::NotConnected)?;
+            if self.user_stream {
+                // The provider's input transcription arrives as deltas, then an empty-text final
+                // (the words are accumulated by the manager, mirroring the real Gemini mapper).
+                for delta in ["par", "tial"] {
+                    tx.send(SessionEvent::Transcript {
+                        speaker: Speaker::User,
+                        text: delta.to_string(),
+                        final_: false,
+                    })
+                    .await
+                    .ok();
+                }
+                tx.send(SessionEvent::Transcript {
+                    speaker: Speaker::User,
+                    text: String::new(),
+                    final_: true,
+                })
+                .await
+                .ok();
+                return Ok(());
+            }
             let _ = tx
                 .send(SessionEvent::AudioOutput { pcm: vec![1, 2, 3] })
                 .await;
@@ -974,6 +1023,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn streamed_user_transcript_is_stored_as_one_user_turn() {
+        // The provider streams the user's input transcription as deltas + an empty-text final; the
+        // manager must accumulate them into a single Speaker::User turn (and not store a blank one).
+        let history = Arc::new(InMemoryHistory::new());
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(TestClock::new(1_000)),
+            history.clone(),
+            Arc::new(|| {
+                Box::new(ScriptedSession::with_user_transcript()) as Box<dyn RealtimeSession>
+            }),
+            None,
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.send_audio(vec![0; 320]).await.unwrap();
+
+        // Wait until the user turn has been appended (signalled by its History meta).
+        let mut appended = false;
+        for _ in 0..50 {
+            if let UiEvent::History(meta) = next_ui(&mut ui).await {
+                if meta.turns >= 1 {
+                    appended = true;
+                    break;
+                }
+            }
+        }
+        assert!(appended, "user turn was not appended to history");
+
+        let stored = history
+            .load_within_budget(TokenBudget(10_000))
+            .await
+            .unwrap();
+        // Exactly one turn — the deltas concatenated, the empty final adding nothing.
+        assert_eq!(stored.len(), 1, "expected one stored turn, got {stored:?}");
+        assert_eq!(stored[0].role, Role::User);
+        assert_eq!(stored[0].text, "partial");
+        handle.stop(false).await.unwrap();
     }
 
     #[tokio::test]

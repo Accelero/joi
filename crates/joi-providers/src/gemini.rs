@@ -219,17 +219,33 @@ async fn pump_events(session: Arc<dyn AdkSession>, tx: EventSender) {
 struct EventMapper {
     /// Whether an agent transcript line is open (deltas streamed, not yet committed this turn).
     agent_open: bool,
+    /// Whether a user (input) transcript line is open. Committed when the model begins replying or
+    /// the turn ends, so the user's spoken words land in history as one [`Speaker::User`] turn.
+    user_open: bool,
 }
 
 impl EventMapper {
     fn map(&mut self, event: ServerEvent) -> Vec<SessionEvent> {
         match event {
-            ServerEvent::AudioDelta { delta, .. } => vec![SessionEvent::AudioOutput {
-                pcm: media::le_bytes_to_pcm16(&delta),
-            }],
+            // Model audio means the user's turn is over: commit their transcript before playback.
+            ServerEvent::AudioDelta { delta, .. } => {
+                let mut out = self.close_user_line();
+                out.push(SessionEvent::AudioOutput {
+                    pcm: media::le_bytes_to_pcm16(&delta),
+                });
+                out
+            }
+            // The user's own spoken words (Gemini inputTranscription) — stream as an open user line.
+            ServerEvent::InputTranscriptDelta { delta, .. } => {
+                self.user_open = true;
+                vec![user_delta(delta, false)]
+            }
             ServerEvent::TranscriptDelta { delta, .. } | ServerEvent::TextDelta { delta, .. } => {
+                // The model is now replying → the user's input line is complete; commit it first.
+                let mut out = self.close_user_line();
                 self.agent_open = true;
-                vec![agent_delta(delta, false)]
+                out.push(agent_delta(delta, false));
+                out
             }
             // A provider that sends an explicit done (OpenAI-style) carries the full text. If we
             // already streamed deltas, they cover it → just commit; otherwise emit it as the line.
@@ -245,18 +261,18 @@ impl EventMapper {
             // playback (barge-in, FR-2).
             ServerEvent::SpeechStarted { .. } => {
                 tracing::debug!("gemini barge-in: model response interrupted by user speech");
-                let mut out = self.close_line();
+                let mut out = self.close_lines();
                 out.push(SessionEvent::TurnEvent(TurnEvent::Interrupted));
                 out
             }
             ServerEvent::ResponseCreated { .. } => {
-                let mut out = self.close_line();
+                let mut out = self.close_lines();
                 out.push(SessionEvent::TurnEvent(TurnEvent::TurnStarted));
                 out
             }
             // Gemini signals turn end with no transcript-done; commit the open line here.
             ServerEvent::ResponseDone { .. } => {
-                let mut out = self.close_line();
+                let mut out = self.close_lines();
                 out.push(SessionEvent::TurnEvent(TurnEvent::TurnComplete));
                 out
             }
@@ -281,12 +297,37 @@ impl EventMapper {
         self.agent_open = false;
         vec![agent_delta(String::new(), true)]
     }
+
+    /// Commit the open user (input-transcript) line if one is open; no-op otherwise.
+    fn close_user_line(&mut self) -> Vec<SessionEvent> {
+        if !self.user_open {
+            return vec![];
+        }
+        self.user_open = false;
+        vec![user_delta(String::new(), true)]
+    }
+
+    /// Commit both lines, user first (it precedes the model's reply in a turn).
+    fn close_lines(&mut self) -> Vec<SessionEvent> {
+        let mut out = self.close_user_line();
+        out.append(&mut self.close_line());
+        out
+    }
 }
 
 /// One incremental agent transcript event (the manager accumulates the line; the UI appends).
 fn agent_delta(text: String, final_: bool) -> SessionEvent {
     SessionEvent::Transcript {
         speaker: Speaker::Agent,
+        text,
+        final_,
+    }
+}
+
+/// One incremental user transcript event (the user's own audio, transcribed by the provider).
+fn user_delta(text: String, final_: bool) -> SessionEvent {
+    SessionEvent::Transcript {
+        speaker: Speaker::User,
         text,
         final_,
     }
@@ -517,6 +558,82 @@ mod tests {
                 text, final_: true, ..
             }, SessionEvent::TurnEvent(TurnEvent::Interrupted)] => assert!(text.is_empty()),
             other => panic!("expected empty final + Interrupted, got {other:?}"),
+        }
+    }
+
+    fn input_transcript_delta(delta: &str) -> ServerEvent {
+        ServerEvent::InputTranscriptDelta {
+            event_id: "e".into(),
+            delta: delta.into(),
+        }
+    }
+
+    #[test]
+    fn input_transcript_is_a_user_line_committed_when_the_model_replies() {
+        let mut m = EventMapper::default();
+        // The user's spoken words stream in as an open user line.
+        assert!(matches!(
+            m.map(input_transcript_delta("hel")).as_slice(),
+            [SessionEvent::Transcript { speaker: Speaker::User, text, final_: false }] if text == "hel"
+        ));
+        assert!(matches!(
+            m.map(input_transcript_delta("lo")).as_slice(),
+            [SessionEvent::Transcript { speaker: Speaker::User, text, final_: false }] if text == "lo"
+        ));
+        // When the model starts replying, the user line is committed (empty-text final) *before*
+        // the first agent delta — so the manager files the words under the user, not the agent.
+        match m.map(transcript_delta("hi there")).as_slice() {
+            [SessionEvent::Transcript {
+                speaker: Speaker::User,
+                text: u,
+                final_: true,
+            }, SessionEvent::Transcript {
+                speaker: Speaker::Agent,
+                text: a,
+                final_: false,
+            }] => {
+                assert!(u.is_empty());
+                assert_eq!(a, "hi there");
+            }
+            other => panic!("expected user-final then agent-delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_transcript_commits_on_turn_end_without_a_reply() {
+        let mut m = EventMapper::default();
+        let _ = m.map(input_transcript_delta("just me"));
+        // A turn that ends with no model output still commits the open user line.
+        match m.map(response_done()).as_slice() {
+            [SessionEvent::Transcript {
+                speaker: Speaker::User,
+                text,
+                final_: true,
+            }, SessionEvent::TurnEvent(TurnEvent::TurnComplete)] => assert!(text.is_empty()),
+            other => panic!("expected user-final then TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_audio_commits_the_open_user_line() {
+        let mut m = EventMapper::default();
+        let _ = m.map(input_transcript_delta("a question"));
+        let audio = ServerEvent::AudioDelta {
+            event_id: "e".into(),
+            response_id: "r".into(),
+            item_id: "i".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: media::pcm16_to_le_bytes(&[1, 2, 3]),
+        };
+        // Model audio implies the user finished: their line commits before playback.
+        match m.map(audio).as_slice() {
+            [SessionEvent::Transcript {
+                speaker: Speaker::User,
+                final_: true,
+                ..
+            }, SessionEvent::AudioOutput { .. }] => {}
+            other => panic!("expected user-final then audio, got {other:?}"),
         }
     }
 
