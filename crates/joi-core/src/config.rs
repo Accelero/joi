@@ -123,6 +123,17 @@ pub struct LiveApiCfg {
     pub provider: ProviderName,
     /// Gemini Live settings (used when `provider` is `gemini`).
     pub gemini: GeminiCfg,
+    /// Cadence, in seconds, of the background reachability probe (token-free; never consumes
+    /// tokens). `0` disables periodic polling — a probe still runs at startup and on demand.
+    /// Defaulted so configs written before this field still parse.
+    #[serde(default = "default_reachability_probe_secs")]
+    pub reachability_probe_secs: u64,
+}
+
+/// Default reachability-probe cadence: 20 s — responsive enough for a live status dot without
+/// chattering at the API.
+fn default_reachability_probe_secs() -> u64 {
+    20
 }
 
 /// Gemini Live provider settings. The API key may be set here or via the `GEMINI_API_KEY` /
@@ -266,6 +277,7 @@ impl Default for Config {
                     input_transcription: true,
                     output_transcription: true,
                 },
+                reachability_probe_secs: default_reachability_probe_secs(),
             },
             history: HistoryCfg {
                 dir: None,

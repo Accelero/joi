@@ -2612,6 +2612,7 @@ dependencies = [
  "adk-realtime",
  "async-trait",
  "joi-core",
+ "reqwest 0.12.28",
  "rustls",
  "secrecy",
  "serde_json",

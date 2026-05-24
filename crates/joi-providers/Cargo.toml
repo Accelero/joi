@@ -16,7 +16,7 @@ default = ["mock", "gemini", "openai"]
 mock = []
 # `gemini` pulls the adk-realtime adapter (M2 spike: NOTES-adk.md). Only its `gemini` backend
 # feature is enabled — not openai/livekit/vertex — to keep the dependency tree minimal.
-gemini = ["dep:adk-realtime", "dep:rustls"]
+gemini = ["dep:adk-realtime", "dep:rustls", "dep:reqwest"]
 openai = []
 
 [dependencies]
@@ -31,6 +31,8 @@ adk-realtime = { version = "0.8", default-features = false, features = ["gemini"
 # Direct dep only to install the rustls crypto provider once (adk-realtime requires it). Already in
 # the tree transitively, so this adds no build cost.
 rustls = { version = "0.23", optional = true }
+# Token-free reachability probe (Gemini models.list). Gemini-only, so gated to that feature.
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

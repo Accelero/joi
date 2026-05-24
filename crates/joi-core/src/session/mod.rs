@@ -17,8 +17,8 @@ use crate::metrics::TransportBytes;
 use crate::tools::{ToolCallId, ToolResult, ToolSchema};
 
 pub use event::{
-    AppState, CloseReason, ConnectionStatus, EventReceiver, EventSender, SessionEvent, Speaker,
-    TurnEvent, UiEvent,
+    AppState, CloseReason, ConnectionStatus, EventReceiver, EventSender, Reachability,
+    SessionEvent, Speaker, TurnEvent, UiEvent,
 };
 
 /// Everything needed to open a session (SPEC §4).

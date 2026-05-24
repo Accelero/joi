@@ -5,7 +5,10 @@
 //! This lives here, not in `joi-core` (which must stay provider-agnostic) and not duplicated in the
 //! Tauri binary (which stays a thin shell). It is pure and fully unit-testable without a webview.
 
+use std::sync::Arc;
+
 use joi_core::config::{Config, ProviderName};
+use joi_core::connectivity::ConnectivityProbe;
 use joi_core::manager::SessionFactory;
 use joi_core::session::RealtimeSession;
 use secrecy::SecretString;
@@ -71,6 +74,30 @@ pub fn build_session_factory(config: &Config) -> Result<Box<dyn SessionFactory>,
                 Err(FactoryError::ProviderDisabled("mock"))
             }
         }
+    }
+}
+
+/// Build the token-free reachability probe for `config.live_api.provider`, or `None` when the
+/// provider has no probe or isn't usable (e.g. Gemini without a key). Like [`build_session_factory`]
+/// this is the composition root's job, so the engine never names a provider. The returned probe is
+/// driven by the [`SessionManager`](joi_core::manager::SessionManager)'s reachability monitor.
+#[must_use]
+pub fn build_connectivity_probe(config: &Config) -> Option<Arc<dyn ConnectivityProbe>> {
+    match config.live_api.provider {
+        ProviderName::Gemini => {
+            #[cfg(feature = "gemini")]
+            {
+                let key = config.live_api.gemini.api_key.get()?;
+                let key = SecretString::from(key.to_owned());
+                Some(Arc::new(crate::gemini::GeminiProbe::new(key)))
+            }
+            #[cfg(not(feature = "gemini"))]
+            {
+                None
+            }
+        }
+        // No reachability probe for the OpenAI stub or the mock provider.
+        ProviderName::Openai | ProviderName::Mock => None,
     }
 }
 

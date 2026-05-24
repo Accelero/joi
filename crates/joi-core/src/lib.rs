@@ -21,6 +21,7 @@
 pub mod capture;
 pub mod clock;
 pub mod config;
+pub mod connectivity;
 pub mod error;
 pub mod history;
 pub mod manager;
@@ -31,6 +32,7 @@ pub mod tools;
 
 pub use clock::{Clock, SystemClock};
 pub use config::Config;
+pub use connectivity::{ConnectivityProbe, ProbeOutcome};
 pub use error::{CaptureError, ConfigError, HistoryError, SessionError};
 pub use manager::{Command, SessionManager, SessionManagerHandle};
 pub use session::event::{SessionEvent, Speaker, TurnEvent, UiEvent};

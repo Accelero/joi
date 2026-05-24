@@ -9,6 +9,7 @@
 //! held as a [`secrecy::SecretString`] — it never travels through [`SessionConfig`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
@@ -20,11 +21,12 @@ use adk_realtime::gemini::{GeminiLiveBackend, GeminiRealtimeModel};
 use adk_realtime::session::RealtimeSession as AdkSession;
 use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
 
+use joi_core::connectivity::{ConnectivityProbe, ProbeOutcome};
 use joi_core::error::SessionError;
 use joi_core::media::{self, VideoFrame};
 use joi_core::metrics::TransportBytes;
 use joi_core::session::event::{
-    CloseReason, EventReceiver, EventSender, SessionEvent, Speaker, TurnEvent,
+    CloseReason, EventReceiver, EventSender, Reachability, SessionEvent, Speaker, TurnEvent,
 };
 use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
 
@@ -303,6 +305,76 @@ fn map_connect_err(e: &RealtimeError) -> SessionError {
         SessionError::Auth(msg)
     } else {
         SessionError::Connect(msg)
+    }
+}
+
+/// Token-free reachability probe for the Gemini API. Hits the **`models.list`** metadata endpoint
+/// (`GET /v1beta/models`) — a management call that returns no generated content, so it **never
+/// consumes tokens**. The result distinguishes reachable+authorized, reachable-but-bad-key, and
+/// unreachable. The HTTP details live here, in the Gemini connector; the engine drives it through
+/// the provider-agnostic [`ConnectivityProbe`] trait.
+pub struct GeminiProbe {
+    client: reqwest::Client,
+    /// `{base}/v1beta/models` — the studio REST host (same host as the Live WS endpoint).
+    url: String,
+    api_key: SecretString,
+}
+
+impl GeminiProbe {
+    /// Studio REST base; matches `GeminiLiveBackend::studio` so the probe checks the same host the
+    /// session connects to.
+    const BASE: &'static str = "https://generativelanguage.googleapis.com";
+    /// Keep the probe snappy so the monitor's cadence stays predictable on a flaky network.
+    const TIMEOUT: Duration = Duration::from_secs(4);
+
+    /// Build a probe bound to `api_key`. The HTTP client is reused across probes.
+    #[must_use]
+    pub fn new(api_key: SecretString) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(Self::TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+            url: format!("{}/v1beta/models", Self::BASE),
+            api_key,
+        }
+    }
+}
+
+#[async_trait]
+impl ConnectivityProbe for GeminiProbe {
+    async fn probe(&self) -> ProbeOutcome {
+        let resp = self
+            .client
+            .get(&self.url)
+            .query(&[("key", self.api_key.expose_secret()), ("pageSize", "1")])
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => ProbeOutcome::new(Reachability::Online),
+            // Reached Google, but the key was rejected — actionable, distinct from offline.
+            Ok(r) if matches!(r.status().as_u16(), 401 | 403) => ProbeOutcome::with_detail(
+                Reachability::Unauthorized,
+                format!("HTTP {}", r.status()),
+            ),
+            // Reached an endpoint but it returned an error status (5xx / 429 / …): not usable now.
+            Ok(r) => {
+                ProbeOutcome::with_detail(Reachability::Offline, format!("HTTP {}", r.status()))
+            }
+            // DNS / TLS / connect / timeout: unreachable.
+            Err(e) => ProbeOutcome::with_detail(Reachability::Offline, probe_err_detail(&e)),
+        }
+    }
+}
+
+/// A short, log-safe reason for a failed probe request (never includes the URL with its key query).
+fn probe_err_detail(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "timeout".to_string()
+    } else if e.is_connect() {
+        "connection failed".to_string()
+    } else {
+        "request error".to_string()
     }
 }
 

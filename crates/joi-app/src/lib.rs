@@ -68,7 +68,10 @@ impl JoiApp {
                     noise_suppression: config.media.audio.noise_suppression,
                     auto_gain: config.media.audio.auto_gain,
                 };
-                let handle = SessionManager::spawn(config, clock, history, factory);
+                // Token-free reachability probe (provider-specific call, composed here so the
+                // engine stays provider-agnostic). `None` when the provider has no probe / no key.
+                let probe = joi_providers::build_connectivity_probe(&config);
+                let handle = SessionManager::spawn(config, clock, history, factory, probe);
                 let media = match media_mode {
                     MediaMode::LocalDevices => Some(MediaEngine::new(handle.clone(), media_config)),
                     MediaMode::None => None,
@@ -141,6 +144,16 @@ impl JoiApp {
             tokio::spawn(async move {
                 let _ = h.set_mic_muted(muted).await;
             });
+        }
+    }
+
+    /// Trigger an immediate provider-reachability probe (token-free). The result arrives on the
+    /// [`subscribe_events`](Self::subscribe_events) stream as `UiEvent::Reachability`; this is a
+    /// non-blocking nudge to the background monitor. No-op when no probe is wired (no key / no
+    /// session manager). Reachability is also probed automatically at startup and on a poll.
+    pub fn check_reachability(&self) {
+        if let Some(h) = &self.handle {
+            h.check_reachability();
         }
     }
 

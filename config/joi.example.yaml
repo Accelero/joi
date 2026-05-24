@@ -22,6 +22,10 @@ live_api:
     system_instruction: You are Joi, a concise local voice companion.
     input_transcription: true       # FR-3: render the user transcript
     output_transcription: true      # FR-3: render the agent transcript
+  # Background API-reachability probe cadence, in seconds (emits a UiEvent::reachability). It hits a
+  # token-free metadata endpoint, so it NEVER consumes tokens. 0 disables periodic polling (a probe
+  # still runs at startup and on demand).
+  reachability_probe_secs: 20
 
 history:
   dir: null                         # null → XDG data dir (~/.local/share/joi/history)

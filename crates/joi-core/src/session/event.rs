@@ -133,6 +133,25 @@ pub enum ConnectionStatus {
     Reconnecting,
 }
 
+/// Whether the provider's API is reachable, from the token-free background probe (see
+/// [`crate::connectivity`]). Distinct from [`ConnectionStatus`], which tracks a *live session's*
+/// socket; reachability is meaningful even with no session running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum Reachability {
+    /// Not probed yet (initial state).
+    Unknown,
+    /// A probe is in flight.
+    Checking,
+    /// The API answered the probe — reachable and the key was accepted.
+    Online,
+    /// Reached the API, but the key was rejected (HTTP 401/403).
+    Unauthorized,
+    /// Unreachable: DNS / TLS / timeout / connection failure, or the API returned an error status.
+    Offline,
+}
+
 /// UI-facing event emitted to the webview (SPEC §11.3). Audio is **not** here — it streams over the
 /// binary `tauri::ipc::Channel` (SPEC §11.2).
 ///
@@ -162,6 +181,14 @@ pub enum UiEvent {
         /// The status.
         status: ConnectionStatus,
         /// Optional human-readable detail.
+        detail: Option<String>,
+    },
+    /// Provider-API reachability update, from the token-free background probe. Emitted at startup,
+    /// on each periodic poll, and on demand — independent of whether a session is running.
+    Reachability {
+        /// The current reachability state.
+        state: Reachability,
+        /// Optional human-readable detail (e.g. an HTTP status or transport error).
         detail: Option<String>,
     },
     /// History changed (append/prune) — drives the history meta in the UI.

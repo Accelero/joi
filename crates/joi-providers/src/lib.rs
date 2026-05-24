@@ -16,6 +16,6 @@ pub mod mock;
 #[cfg(feature = "openai")]
 pub mod openai;
 
-pub use factory::{build_session_factory, FactoryError};
+pub use factory::{build_connectivity_probe, build_session_factory, FactoryError};
 #[cfg(feature = "mock")]
 pub use mock::MockSession;

@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use joi_core::metrics::MetricsSnapshot;
-use joi_core::session::event::{AppState, ConnectionStatus, Speaker, UiEvent};
+use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker, UiEvent};
 
 use crate::input::Input;
 use crate::transcript::Transcript;
@@ -75,6 +75,8 @@ pub struct AppModel {
     pub state: AppState,
     /// Connection detail.
     pub connection: ConnectionStatus,
+    /// Provider-API reachability, from the token-free background probe (independent of a session).
+    pub reachability: Reachability,
     /// Whether an API key was configured at load (drives the no-key banner).
     pub has_key: bool,
     /// The streaming conversation transcript.
@@ -107,6 +109,7 @@ impl AppModel {
         Self {
             state: AppState::Stopped,
             connection: ConnectionStatus::Disconnected,
+            reachability: Reachability::Unknown,
             has_key,
             transcript: Transcript::default(),
             transcript_scroll: 0,
@@ -227,6 +230,7 @@ impl AppModel {
                 }
             }
             UiEvent::Connection { status, .. } => self.connection = status,
+            UiEvent::Reachability { state, .. } => self.reachability = state,
             UiEvent::Transcript {
                 speaker,
                 text,

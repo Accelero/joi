@@ -3,6 +3,7 @@ import type { AppState } from "./AppState";
 import type { ConnectionStatus } from "./ConnectionStatus";
 import type { HistoryMeta } from "./HistoryMeta";
 import type { MetricsSnapshot } from "./MetricsSnapshot";
+import type { Reachability } from "./Reachability";
 import type { Speaker } from "./Speaker";
 
 /**
@@ -35,6 +36,14 @@ final: boolean, } | { "type": "connection",
 status: ConnectionStatus, 
 /**
  * Optional human-readable detail.
+ */
+detail: string | null, } | { "type": "reachability", 
+/**
+ * The current reachability state.
+ */
+state: Reachability, 
+/**
+ * Optional human-readable detail (e.g. an HTTP status or transport error).
  */
 detail: string | null, } | { "type": "history" } & HistoryMeta | { "type": "metrics" } & MetricsSnapshot | { "type": "error", 
 /**

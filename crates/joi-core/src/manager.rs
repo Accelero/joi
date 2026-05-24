@@ -14,10 +14,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Notify};
 
 use crate::clock::{Clock, UnixMillis};
 use crate::config::Config;
+use crate::connectivity::ConnectivityProbe;
 use crate::error::SessionError;
 use crate::history::{HistoryStore, HistoryTurn, Role, TokenBudget};
 use crate::media::VideoFrame;
@@ -108,6 +109,9 @@ pub struct SessionManagerHandle {
     cmd_tx: mpsc::Sender<Command>,
     ui_tx: broadcast::Sender<UiEvent>,
     audio_tx: broadcast::Sender<Vec<i16>>,
+    /// Pokes the reachability monitor to probe now (host `check_reachability`). `None` when no
+    /// probe is wired (no API key / a provider without a probe). See [`crate::connectivity`].
+    probe_trigger: Option<Arc<Notify>>,
 }
 
 impl SessionManagerHandle {
@@ -196,6 +200,15 @@ impl SessionManagerHandle {
             .map_err(|_| Self::dead())?;
         rx.await.map_err(|_| Self::dead())
     }
+
+    /// Trigger an immediate reachability probe (the result arrives as a `UiEvent::Reachability` on
+    /// the event stream). No-op when no probe is wired. Non-blocking and infallible by design — it
+    /// just nudges the background monitor.
+    pub fn check_reachability(&self) {
+        if let Some(trigger) = &self.probe_trigger {
+            trigger.notify_one();
+        }
+    }
 }
 
 /// The actor. Owns the session, history, and config; serves commands from a single task.
@@ -221,20 +234,42 @@ pub struct SessionManager {
     /// Provider wire-byte totals at the previous sample, differenced to get the per-window rate.
     /// `None` until the first sample of a connection (and after stop) so we don't report a spike.
     last_transport: Option<TransportBytes>,
+    /// Pokes the reachability monitor to re-probe (e.g. right after a connect failure, so the dot
+    /// updates without waiting for the next poll). `None` when no probe is wired.
+    probe_trigger: Option<Arc<Notify>>,
 }
 
 impl SessionManager {
     /// Build the actor, spawn its task, and return a handle.
+    ///
+    /// `probe` is the provider's token-free reachability check (injected, like `factory`, so the
+    /// engine never names a provider). When `Some`, a background [reachability
+    /// monitor](crate::connectivity::spawn_monitor) is spawned that emits `UiEvent::Reachability`;
+    /// when `None` (no API key, or a provider without a probe) no monitor runs.
     pub fn spawn(
         config: Config,
         clock: Arc<dyn Clock>,
         history: Arc<dyn HistoryStore>,
         factory: Arc<dyn SessionFactory>,
+        probe: Option<Arc<dyn ConnectivityProbe>>,
     ) -> SessionManagerHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL);
         let (ui_tx, _) = broadcast::channel(UI_CHANNEL);
         let (audio_tx, _) = broadcast::channel(MEDIA_CHANNEL);
         let (ev_tx, ev_rx) = mpsc::channel(MEDIA_CHANNEL);
+
+        // Wire the reachability monitor only when a probe exists. The shared `Notify` lets both a
+        // host (`check_reachability`) and the actor (on connect failure) ask for an immediate probe.
+        let probe_trigger = probe.map(|probe| {
+            let trigger = Arc::new(Notify::new());
+            crate::connectivity::spawn_monitor(
+                ui_tx.clone(),
+                probe,
+                Duration::from_secs(config.live_api.reachability_probe_secs),
+                Arc::clone(&trigger),
+            );
+            trigger
+        });
 
         let last_sample_ms = clock.now_ms();
         let actor = SessionManager {
@@ -252,12 +287,14 @@ impl SessionManager {
             meter: ThroughputMeter::default(),
             last_sample_ms,
             last_transport: None,
+            probe_trigger: probe_trigger.clone(),
         };
         tokio::spawn(actor.run(cmd_rx, ev_rx));
         SessionManagerHandle {
             cmd_tx,
             ui_tx,
             audio_tx,
+            probe_trigger,
         }
     }
 
@@ -402,6 +439,11 @@ impl SessionManager {
             self.on_error("connect", &e);
             self.set_state(AppState::Error);
             self.emit_connection(ConnectionStatus::Disconnected, Some(e.to_string()));
+            // A connect failure is fresh evidence about reachability — re-probe now so the status
+            // updates immediately rather than at the next poll (distinguishes offline vs. bad key).
+            if let Some(trigger) = &self.probe_trigger {
+                trigger.notify_one();
+            }
             return Err(e);
         }
 
@@ -766,6 +808,7 @@ mod tests {
             Arc::new(clock.clone()),
             history.clone(),
             Arc::new(|| Box::new(ScriptedSession::new()) as Box<dyn RealtimeSession>),
+            None,
         );
         (handle, history, clock)
     }
@@ -802,6 +845,7 @@ mod tests {
                     &factory_closed,
                 ))) as Box<dyn RealtimeSession>
             }),
+            None,
         );
 
         handle.start(false).await.unwrap();
@@ -961,6 +1005,7 @@ mod tests {
                 Box::new(ScriptedSession::with_transport(Arc::clone(&factory_wire)))
                     as Box<dyn RealtimeSession>
             }),
+            None,
         );
         let mut ui = handle.subscribe();
         handle.start(false).await.unwrap();
@@ -1033,6 +1078,7 @@ mod tests {
                     &factory_ended,
                 ))) as Box<dyn RealtimeSession>
             }),
+            None,
         );
         handle.start(false).await.unwrap();
 
