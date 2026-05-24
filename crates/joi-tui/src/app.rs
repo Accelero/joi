@@ -5,6 +5,7 @@
 
 use std::time::Instant;
 
+use joi_core::history::{HistoryTurn, Role};
 use joi_core::metrics::MetricsSnapshot;
 use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker, UiEvent};
 
@@ -183,11 +184,28 @@ impl AppModel {
     }
 
     /// Reset the on-screen conversation when switching/resuming sessions: clear the transcript and
-    /// re-pin autoscroll. (Resumed history re-seeds the *model*, not the terminal view.)
+    /// re-pin autoscroll. A resume then refills the view via [`load_history`](Self::load_history);
+    /// a brand-new session just stays empty.
     pub fn reset_conversation_view(&mut self) {
         self.transcript = Transcript::default();
         self.follow = true;
         self.transcript_top = 0;
+    }
+
+    /// Repopulate the transcript from a session's persisted turns (oldest-first) so a resumed
+    /// session shows where the user left off. Resets the view first, then renders each turn as a
+    /// finalized line; `System` turns (e.g. the persona preamble) aren't shown. Called by the host
+    /// after the async `session_turns()` resolves — not a pure reducer.
+    pub fn load_history(&mut self, turns: Vec<HistoryTurn>) {
+        self.reset_conversation_view();
+        for turn in turns {
+            let speaker = match turn.role {
+                Role::User => Speaker::User,
+                Role::Assistant => Speaker::Agent,
+                Role::System => continue,
+            };
+            self.transcript.push_transcript(speaker, turn.text, true);
+        }
     }
 
     /// The slash-command suggestions for the current prompt, in display order (empty unless the
@@ -571,6 +589,36 @@ mod tests {
         assert_eq!(m.suggestion_cursor(), 1);
         m.on_action(Action::Insert('n')); // "/n" → re-derived list, cursor back to top
         assert_eq!(m.suggestion_cursor(), 0);
+    }
+
+    #[test]
+    fn load_history_repopulates_transcript_and_skips_system() {
+        use crate::transcript::LineKind;
+        let mut m = AppModel::new(true);
+        // A stale view from a prior session that resume must clear.
+        m.transcript
+            .push_transcript(Speaker::Agent, "stale".into(), true);
+        m.follow = false;
+
+        let turns = vec![
+            HistoryTurn::new(Role::System, "persona preamble", 0), // not shown
+            HistoryTurn::new(Role::User, "hello", 1),
+            HistoryTurn::new(Role::Assistant, "hi there", 2),
+        ];
+        m.load_history(turns);
+
+        let shown: Vec<(LineKind, &str)> = m
+            .transcript
+            .entries()
+            .iter()
+            .map(|e| (e.kind, e.text.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![(LineKind::User, "hello"), (LineKind::Agent, "hi there"),],
+            "system turn skipped; user+assistant rendered chronologically"
+        );
+        assert!(m.follow, "resume re-pins autoscroll to the newest line");
     }
 
     #[test]

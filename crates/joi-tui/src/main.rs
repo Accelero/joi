@@ -136,8 +136,14 @@ async fn run_command(app: &JoiApp, model: &mut app::AppModel, command: app::Comm
             // Retarget the store to the chosen session but do NOT auto-start: opening the API
             // stream (and its billing) stays a manual F2 action. The next start still seeds this
             // session's history, because the manager always re-seeds from the current store.
-            if let Err(e) = app.resume_session(&id).await {
-                tracing::warn!("resume_session failed: {e}");
+            match app.resume_session(&id).await {
+                // Repopulate the transcript from the persisted turns so the user sees where they
+                // left off (the model is re-seeded separately, on the next start).
+                Ok(_) => match app.session_turns(&id).await {
+                    Ok(turns) => model.load_history(turns),
+                    Err(e) => tracing::warn!("session_turns failed: {e}"),
+                },
+                Err(e) => tracing::warn!("resume_session failed: {e}"),
             }
         }
         Command::NewSession => {
