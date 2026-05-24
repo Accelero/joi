@@ -2,20 +2,22 @@
 //! readable table. The input line is always focused (like the web prompt), so session controls use
 //! function keys (added in M4); only the quit chords exist for now.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::app::Action;
 
-/// Decode a crossterm event into an [`Action`]. Non-key and key-release events are ignored.
+/// Decode a crossterm event into an [`Action`]. Key events drive everything; the mouse wheel scrolls
+/// the transcript. Other events (key releases, mouse moves/clicks, resize) are ignored.
 pub fn map(event: &Event) -> Action {
-    let Event::Key(key) = event else {
-        return Action::Ignore;
-    };
-    // Some terminals report key releases (kitty/enhanced mode); only act on presses.
-    if key.kind == KeyEventKind::Release {
-        return Action::Ignore;
+    match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => map_key(key),
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Action::ScrollLineUp,
+            MouseEventKind::ScrollDown => Action::ScrollLineDown,
+            _ => Action::Ignore,
+        },
+        _ => Action::Ignore,
     }
-    map_key(key)
 }
 
 fn map_key(key: &KeyEvent) -> Action {
@@ -36,11 +38,12 @@ fn map_key(key: &KeyEvent) -> Action {
         KeyCode::Delete => Action::Delete,
         KeyCode::Left => Action::Left,
         KeyCode::Right => Action::Right,
-        KeyCode::Home => Action::Home,
-        KeyCode::End => Action::End,
         KeyCode::Enter => Action::Submit,
         KeyCode::PageUp => Action::ScrollUp,
         KeyCode::PageDown => Action::ScrollDown,
+        // Home/End jump the transcript to oldest/newest (single-line prompt doesn't need caret jumps).
+        KeyCode::Home => Action::ScrollTop,
+        KeyCode::End => Action::ScrollBottom,
         _ => Action::Ignore,
     }
 }

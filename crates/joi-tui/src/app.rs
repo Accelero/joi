@@ -11,6 +11,9 @@ use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker
 use crate::input::Input;
 use crate::transcript::Transcript;
 
+/// Lines the transcript scrolls per mouse-wheel notch.
+const WHEEL_LINES: u16 = 3;
+
 /// A decoded user intent from a key event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -22,10 +25,18 @@ pub enum Action {
     ToggleMute,
     /// Start or stop screen-share (F4).
     ToggleShare,
-    /// Scroll the transcript toward older lines (PageUp).
+    /// Scroll the transcript a page toward older lines (PageUp).
     ScrollUp,
-    /// Scroll the transcript toward newer lines (PageDown).
+    /// Scroll the transcript a page toward newer lines (PageDown).
     ScrollDown,
+    /// Scroll the transcript a few lines toward older content (mouse wheel up).
+    ScrollLineUp,
+    /// Scroll the transcript a few lines toward newer content (mouse wheel down).
+    ScrollLineDown,
+    /// Jump to the oldest transcript line (Home).
+    ScrollTop,
+    /// Jump to the newest transcript line and resume autoscroll (End).
+    ScrollBottom,
     /// Type a character into the prompt.
     Insert(char),
     /// Delete the char before the caret.
@@ -35,9 +46,6 @@ pub enum Action {
     /// Move the caret one char left / right.
     Left,
     Right,
-    /// Jump to start / end of the current line.
-    Home,
-    End,
     /// Submit the prompt (Enter).
     Submit,
     /// Toggle the keybinding help overlay (F1).
@@ -81,8 +89,12 @@ pub struct AppModel {
     pub has_key: bool,
     /// The streaming conversation transcript.
     pub transcript: Transcript,
-    /// Lines scrolled up from the bottom; `0` means pinned to the latest (autoscroll).
-    pub transcript_scroll: u16,
+    /// Autoscroll: when `true` the transcript stays pinned to the newest line as content streams.
+    /// Scrolling up turns it off; scrolling back to the bottom turns it on again.
+    pub follow: bool,
+    /// Top visible transcript line (absolute), used when not following. Clamped at render time. A
+    /// scrolled-up view stays put as new content arrives (it appends below, off-screen).
+    pub transcript_top: u16,
     /// Transcript viewport height, learned at render time and used to size a page scroll.
     pub transcript_page: u16,
     /// The prompt's line editor.
@@ -112,7 +124,8 @@ impl AppModel {
             reachability: Reachability::Unknown,
             has_key,
             transcript: Transcript::default(),
-            transcript_scroll: 0,
+            follow: true,
+            transcript_top: 0,
             transcript_page: 0,
             input: Input::default(),
             mic_muted: false,
@@ -162,19 +175,21 @@ impl AppModel {
                     Command::StopScreenshare
                 });
             }
-            Action::ScrollUp => {
-                self.transcript_scroll = self.transcript_scroll.saturating_add(page);
+            // Up-scrolls disengage autoscroll; down-scrolls move toward the bottom (render re-engages
+            // follow once they reach it). render clamps `transcript_top` against the real height.
+            Action::ScrollUp => self.scroll_up(page),
+            Action::ScrollDown => self.transcript_top = self.transcript_top.saturating_add(page),
+            Action::ScrollLineUp => self.scroll_up(WHEEL_LINES),
+            Action::ScrollLineDown => {
+                self.transcript_top = self.transcript_top.saturating_add(WHEEL_LINES);
             }
-            Action::ScrollDown => {
-                self.transcript_scroll = self.transcript_scroll.saturating_sub(page);
-            }
+            Action::ScrollTop => self.scroll_up(u16::MAX),
+            Action::ScrollBottom => self.follow = true,
             Action::Insert(c) => self.input.insert(c),
             Action::Backspace => self.input.backspace(),
             Action::Delete => self.input.delete(),
             Action::Left => self.input.left(),
             Action::Right => self.input.right(),
-            Action::Home => self.input.home(),
-            Action::End => self.input.end(),
             Action::Submit => return self.submit(),
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Escape => {
@@ -187,6 +202,13 @@ impl AppModel {
             Action::Ignore => {}
         }
         None
+    }
+
+    /// Scroll the transcript up by `lines`, leaving autoscroll. `transcript_top` already tracks the
+    /// bottom while following (render keeps it synced), so subtracting from it scrolls up correctly.
+    fn scroll_up(&mut self, lines: u16) {
+        self.follow = false;
+        self.transcript_top = self.transcript_top.saturating_sub(lines);
     }
 
     /// Submit the prompt: echo the typed line into the transcript (the engine doesn't round-trip
@@ -330,6 +352,21 @@ mod tests {
             Some(Command::StartScreenshare)
         );
         assert!(m.sharing);
+    }
+
+    #[test]
+    fn scrolling_up_leaves_follow_and_end_resumes_it() {
+        let mut m = AppModel::new(true);
+        assert!(m.follow, "starts pinned to the newest");
+        m.on_action(Action::ScrollLineUp);
+        assert!(!m.follow, "scrolling up stops autoscroll");
+        m.on_action(Action::ScrollBottom); // End
+        assert!(m.follow, "End resumes autoscroll");
+        m.on_action(Action::ScrollTop); // Home
+        assert!(
+            !m.follow && m.transcript_top == 0,
+            "Home jumps to the oldest line"
+        );
     }
 
     #[test]

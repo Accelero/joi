@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use joi_core::session::event::{AppState, ConnectionStatus};
+use joi_core::session::event::{AppState, ConnectionStatus, Reachability};
 
 use crate::app::AppModel;
 use crate::theme;
@@ -72,7 +72,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("F3", "mute / unmute mic"),
         ("F4", "share / stop screen"),
         ("Enter", "send message"),
-        ("PgUp / PgDn", "scroll transcript"),
+        ("PgUp / PgDn", "scroll (or mouse wheel)"),
+        ("Home / End", "oldest / newest"),
         ("F1 / Esc", "toggle help / clear"),
         ("Ctrl+C / Ctrl+Q", "quit"),
     ];
@@ -216,9 +217,6 @@ fn slice_by_cols(s: &str, start: usize, width: usize) -> String {
     out
 }
 
-/// Width of the speaker-label column (`JOI:`/`User:` left-padded so the text after them aligns).
-const LABEL_W: usize = 6;
-
 /// Render the transcript, wrapped to width and anchored to the bottom (newest visible), offset by
 /// `transcript_scroll` lines. Clamps the stored scroll against the real content height — the only
 /// thing render mutates on the model.
@@ -230,54 +228,43 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     }
 
     // Pre-wrap every entry into display rows so we can slice an exact window (no reliance on
-    // Paragraph's internal scroll/line-count). Layout per line: a fixed-width label column, then the
-    // word-wrapped text. The speaker label (`JOI:`/`User:`) is shown only when the speaker *changes*
-    // — consecutive lines from the same speaker are unlabeled — and wrapped/continuation lines are
-    // indented to align under the text, never under the label.
-    let indent = " ".repeat(LABEL_W);
-    let text_width = width.saturating_sub(LABEL_W).max(1);
+    // Paragraph's internal scroll/line-count). No speaker labels — turns are distinguished by color
+    // (see `kind_color`) and separated by a blank line whenever the speaker changes.
     let mut lines: Vec<Line> = Vec::new();
     let mut prev_kind: Option<LineKind> = None;
     for entry in model.transcript.entries() {
-        let style = Style::new().fg(kind_color(entry.kind));
-        let first_prefix = if prev_kind == Some(entry.kind) {
-            indent.clone() // same speaker continuing — no repeated label
-        } else {
-            format!("{:<w$}", kind_label(entry.kind), w = LABEL_W)
-        };
+        if prev_kind.is_some_and(|p| p != entry.kind) {
+            lines.push(Line::default()); // blank line between turns
+        }
         prev_kind = Some(entry.kind);
-
-        let wrapped = textwrap::wrap(&entry.text, text_width);
-        if wrapped.is_empty() {
-            lines.push(Line::from(first_prefix).style(style));
-        } else {
-            for (i, piece) in wrapped.iter().enumerate() {
-                let prefix = if i == 0 { &first_prefix } else { &indent };
-                lines.push(Line::from(format!("{prefix}{piece}")).style(style));
-            }
+        let style = Style::new().fg(kind_color(entry.kind));
+        for piece in textwrap::wrap(&entry.text, width) {
+            lines.push(Line::from(piece.into_owned()).style(style));
         }
     }
 
+    // Resolve the top visible line. Following pins to the bottom; otherwise the stored top is
+    // clamped — and if it has reached the bottom, autoscroll re-engages. Keeping `transcript_top`
+    // synced to `max_top` while following means a later up-scroll starts from the bottom.
     let total = lines.len();
-    let max_scroll = total.saturating_sub(height);
+    let max_top = total.saturating_sub(height);
     model.transcript_page = area.height;
-    let scroll = (model.transcript_scroll as usize).min(max_scroll);
-    model.transcript_scroll = scroll as u16;
-    let start = max_scroll - scroll;
+    let top = if model.follow {
+        max_top
+    } else {
+        let clamped = (model.transcript_top as usize).min(max_top);
+        if clamped >= max_top {
+            model.follow = true;
+        }
+        clamped
+    };
+    model.transcript_top = top as u16;
 
-    let window: Vec<Line> = lines.into_iter().skip(start).take(height).collect();
+    let window: Vec<Line> = lines.into_iter().skip(top).take(height).collect();
     frame.render_widget(
         Paragraph::new(window).style(Style::new().bg(theme::PANEL)),
         area,
     );
-}
-
-fn kind_label(kind: LineKind) -> &'static str {
-    match kind {
-        LineKind::User => "User:",
-        LineKind::Agent => "JOI:",
-        LineKind::Error => "!",
-    }
 }
 
 fn kind_color(kind: LineKind) -> Color {
@@ -312,9 +299,27 @@ fn status_line(model: &AppModel) -> Line<'static> {
     ])
 }
 
-/// The bottom rail: connection + uptime + live metrics, plus the no-key hint. Mirrors the web deck
-/// footer (and surfaces the `Metrics` event the web UI doesn't show yet).
+/// The bottom rail. Its dot is contextual so it never just echoes the start/stop button:
+/// - no key → the setup hint;
+/// - idle → provider **reachability** from the token-free probe (meaningful with no session);
+/// - live session → the socket connection + uptime + throughput metrics.
 fn footer_line(model: &AppModel) -> Line<'static> {
+    if !model.has_key {
+        return Line::from(Span::styled(
+            "● no API key — set GEMINI_API_KEY",
+            Style::new().fg(theme::DANGER),
+        ));
+    }
+
+    if !model.is_running() {
+        let (color, label) = reachability_display(model.reachability);
+        return Line::from(vec![
+            Span::styled("●", Style::new().fg(color)),
+            Span::raw(" "),
+            Span::styled(label, Style::new().fg(theme::FG_FAINT)),
+        ]);
+    }
+
     let mut spans = vec![
         Span::styled(
             "●",
@@ -328,8 +333,7 @@ fn footer_line(model: &AppModel) -> Line<'static> {
         Span::styled("    ↑ ", Style::new().fg(theme::FG_FAINT)),
         Span::styled(format_uptime(model), Style::new().fg(theme::FG_DIM)),
     ];
-
-    if let Some(m) = model.metrics.filter(|_| model.is_running()) {
+    if let Some(m) = model.metrics {
         spans.push(Span::styled(
             format!(
                 "    ↑{:.1} ↓{:.1} kb/s · {:.0} tok/s",
@@ -338,13 +342,18 @@ fn footer_line(model: &AppModel) -> Line<'static> {
             Style::new().fg(theme::FG_FAINT),
         ));
     }
-    if !model.has_key {
-        spans.push(Span::styled(
-            "    no API key — set GEMINI_API_KEY",
-            Style::new().fg(theme::DANGER),
-        ));
-    }
     Line::from(spans)
+}
+
+/// Color + label for the idle reachability indicator.
+fn reachability_display(reachability: Reachability) -> (Color, &'static str) {
+    match reachability {
+        Reachability::Online => (theme::ACCENT, "online"),
+        Reachability::Checking => (theme::WARN, "checking…"),
+        Reachability::Offline => (theme::DANGER, "offline"),
+        Reachability::Unauthorized => (theme::DANGER, "key rejected"),
+        Reachability::Unknown => (theme::FG_FAINT, "—"),
+    }
 }
 
 /// `HH:MM:SS` since the session started, or `--:--:--` when stopped.
@@ -412,9 +421,35 @@ mod tests {
     fn frame_shows_brand_and_status() {
         let text = render_to_string(AppModel::new(true));
         assert!(text.contains("JOI"), "brand missing: {text}");
-        assert!(text.contains("stopped"));
-        assert!(text.contains("disconnected"));
+        assert!(text.contains("stopped"), "lifecycle status missing: {text}");
         assert!(!text.contains("no API key"));
+    }
+
+    #[test]
+    fn footer_shows_reachability_when_idle_and_connection_when_running() {
+        // Idle (stopped) → the bottom dot reflects provider reachability, not "disconnected".
+        let mut idle = AppModel::new(true);
+        idle.reachability = Reachability::Online;
+        let text = render_to_string(idle);
+        assert!(
+            text.contains("online"),
+            "reachability missing when idle: {text}"
+        );
+        assert!(
+            !text.contains("disconnected"),
+            "should not show session conn when idle: {text}"
+        );
+
+        // Running → the bottom dot reflects the live session connection.
+        let mut live = AppModel::new(true);
+        live.state = AppState::Listening;
+        live.connection = ConnectionStatus::Connected;
+        live.reachability = Reachability::Online;
+        let text = render_to_string(live);
+        assert!(
+            text.contains("connected"),
+            "session connection missing when running: {text}"
+        );
     }
 
     #[test]
@@ -424,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_lines_render_with_labels() {
+    fn transcript_renders_text_without_labels() {
         let mut model = AppModel::new(true);
         model.transcript.push_transcript(
             joi_core::session::event::Speaker::Agent,
@@ -432,8 +467,9 @@ mod tests {
             true,
         );
         let text = render_to_string(model);
-        assert!(text.contains("JOI:"), "agent label missing: {text}");
         assert!(text.contains("hello"));
+        assert!(!text.contains("JOI:"), "labels should be gone: {text}");
+        assert!(!text.contains("User:"), "labels should be gone: {text}");
     }
 
     #[test]
@@ -457,30 +493,52 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_same_speaker_lines_are_labeled_once() {
+    fn blank_line_separates_turns_only() {
         use joi_core::session::event::Speaker;
+        let (w, h) = (40u16, 16u16);
         let mut model = AppModel::new(true);
         model
             .transcript
-            .push_transcript(Speaker::Agent, "first".into(), true);
+            .push_transcript(Speaker::Agent, "alpha".into(), true);
         model
             .transcript
-            .push_transcript(Speaker::Agent, "second".into(), true);
+            .push_transcript(Speaker::Agent, "bravo".into(), true);
         model
             .transcript
-            .push_transcript(Speaker::User, "hi".into(), true);
-        let text = render_to_string(model);
+            .push_transcript(Speaker::User, "charlie".into(), true);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(f, &mut model)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Interior columns only (skip the left/right border) so a blank content row reads as empty.
+        let rows: Vec<String> = (0..h)
+            .map(|y| {
+                (1..w - 1)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let alpha = rows.iter().position(|r| r.contains("alpha")).unwrap();
+        let bravo = rows.iter().position(|r| r.contains("bravo")).unwrap();
+        let charlie = rows.iter().position(|r| r.contains("charlie")).unwrap();
+        // Same speaker → adjacent, no blank between alpha and bravo.
         assert_eq!(
-            text.matches("JOI:").count(),
-            1,
-            "JOI: should label once: {text}"
+            bravo,
+            alpha + 1,
+            "same-speaker lines should be adjacent: {rows:?}"
         );
-        assert_eq!(
-            text.matches("User:").count(),
-            1,
-            "User: should label once: {text}"
+        // Speaker change → a blank line sits between bravo and charlie.
+        assert!(
+            charlie > bravo + 1 && rows[bravo + 1..charlie].iter().any(String::is_empty),
+            "expected a blank line between turns: {rows:?}"
         );
-        assert!(text.contains("second"), "continuation line missing: {text}");
+        // No speaker labels anywhere.
+        let all = rows.concat();
+        assert!(
+            !all.contains("JOI:") && !all.contains("User:"),
+            "labels present: {all}"
+        );
     }
 
     #[test]

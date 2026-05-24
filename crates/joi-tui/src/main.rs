@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::EventStream;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -143,8 +143,14 @@ fn setup_terminal() -> anyhow::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     // A blinking block matches the web prompt's caret; ratatui shows it only on frames that set a
-    // cursor position (the prompt does), so it appears exactly at the caret.
-    crossterm::execute!(stdout, EnterAlternateScreen, SetCursorStyle::BlinkingBlock)?;
+    // cursor position (the prompt does), so it appears exactly at the caret. Mouse capture lets the
+    // wheel scroll the transcript (hold Shift for the terminal's native text selection).
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        SetCursorStyle::BlinkingBlock
+    )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.clear()?;
     Ok(terminal)
@@ -154,6 +160,7 @@ fn restore_terminal() -> anyhow::Result<()> {
     crossterm::execute!(
         io::stdout(),
         SetCursorStyle::DefaultUserShape,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     disable_raw_mode()?;

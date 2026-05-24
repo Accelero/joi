@@ -55,16 +55,6 @@ impl Input {
             self.caret += c.len_utf8();
         }
     }
-
-    pub fn home(&mut self) {
-        self.caret = self.value[..self.caret].rfind('\n').map_or(0, |i| i + 1);
-    }
-
-    pub fn end(&mut self) {
-        self.caret = self.value[self.caret..]
-            .find('\n')
-            .map_or(self.value.len(), |i| self.caret + i);
-    }
 }
 
 #[cfg(test)]
@@ -104,21 +94,5 @@ mod tests {
         assert_eq!(i.caret, 0);
         i.right();
         assert_eq!(i.caret, 1);
-    }
-
-    #[test]
-    fn home_end_respect_line_boundaries() {
-        let mut i = Input::default();
-        "ab\ncd".chars().for_each(|c| i.insert(c));
-        i.home(); // start of "cd" line
-        assert_eq!(i.caret, 3);
-        i.end(); // end of "cd" line (= end of value)
-        assert_eq!(i.caret, 5);
-        // caret in the first line:
-        i.caret = 1;
-        i.home();
-        assert_eq!(i.caret, 0);
-        i.end();
-        assert_eq!(i.caret, 2); // before '\n'
     }
 }
