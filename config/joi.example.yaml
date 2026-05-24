@@ -43,8 +43,8 @@ logging:
 
 media:                              # native device I/O (joi-media)
   audio:
-    input_sample_rate: 16000        # to provider (16 kHz mono PCM16)
-    output_sample_rate: 24000       # from provider (24 kHz mono PCM16)
+    # The wire sample rates are fixed by the provider (16 kHz mono in / 24 kHz mono out) and not
+    # configurable; the pipeline resamples your device's own rate to/from them.
     frame_ms: 20                    # 20 ms = 320 samples at 16 kHz; validated 5..=60
     # Audio devices. "default" = follow the OS/desktop default device (what your system mixer or
     # taskbar selects). Set an exact device name to pin a specific mic/speaker and ignore the OS
@@ -60,7 +60,6 @@ media:                              # native device I/O (joi-media)
     noise_suppression: true           # high-pass filter + WebRTC noise suppression
     auto_gain: true                   # automatic gain control (AGC2)
   screen:
-    enabled: false
     fps: 1.0                        # validated (0, 60]
     # Gemini Live downsamples each video frame to ~768 px (one tile); sending more is wasted bytes.
     max_width: 768
@@ -68,8 +67,5 @@ media:                              # native device I/O (joi-media)
 
 ui:                                 # frontend appearance (read by joi-tui)
   terminal:
-    theme: joi-dark
-    font: JetBrains Mono              # informational
-    scrollback: 5000
     background: transparent           # "#rrggbb" or "transparent" (use the terminal's background)
     accent: "#9aede4"                 # accent color (hex or named)

@@ -149,11 +149,11 @@ pub struct GeminiCfg {
 /// Audio I/O settings (PLAN §7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AudioCfg {
-    /// Sample rate sent to the provider (Hz). Gemini expects 16 kHz mono.
-    pub input_sample_rate: u32,
-    /// Sample rate received from the provider (Hz). Gemini emits 24 kHz mono.
-    pub output_sample_rate: u32,
     /// Mic frame size in milliseconds (20 ms = 320 samples at 16 kHz).
+    ///
+    /// The wire sample rates themselves are not configurable — they are fixed by the provider
+    /// protocol (16 kHz mono in, 24 kHz mono out; see [`crate::media::AudioFormat`]) and the
+    /// pipeline resamples the device's own rate to/from them.
     pub frame_ms: u32,
     /// Mic capture device. `"default"` follows the OS/desktop default input device; any other value
     /// pins that exact device by name (the host device names are logged at startup), letting Joi
@@ -178,8 +178,6 @@ pub struct AudioCfg {
 /// Screen-capture settings (PLAN §7.2, FR-8..10). Native capture is the only path.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ScreenCfg {
-    /// Whether screen sharing is enabled at all.
-    pub enabled: bool,
     /// Frames per second sent to the model.
     pub fps: f32,
     /// Resolution ceiling (longest edge, pixels).
@@ -204,12 +202,6 @@ pub struct HistoryCfg {
 /// Terminal UI settings (read by `joi-tui`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TerminalCfg {
-    /// ANSI theme name.
-    pub theme: String,
-    /// Monospace font family (informational).
-    pub font: String,
-    /// Scrollback line count.
-    pub scrollback: u32,
     /// Background color — a hex string (`#rrggbb`) or `transparent` to inherit the terminal's own
     /// background.
     pub background: String,
@@ -284,8 +276,6 @@ impl Default for Config {
             },
             media: MediaCfg {
                 audio: AudioCfg {
-                    input_sample_rate: 16_000,
-                    output_sample_rate: 24_000,
                     frame_ms: 20,
                     input_device: "default".to_string(),
                     output_device: "default".to_string(),
@@ -294,7 +284,6 @@ impl Default for Config {
                     auto_gain: true,
                 },
                 screen: ScreenCfg {
-                    enabled: false,
                     fps: 1.0,
                     // Sized to the provider's per-frame video resolution. Gemini Live tiles each
                     // frame to ~768 px (one 768x768 tile / ~258 tokens); more is downsampled away.
@@ -304,9 +293,6 @@ impl Default for Config {
             },
             ui: UiCfg {
                 terminal: TerminalCfg {
-                    theme: "joi-dark".to_string(),
-                    font: "JetBrains Mono".to_string(),
-                    scrollback: 5_000,
                     background: "transparent".to_string(),
                     accent: "#9aede4".to_string(),
                 },
@@ -467,9 +453,6 @@ impl Config {
         }
         let audio = &self.media.audio;
         let screen = &self.media.screen;
-        if audio.input_sample_rate == 0 || audio.output_sample_rate == 0 {
-            return Err(invalid("media.audio.*_sample_rate", "must be > 0"));
-        }
         if !(5..=60).contains(&audio.frame_ms) {
             return Err(invalid(
                 "media.audio.frame_ms",
@@ -602,7 +585,7 @@ media:
             assert_eq!(cfg.media.audio.frame_ms, 40);
             // unspecified nested fields keep their defaults (deep merge)
             assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
-            assert_eq!(cfg.media.audio.input_sample_rate, 16_000);
+            assert_eq!(cfg.media.audio.input_device, "default");
             Ok(())
         });
     }
