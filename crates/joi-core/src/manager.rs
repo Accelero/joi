@@ -505,7 +505,7 @@ impl SessionManager {
 
     /// Load persisted turns within budget, oldest-first, for re-seeding (FR-20/21).
     async fn restore_context(&self) -> Vec<HistoryTurn> {
-        let budget = TokenBudget(self.config.history.token_budget);
+        let budget = TokenBudget(self.config.live_api.token_budget());
         match self.history.load_within_budget(budget).await {
             Ok(mut turns) => {
                 turns.reverse(); // store returns newest-first; seed chronologically
@@ -603,7 +603,7 @@ impl SessionManager {
             tracing::warn!(error = %e, "history append failed");
             return;
         }
-        let budget = TokenBudget(self.config.history.token_budget);
+        let budget = TokenBudget(self.config.live_api.token_budget());
         if let Ok(meta) = self.history.meta(budget).await {
             self.emit(UiEvent::History(meta));
         }

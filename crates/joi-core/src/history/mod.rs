@@ -53,12 +53,26 @@ impl HistoryTurn {
         }
     }
 
-    /// Approximate token cost of this turn.
+    /// Approximate token cost of this turn **as it is seeded into a prompt** — its text plus the
+    /// per-turn framing the provider wraps around it ([`TURN_FRAMING_TOKENS`]). Budgeting on bare
+    /// text alone under-counts (the framing is never free), so this is what the budget windowing and
+    /// the UI's [`HistoryMeta`] use.
     #[must_use]
     pub fn token_estimate(&self) -> u32 {
-        estimate_tokens(&self.text)
+        estimate_tokens(&self.text).saturating_add(TURN_FRAMING_TOKENS)
     }
 }
+
+/// Per-turn framing overhead, in tokens, added to a turn's text estimate.
+///
+/// A turn is never put on the wire as bare text: the provider wraps each one in speaker/role framing
+/// plus a delimiter — e.g. the Gemini adapter prefixes `"Me: "` / `"You: "` and a newline before
+/// folding the turns into the seed. Counting only the text would under-budget the re-seed and let it
+/// overrun the model's input window. This is a deliberately conservative, provider-agnostic estimate
+/// of that per-turn framing; the exact wrapping is provider-specific, and a provider may add a small
+/// one-time envelope on top (e.g. the Gemini adapter's context preamble) that is negligible next to
+/// the budget.
+pub const TURN_FRAMING_TOKENS: u32 = 4;
 
 /// An approximate token budget bounding stored history (FR-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -129,22 +143,32 @@ mod tests {
 
     #[test]
     fn estimate_is_at_least_one() {
+        // `estimate_tokens` is the bare-text tokenizer (no per-turn framing).
         assert_eq!(estimate_tokens(""), 1);
         assert_eq!(estimate_tokens("12345678"), 2);
     }
 
     #[test]
+    fn token_estimate_adds_turn_framing() {
+        // A turn costs its text estimate PLUS the per-turn framing it's seeded with.
+        let turn = HistoryTurn::new(Role::User, "12345678", 0); // 8 chars -> 2 text tokens
+        assert_eq!(estimate_tokens(&turn.text), 2);
+        assert_eq!(turn.token_estimate(), 2 + TURN_FRAMING_TOKENS);
+    }
+
+    #[test]
     fn newest_first_respects_budget_and_order() {
-        // each turn is ~1 token ("abcd" -> 1)
+        // Each turn costs estimate_tokens("abcd")=1 + TURN_FRAMING_TOKENS, so budget for exactly 3.
+        let per_turn = 1 + TURN_FRAMING_TOKENS;
         let turns: Vec<_> = (0..10)
             .map(|i| HistoryTurn::new(Role::User, "abcd", i))
             .collect();
-        let got = newest_first_within(&turns, TokenBudget(3));
+        let got = newest_first_within(&turns, TokenBudget(per_turn * 3));
         assert_eq!(got.len(), 3);
         // newest-first: ts 9, 8, 7
         assert_eq!(got[0].ts_ms, 9);
         assert_eq!(got[2].ts_ms, 7);
         let total: u32 = got.iter().map(HistoryTurn::token_estimate).sum();
-        assert!(total <= 3);
+        assert!(total <= per_turn * 3);
     }
 }

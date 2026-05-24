@@ -122,6 +122,21 @@ fn default_reachability_probe_secs() -> u64 {
     20
 }
 
+impl LiveApiCfg {
+    /// The history re-seed budget for the **active** provider — the Live session's input window,
+    /// which is provider/model-dependent (hence it lives with the provider, not under `history`).
+    /// Resolved here so the provider-agnostic [`crate::manager::SessionManager`] never reads a
+    /// concrete provider's config field.
+    #[must_use]
+    pub fn token_budget(&self) -> u32 {
+        match self.provider {
+            // Mock is a scripted test double with no real context window; it reuses the Gemini
+            // block's value (the only provider block today) — its size is immaterial to the mock.
+            ProviderName::Gemini | ProviderName::Mock => self.gemini.token_budget,
+        }
+    }
+}
+
 /// Gemini Live provider settings. The API key may be set here or via the `GEMINI_API_KEY` /
 /// `JOI_LIVE_API__GEMINI__API_KEY` environment variable (env wins).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -144,6 +159,39 @@ pub struct GeminiCfg {
     pub input_transcription: bool,
     /// Request transcription of the agent's audio (FR-3).
     pub output_transcription: bool,
+    /// Enable the provider's server-side context-window compression (a sliding window that
+    /// truncates/summarizes the oldest in-session turns once the live context window nears full).
+    /// With it on, a session is no longer capped at the provider's default duration limits (15 min
+    /// audio-only / 2 min audio+video) and can run indefinitely. Joi persists every turn to disk
+    /// regardless, so this only bounds the *live* in-session context, never the stored history.
+    /// Defaulted so configs written before this field still parse.
+    #[serde(default = "default_context_window_compression")]
+    pub context_window_compression: bool,
+    /// Approximate token budget for re-seeding prior history into a new session, in tokens.
+    ///
+    /// This is the **Live session input window** for *this provider/model* — provider-dependent
+    /// (e.g. ~128k for Gemini native-audio models, ~32k for half-cascade), which is why it lives
+    /// with the provider rather than under `history`. It is **not** the underlying text model's
+    /// 1M-class window — do not copy that number. Min 1000. Defaulted so older configs still parse.
+    #[serde(default = "default_token_budget")]
+    pub token_budget: u32,
+}
+
+/// Default for [`GeminiCfg::context_window_compression`]: on — long voice sessions are the common
+/// case and the provider's default duration caps are otherwise a hard wall.
+fn default_context_window_compression() -> bool {
+    true
+}
+
+/// Gemini's Live API context window (input token limit), in tokens — the 128k tier shared by the
+/// native-audio and current `*-flash-live` models. The default re-seed budget is derived from this.
+pub const GEMINI_LIVE_CONTEXT_WINDOW: u32 = 131_072;
+
+/// Default for [`GeminiCfg::token_budget`]: **90% of the Gemini Live context window**, leaving ~10%
+/// headroom for the session's streamed audio/video. With context-window compression on (the
+/// default), the server slides the oldest turns out if this is ever exceeded.
+fn default_token_budget() -> u32 {
+    GEMINI_LIVE_CONTEXT_WINDOW * 9 / 10
 }
 
 /// Audio I/O settings (PLAN §7.1).
@@ -192,11 +240,6 @@ pub struct HistoryCfg {
     /// Directory holding per-session logs + the session index. `None` → resolved to
     /// `~/.joi/sessions` at load time.
     pub dir: Option<PathBuf>,
-    /// Approximate token budget bounding re-seeded history (FR-21).
-    ///
-    /// This is the **Live session input limit**, much smaller than the underlying text model's
-    /// 1M-class context window — do not copy that number.
-    pub token_budget: u32,
 }
 
 /// Terminal UI settings (read by `joi-tui`).
@@ -263,13 +306,12 @@ impl Default for Config {
                     system_instruction: "You are Joi, a concise local voice companion.".to_string(),
                     input_transcription: true,
                     output_transcription: true,
+                    context_window_compression: true,
+                    token_budget: default_token_budget(),
                 },
                 reachability_probe_secs: default_reachability_probe_secs(),
             },
-            history: HistoryCfg {
-                dir: None,
-                token_budget: 32_000,
-            },
+            history: HistoryCfg { dir: None },
             logging: LoggingCfg {
                 level: LogLevel::Info,
                 file: None,
@@ -468,8 +510,11 @@ impl Config {
         if !(1..=100).contains(&screen.quality) {
             return Err(invalid("media.screen.quality", "must be between 1 and 100"));
         }
-        if self.history.token_budget < 1_000 {
-            return Err(invalid("history.token_budget", "must be at least 1000"));
+        if self.live_api.gemini.token_budget < 1_000 {
+            return Err(invalid(
+                "live_api.gemini.token_budget",
+                "must be at least 1000",
+            ));
         }
         Ok(())
     }
@@ -488,6 +533,22 @@ mod tests {
             sessions_dir: PathBuf::from("/data/sessions"),
             log_dir: PathBuf::from("/state"),
         }
+    }
+
+    #[test]
+    fn default_token_budget_is_90_percent_of_gemini_window_and_resolved_per_provider() {
+        // The default re-seed budget is 90% of Gemini's Live context window, lives under the
+        // provider, and is read through the provider-agnostic resolver.
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.live_api.gemini.token_budget,
+            GEMINI_LIVE_CONTEXT_WINDOW * 9 / 10
+        );
+        assert_eq!(
+            cfg.live_api.token_budget(),
+            cfg.live_api.gemini.token_budget
+        );
+        assert_eq!(cfg.live_api.gemini.token_budget, 117_964);
     }
 
     #[test]

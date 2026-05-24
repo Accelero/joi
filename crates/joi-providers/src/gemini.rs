@@ -96,6 +96,16 @@ impl RealtimeSession for GeminiAdapter {
             // Gemini transcribes the model's spoken reply to text → streamed to the terminal.
             rc = rc.with_output_transcription();
         }
+        if cfg.context_window_compression {
+            // Enable the server-side sliding-window compression so the session isn't capped at the
+            // default duration limits (15 min audio / 2 min audio+video). `slidingWindow: {}` uses
+            // Gemini's defaults (compress at ~80% of the model's context window). The vendored
+            // adk-realtime PATCH(joi) reads this off `extra` and emits it as the top-level
+            // `contextWindowCompression` setup field. We own `extra` here (nothing else sets it).
+            rc.extra = Some(serde_json::json!({
+                "contextWindowCompression": { "slidingWindow": {} }
+            }));
+        }
 
         let boxed = model.connect(rc).await.map_err(|e| map_connect_err(&e))?;
         // adk hands back a `Box<dyn RealtimeSession>`; share it as an `Arc` so the pump task and the

@@ -47,6 +47,7 @@ pub fn sample_session_config() -> SessionConfig {
         output_audio: AudioFormat::OUTPUT,
         enable_input_transcription: true,
         enable_output_transcription: true,
+        context_window_compression: true,
         initial_context: Vec::new(),
         resumption_handle: None,
         tools: Vec::new(),

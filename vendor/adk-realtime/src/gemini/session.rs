@@ -135,6 +135,11 @@ struct GeminiSetup {
     input_audio_transcription: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_audio_transcription: Option<Value>,
+    // PATCH(joi): server-side context-window compression (sliding window). Carried verbatim from
+    // `RealtimeConfig.extra["contextWindowCompression"]` so the host can lift the session duration
+    // caps without this crate modeling the full config. e.g. `{ "slidingWindow": {} }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_compression: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +462,14 @@ impl GeminiRealtimeSession {
 
         let session_resumption = Some(SessionResumptionConfig { handle });
 
+        // PATCH(joi): pass through the host's `contextWindowCompression` blob, if any, as the
+        // top-level setup field that lifts the session duration caps.
+        let context_window_compression = config
+            .extra
+            .as_ref()
+            .and_then(|ext| ext.get("contextWindowCompression"))
+            .cloned();
+
         let setup = GeminiClientMessage {
             setup: Some(GeminiSetup {
                 model: model.to_string(),
@@ -474,6 +487,8 @@ impl GeminiRealtimeSession {
                     .output_audio_transcription
                     .as_ref()
                     .map(|_| json!({})),
+                // PATCH(joi): see GeminiSetup.context_window_compression.
+                context_window_compression,
             }),
             realtime_input: None,
             tool_response: None,

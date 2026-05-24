@@ -38,6 +38,9 @@ pub struct SessionConfig {
     pub enable_input_transcription: bool,
     /// Request transcription of the agent's audio (FR-3).
     pub enable_output_transcription: bool,
+    /// Enable server-side context-window compression so the session isn't capped at the provider's
+    /// default duration limits (see [`crate::config::GeminiCfg::context_window_compression`]).
+    pub context_window_compression: bool,
     /// Prior conversation turns to seed on resume (FR-20/21).
     pub initial_context: Vec<HistoryTurn>,
     /// Provider session-resumption handle for a transient reconnect (FR-16).
@@ -62,6 +65,7 @@ impl SessionConfig {
             output_audio: AudioFormat::OUTPUT,
             enable_input_transcription: cfg.live_api.gemini.input_transcription,
             enable_output_transcription: cfg.live_api.gemini.output_transcription,
+            context_window_compression: cfg.live_api.gemini.context_window_compression,
             initial_context,
             resumption_handle,
             tools: Vec::new(),
@@ -140,5 +144,21 @@ pub trait RealtimeSession: Send {
     /// monotonic for one connection; the manager differences them into a per-second token rate.
     fn token_usage(&self) -> Option<TokenUsage> {
         None
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_carries_context_window_compression_flag() {
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.context_window_compression = true;
+        assert!(SessionConfig::from_config(&cfg, Vec::new(), None).context_window_compression);
+
+        cfg.live_api.gemini.context_window_compression = false;
+        assert!(!SessionConfig::from_config(&cfg, Vec::new(), None).context_window_compression);
     }
 }
