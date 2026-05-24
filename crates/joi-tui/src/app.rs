@@ -215,15 +215,19 @@ impl AppModel {
         self.transcript_top = self.transcript_top.saturating_sub(lines);
     }
 
-    /// Submit the prompt: echo the typed line into the transcript (the engine doesn't round-trip
-    /// typed text, unlike spoken audio) and emit a [`Command::SendText`]. No-op unless a session is
-    /// live and the line is non-empty — mirroring the web prompt's `canSend` gate.
+    /// Submit the prompt. A typed quit command (`/exit` / `/quit` / `/q`) tears the app down locally
+    /// and is **never** sent to the model — it works whether or not a session is live. Otherwise echo
+    /// the typed line into the transcript (the engine doesn't round-trip typed text, unlike spoken
+    /// audio) and emit a [`Command::SendText`]; that path is a no-op unless a session is live and the
+    /// line is non-empty, mirroring the web prompt's `canSend` gate.
     fn submit(&mut self) -> Option<Command> {
-        if !self.is_running() {
+        let text = self.input.value().trim().to_string();
+        if is_quit_command(&text) {
+            self.input.clear();
+            self.should_quit = true;
             return None;
         }
-        let text = self.input.value().trim().to_string();
-        if text.is_empty() {
+        if !self.is_running() || text.is_empty() {
             return None;
         }
         self.input.clear();
@@ -262,7 +266,15 @@ impl AppModel {
                 text,
                 final_,
             } => self.transcript.push_transcript(speaker, text, final_),
-            UiEvent::Metrics(snapshot) => self.metrics = Some(snapshot),
+            // Only keep samples while a session is live. On stop the engine emits a trailing
+            // `Metrics(ZERO)` to clear its own meter; ignoring it (the `State::Stopped` above already
+            // nulled `metrics`) lets the footer fall back to the `--` N/A placeholders instead of a
+            // literal `0.0`.
+            UiEvent::Metrics(snapshot) => {
+                if self.is_running() {
+                    self.metrics = Some(snapshot);
+                }
+            }
             UiEvent::Error { kind, message } => {
                 self.transcript.push_error(format!("{kind}: {message}"));
             }
@@ -270,6 +282,12 @@ impl AppModel {
         }
         None
     }
+}
+
+/// Whether a submitted prompt line is a local quit command. Case-insensitive; the `/` prefix keeps
+/// it from clashing with anything the user might genuinely want to say to the model.
+fn is_quit_command(text: &str) -> bool {
+    matches!(text.to_ascii_lowercase().as_str(), "/exit" | "/quit" | "/q")
 }
 
 #[cfg(test)]
@@ -309,6 +327,28 @@ mod tests {
         assert_eq!(cmd, Some(Command::SendText("hi".to_string())));
         assert!(m.input.value().is_empty(), "input cleared after submit");
         assert_eq!(m.transcript.entries().len(), 1, "user line echoed");
+    }
+
+    #[test]
+    fn exit_command_quits_without_sending() {
+        // Works while live: quits the app and never round-trips a turn to the model.
+        let mut m = AppModel::new(true);
+        m.state = AppState::Listening;
+        "/exit".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert_eq!(m.on_action(Action::Submit), None, "no SendText is emitted");
+        assert!(m.should_quit, "exit command quits");
+        assert!(m.input.value().is_empty(), "prompt cleared");
+        assert_eq!(m.transcript.entries().len(), 0, "nothing echoed");
+
+        // Works while stopped too (no session needed), and is case-insensitive.
+        let mut m = AppModel::new(true); // Stopped
+        "/QUIT".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert_eq!(m.on_action(Action::Submit), None);
+        assert!(m.should_quit, "exit command quits even when stopped");
     }
 
     #[test]
@@ -410,5 +450,13 @@ mod tests {
         assert!(m.started_at.is_none());
         assert!(!m.sharing);
         assert!(m.metrics.is_none());
+
+        // The engine emits a trailing zero sample after stopping; it must NOT repopulate the
+        // metrics — the footer should stay on its `--` N/A placeholders once idle.
+        m.on_ui_event(UiEvent::Metrics(MetricsSnapshot::ZERO));
+        assert!(
+            m.metrics.is_none(),
+            "trailing zero sample ignored when idle"
+        );
     }
 }

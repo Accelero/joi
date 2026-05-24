@@ -2,7 +2,7 @@
 //! model and the wall clock. The deck frame (rounded border + brand/clock header) echoes the web
 //! `.deck`; the transcript, prompt, controls, and footer fill in across M2–M5.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -31,7 +31,9 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
                 .right_aligned()
                 .style(Style::new().fg(theme::FG_DIM)),
         );
-    let inner = deck.inner(area);
+    // A one-column gutter inside the border so content (messages, prompt, dividers) never touches
+    // the frame. Vertical spacing is already provided by the border rows above/below.
+    let inner = deck.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(deck, area);
 
     // Top→bottom: controls, divider, transcript (fills), JOI's status line, a blank breather, the
@@ -78,6 +80,7 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
         ("Home / End", "oldest / newest"),
         ("F1 / Esc", "toggle help / clear"),
         ("Ctrl+C / Ctrl+Q", "quit"),
+        ("/exit", "quit (or /quit, /q)"),
     ];
     let body: Vec<Line> = keys
         .iter()
@@ -236,15 +239,14 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
 
     // Pre-wrap every entry into display rows so we can slice an exact window (no reliance on
     // Paragraph's internal scroll/line-count). No speaker labels — turns are distinguished by color
-    // (see `kind_color`) and separated by a blank line whenever the speaker changes.
+    // (see `kind_color`) and separated by a blank line between every turn (each `Entry` is one
+    // turn — even back-to-back agent turns get their own breather).
     let accent = model.theme.accent;
     let mut lines: Vec<Line> = Vec::new();
-    let mut prev_kind: Option<LineKind> = None;
-    for entry in model.transcript.entries() {
-        if prev_kind.is_some_and(|p| p != entry.kind) {
+    for (i, entry) in model.transcript.entries().iter().enumerate() {
+        if i > 0 {
             lines.push(Line::default()); // blank line between turns
         }
-        prev_kind = Some(entry.kind);
         let style = Style::new().fg(kind_color(entry.kind, accent));
         for piece in textwrap::wrap(&entry.text, width) {
             lines.push(Line::from(piece.into_owned()).style(style));
@@ -292,8 +294,12 @@ fn brand_line(accent: Color) -> Line<'static> {
 
 /// The lifecycle status line (above the prompt): a glowing dot + state label, like the web
 /// `tui-status`. The dot animates per state (see `theme::status_dot`); the label keeps the steady
-/// state color.
+/// state color. When stopped there's no live state to show, so the line is left blank — its row
+/// stays reserved by the layout so nothing below it shifts.
 fn status_line(model: &AppModel) -> Line<'static> {
+    if model.state == AppState::Stopped {
+        return Line::default();
+    }
     Line::from(vec![
         Span::styled(
             "●",
@@ -432,10 +438,21 @@ mod tests {
 
     #[test]
     fn frame_shows_brand_and_status() {
+        // Stopped: the brand shows, but the lifecycle status line is blank (no "stopped" label) —
+        // its row is still reserved, just empty.
         let text = render_to_string(AppModel::new(true));
         assert!(text.contains("JOI"), "brand missing: {text}");
-        assert!(text.contains("stopped"), "lifecycle status missing: {text}");
+        assert!(
+            !text.contains("stopped"),
+            "stopped state should not be shown: {text}"
+        );
         assert!(!text.contains("no API key"));
+
+        // Running: the live state label appears.
+        let mut live = AppModel::new(true);
+        live.state = AppState::Listening;
+        let text = render_to_string(live);
+        assert!(text.contains("listening"), "live status missing: {text}");
     }
 
     #[test]
@@ -515,10 +532,11 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_separates_turns_only() {
+    fn blank_line_separates_every_turn() {
         use joi_core::session::event::Speaker;
         let (w, h) = (40u16, 16u16);
         let mut model = AppModel::new(true);
+        // Two back-to-back agent turns, then a user turn — every turn is its own `Entry`.
         model
             .transcript
             .push_transcript(Speaker::Agent, "alpha".into(), true);
@@ -544,13 +562,11 @@ mod tests {
         let alpha = rows.iter().position(|r| r.contains("alpha")).unwrap();
         let bravo = rows.iter().position(|r| r.contains("bravo")).unwrap();
         let charlie = rows.iter().position(|r| r.contains("charlie")).unwrap();
-        // Same speaker → adjacent, no blank between alpha and bravo.
-        assert_eq!(
-            bravo,
-            alpha + 1,
-            "same-speaker lines should be adjacent: {rows:?}"
+        // A blank line sits between every turn — including the two same-speaker agent turns.
+        assert!(
+            bravo > alpha + 1 && rows[alpha + 1..bravo].iter().any(String::is_empty),
+            "expected a blank line between consecutive agent turns: {rows:?}"
         );
-        // Speaker change → a blank line sits between bravo and charlie.
         assert!(
             charlie > bravo + 1 && rows[bravo + 1..charlie].iter().any(String::is_empty),
             "expected a blank line between turns: {rows:?}"
