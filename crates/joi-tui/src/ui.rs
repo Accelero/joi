@@ -299,10 +299,12 @@ fn status_line(model: &AppModel) -> Line<'static> {
     ])
 }
 
-/// The bottom rail. Its dot is contextual so it never just echoes the start/stop button:
+/// The bottom rail: a contextual dot (so it never just echoes the start/stop button) followed by
+/// the uptime + throughput readouts, which are always shown — dashed placeholders when idle, real
+/// figures once a session is live and samples arrive.
 /// - no key → the setup hint;
 /// - idle → provider **reachability** from the token-free probe (meaningful with no session);
-/// - live session → the socket connection + uptime + throughput metrics.
+/// - live session → the socket connection status.
 fn footer_line(model: &AppModel) -> Line<'static> {
     if !model.has_key {
         return Line::from(Span::styled(
@@ -311,38 +313,37 @@ fn footer_line(model: &AppModel) -> Line<'static> {
         ));
     }
 
-    if !model.is_running() {
-        let (color, label) = reachability_display(model.reachability);
-        return Line::from(vec![
-            Span::styled("●", Style::new().fg(color)),
-            Span::raw(" "),
-            Span::styled(label, Style::new().fg(theme::FG_FAINT)),
-        ]);
-    }
-
-    let mut spans = vec![
-        Span::styled(
-            "●",
-            Style::new().fg(theme::connection_color(model.connection)),
-        ),
-        Span::raw(" "),
-        Span::styled(
+    let (dot_color, label) = if model.is_running() {
+        (
+            theme::connection_color(model.connection),
             connection_label(model.connection),
-            Style::new().fg(theme::FG_FAINT),
-        ),
+        )
+    } else {
+        reachability_display(model.reachability)
+    };
+
+    Line::from(vec![
+        Span::styled("●", Style::new().fg(dot_color)),
+        Span::raw(" "),
+        Span::styled(label, Style::new().fg(theme::FG_FAINT)),
         Span::styled("    ↑ ", Style::new().fg(theme::FG_FAINT)),
         Span::styled(format_uptime(model), Style::new().fg(theme::FG_DIM)),
-    ];
-    if let Some(m) = model.metrics {
-        spans.push(Span::styled(
-            format!(
-                "    ↑{:.1} ↓{:.1} kb/s · {:.0} tok/s",
-                m.up_kbps, m.down_kbps, m.tokens_per_sec
-            ),
+        Span::styled(
+            format!("    {}", metrics_text(model)),
             Style::new().fg(theme::FG_FAINT),
-        ));
+        ),
+    ])
+}
+
+/// Throughput readout — real figures when a sample is present, dashed placeholders otherwise.
+fn metrics_text(model: &AppModel) -> String {
+    match model.metrics {
+        Some(m) => format!(
+            "↑{:.1} ↓{:.1} kb/s · {:.0} tok/s",
+            m.up_kbps, m.down_kbps, m.tokens_per_sec
+        ),
+        None => "↑--.- ↓--.- kb/s · -- tok/s".to_string(),
     }
-    Line::from(spans)
 }
 
 /// Color + label for the idle reachability indicator.
@@ -438,6 +439,15 @@ mod tests {
         assert!(
             !text.contains("disconnected"),
             "should not show session conn when idle: {text}"
+        );
+        // Uptime + metrics readouts still show, with dashed placeholders when idle.
+        assert!(
+            text.contains("--:--:--"),
+            "uptime placeholder missing: {text}"
+        );
+        assert!(
+            text.contains("tok/s"),
+            "metrics placeholder missing: {text}"
         );
 
         // Running → the bottom dot reflects the live session connection.
