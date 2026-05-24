@@ -24,6 +24,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "start a fresh session",
     },
     SlashCommand {
+        name: "/voice",
+        help: "pick the agent's voice",
+    },
+    SlashCommand {
         name: "/exit",
         help: "quit (or /quit, /q)",
     },
@@ -68,21 +72,22 @@ mod tests {
 
     #[test]
     fn bare_slash_lists_every_command_in_catalog_order() {
-        assert_eq!(names("/"), vec!["/resume", "/new", "/exit"]);
+        assert_eq!(names("/"), vec!["/resume", "/new", "/voice", "/exit"]);
     }
 
     #[test]
     fn substring_matches_the_command_body() {
-        // "ew" is inside "new"; "sum" is inside "resume"; "x" is inside "exit".
+        // "ew" is inside "new"; "sum" is inside "resume"; "x" is inside "exit"; "oic" is inside "voice".
         assert_eq!(names("/ew"), vec!["/new"]);
         assert_eq!(names("/sum"), vec!["/resume"]);
         assert_eq!(names("/x"), vec!["/exit"]);
+        assert_eq!(names("/oic"), vec!["/voice"]);
     }
 
     #[test]
     fn prefix_matches_sort_before_looser_substring_matches() {
-        // "e" prefixes "exit" but only appears mid-word in "resume"/"new".
-        assert_eq!(names("/e"), vec!["/exit", "/resume", "/new"]);
+        // "e" prefixes "exit" but only appears mid-word in "resume"/"new"/"voice".
+        assert_eq!(names("/e"), vec!["/exit", "/resume", "/new", "/voice"]);
     }
 
     #[test]

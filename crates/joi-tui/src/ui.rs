@@ -60,22 +60,25 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     frame.render_widget(Paragraph::new(divider(rows[5].width)), rows[5]);
     render_prompt(frame, rows[6], model);
     frame.render_widget(Paragraph::new(divider(rows[7].width)), rows[7]);
-    frame.render_widget(Paragraph::new(footer_line(model)), rows[8]);
+    render_footer(frame, rows[8], model);
 
     // HUD corner brackets over the deck's rounded corners.
     draw_corners(frame, area, model.theme.accent);
 
     // The slash-command suggester floats just above the prompt while typing a `/` command — but not
     // behind another overlay.
-    if model.picker.is_none() && !model.show_help {
+    if model.picker.is_none() && model.voice_picker.is_none() && !model.show_help {
         render_suggester(frame, rows[6], model);
     }
     if model.show_help {
         render_help(frame, area, model.theme);
     }
-    // The picker floats over everything else when open.
+    // A picker floats over everything else when open (only one is ever open at a time).
     if model.picker.is_some() {
         render_picker(frame, area, model);
+    }
+    if model.voice_picker.is_some() {
+        render_voice_picker(frame, area, model);
     }
 }
 
@@ -256,6 +259,74 @@ fn render_picker(frame: &mut Frame, area: Rect, model: &AppModel) {
     );
 }
 
+/// The `/voice` picker overlay: a centered list of the voices the provider offers. The cursor row is
+/// in the accent color; the voice currently in use is highlighted in `theme::CURRENT` and tagged
+/// `● current` (the two can coincide). ↑/↓ move, Enter applies, Esc cancels. The title notes that a
+/// change takes effect on the next session start (the Voice setting's pinned `NextSession` timing).
+fn render_voice_picker(frame: &mut Frame, area: Rect, model: &AppModel) {
+    let Some(picker) = model.voice_picker.as_ref() else {
+        return;
+    };
+    let theme = model.theme;
+
+    let body: Vec<Line> = if picker.is_empty() {
+        vec![Line::from(Span::styled(
+            " no voices offered",
+            Style::new().fg(theme::FG_FAINT),
+        ))]
+    } else {
+        picker
+            .voices()
+            .iter()
+            .enumerate()
+            .map(|(i, voice)| {
+                let selected = i == picker.selected();
+                let current = picker.current() == Some(voice.as_str());
+                let marker = if selected { "❯ " } else { "  " };
+                // Cursor selection (accent) wins for the name color; the active voice still stands
+                // out in its own color when the cursor is elsewhere.
+                let style = if selected {
+                    Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+                } else if current {
+                    Style::new().fg(theme::CURRENT)
+                } else {
+                    Style::new().fg(theme::FG_DIM)
+                };
+                let mut spans = vec![Span::styled(format!("{marker}{voice}"), style)];
+                if current {
+                    spans.push(Span::styled("  ● current", Style::new().fg(theme::CURRENT)));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    };
+
+    let width = 44.min(area.width);
+    // Title + bottom hint + the rows, capped to the available height.
+    let height = (body.len() as u16 + 3).min(area.height);
+    let rect = centered_rect(area, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.background))
+        .title_top(
+            Line::from(" voice · applies on next start ").style(Style::new().fg(theme::FG_FAINT)),
+        )
+        .title_bottom(
+            Line::from(" ↑/↓ select · enter apply · esc cancel ")
+                .centered()
+                .style(Style::new().fg(theme::FG_FAINT)),
+        );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .style(Style::new().bg(theme.background)),
+        rect,
+    );
+}
+
 /// Format a `last_updated` millis timestamp as a short local `MM-DD HH:MM`, or `—` if unparseable.
 fn format_when(ms: u64) -> String {
     let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
@@ -366,8 +437,8 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
     ]);
     frame.render_widget(Paragraph::new(line).style(base), area);
 
-    // While the picker is open the prompt is inert — don't steal the cursor into it.
-    if model.picker.is_none() {
+    // While an overlay picker is open the prompt is inert — don't steal the cursor into it.
+    if model.picker.is_none() && model.voice_picker.is_none() {
         let cursor_x = area.x + CHEVRON_COLS + (caret_col - h_scroll) as u16;
         frame.set_cursor_position((cursor_x.min(area.x + area.width - 1), area.y));
     }
@@ -485,6 +556,25 @@ fn status_line(model: &AppModel) -> Line<'static> {
     ])
 }
 
+/// The bottom rail: [`footer_line`] (connection/reachability + uptime + throughput) fills from the
+/// left, and the agent's current voice (`♪ <voice>`, the model default reading as `default`) sits
+/// flush right. The voice gets exactly its own width so the left readouts keep the rest of the row
+/// (and simply truncate before the voice on a narrow terminal). The trailing space keeps the voice
+/// off the frame's right gutter.
+fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel) {
+    use unicode_width::UnicodeWidthStr;
+
+    let voice = model.voice.as_deref().unwrap_or("default");
+    let voice_w = UnicodeWidthStr::width(format!("♪ {voice} ").as_str()) as u16;
+    let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(voice_w)]).split(area);
+    frame.render_widget(Paragraph::new(footer_line(model)), cols[0]);
+    let line = Line::from(vec![
+        Span::styled("♪ ", Style::new().fg(theme::FG_FAINT)),
+        Span::styled(format!("{voice} "), Style::new().fg(model.theme.accent)),
+    ]);
+    frame.render_widget(Paragraph::new(line), cols[1]);
+}
+
 /// The bottom rail: a contextual dot (so it never just echoes the start/stop button) followed by
 /// the uptime + throughput readouts, which are always shown — dashed placeholders when idle, real
 /// figures once a session is live and samples arrive.
@@ -591,9 +681,10 @@ mod tests {
 
     /// Render a model into a fixed-size off-screen buffer and flatten it to text for assertions.
     /// Tall enough that the chrome rows (controls, two dividers, status, prompt, footer) leave the
-    /// transcript several visible lines.
+    /// transcript several visible lines, and wide enough that the footer's left readouts and the
+    /// right-aligned voice both fit without truncation.
     fn render_to_string(mut model: AppModel) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(64, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         terminal.draw(|f| render(f, &mut model)).unwrap();
         terminal
             .backend()
@@ -656,6 +747,22 @@ mod tests {
         assert!(
             text.contains("connected"),
             "session connection missing when running: {text}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_the_current_voice_on_the_right() {
+        let mut m = AppModel::new(true);
+        m.voice = Some("Charon".to_string());
+        let text = render_to_string(m);
+        assert!(text.contains("♪"), "voice marker missing: {text}");
+        assert!(text.contains("Charon"), "voice name missing: {text}");
+
+        // No configured voice reads as the model default.
+        let text = render_to_string(AppModel::new(true));
+        assert!(
+            text.contains("default"),
+            "default voice readout missing: {text}"
         );
     }
 
@@ -755,6 +862,23 @@ mod tests {
             text.contains("current"),
             "active session not marked: {text}"
         );
+    }
+
+    #[test]
+    fn voice_picker_overlay_lists_voices_and_marks_current() {
+        use crate::picker::VoicePicker;
+        let mut model = AppModel::new(true);
+        model.open_voice_picker(VoicePicker::new(
+            vec!["Aoede".into(), "Charon".into()],
+            Some("Charon".into()),
+        ));
+        let text = render_to_string(model);
+        assert!(text.contains("voice"), "picker title missing: {text}");
+        assert!(
+            text.contains("Aoede") && text.contains("Charon"),
+            "voices missing: {text}"
+        );
+        assert!(text.contains("current"), "active voice not marked: {text}");
     }
 
     #[test]

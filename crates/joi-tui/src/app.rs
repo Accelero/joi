@@ -11,7 +11,7 @@ use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker
 
 use crate::commands::{self, SlashCommand};
 use crate::input::Input;
-use crate::picker::Picker;
+use crate::picker::{self, Picker, VoicePicker};
 use crate::theme::Theme;
 use crate::transcript::Transcript;
 
@@ -88,6 +88,11 @@ pub enum Command {
     ResumeSession(String),
     /// Switch to a brand-new session (the loop calls `new_session`).
     NewSession,
+    /// Open the `/voice` picker: the loop reads `settings_schema()` for the offered voices.
+    OpenVoicePicker,
+    /// Set the agent's voice to this name (persisted via `update_setting`). Applies on the next
+    /// session start, not the live one — the manager reads the voice at connect.
+    SetVoice(String),
 }
 
 /// All the state the UI renders. Reducers mutate it; rendering only reads it (plus clamping the
@@ -124,6 +129,13 @@ pub struct AppModel {
     pub sharing: bool,
     /// The `/resume` session picker overlay, when open.
     pub picker: Option<Picker>,
+    /// The `/voice` picker overlay, when open. Mutually exclusive with [`picker`](Self::picker) in
+    /// practice — both open from a slash command, and a slash command can't run while one is up.
+    pub voice_picker: Option<VoicePicker>,
+    /// The agent's current voice (`None` = the model default), shown at the bottom-right of the
+    /// footer. Seeded from the settings schema at startup and refreshed whenever the engine
+    /// re-broadcasts `UiEvent::Settings` (e.g. after a `/voice` change).
+    pub voice: Option<String>,
     /// Highlighted row in the slash-command suggester. The suggester itself is derived from the
     /// prompt text (see [`slash_suggestions`](Self::slash_suggestions)); only the cursor persists.
     /// Reset to the top on every edit and clamped against the live match list when used.
@@ -157,6 +169,8 @@ impl AppModel {
             mic_muted: false,
             sharing: false,
             picker: None,
+            voice_picker: None,
+            voice: None,
             suggest_selected: 0,
             metrics: None,
             started_at: None,
@@ -181,6 +195,12 @@ impl AppModel {
         current_id: Option<String>,
     ) {
         self.picker = Some(Picker::new(sessions, current_id));
+    }
+
+    /// Open the `/voice` picker with an already-built [`VoicePicker`] (the host builds it from
+    /// `settings_schema()`). Kept as a method so the field stays the one way overlays are opened.
+    pub fn open_voice_picker(&mut self, picker: VoicePicker) {
+        self.voice_picker = Some(picker);
     }
 
     /// Reset the on-screen conversation when switching/resuming sessions: clear the transcript and
@@ -247,8 +267,11 @@ impl AppModel {
     /// Scroll offsets are clamped against the real content height at render time, so over-scroll
     /// here is harmless.
     pub fn on_action(&mut self, action: Action) -> Option<Command> {
-        // When the picker is open it captures navigation/confirm/cancel; everything else is inert so
-        // keystrokes don't leak into the prompt behind the overlay.
+        // When an overlay picker is open it captures navigation/confirm/cancel; everything else is
+        // inert so keystrokes don't leak into the prompt behind it. (Only one is ever open.)
+        if self.voice_picker.is_some() {
+            return self.on_voice_picker_action(action);
+        }
         if self.picker.is_some() {
             return self.on_picker_action(action);
         }
@@ -348,6 +371,26 @@ impl AppModel {
         None
     }
 
+    /// Voice-picker reducer: ↑/↓ move the highlight, Enter applies the selected voice (and closes),
+    /// Esc cancels. The change is persisted by the host and takes effect on the next session start.
+    fn on_voice_picker_action(&mut self, action: Action) -> Option<Command> {
+        let picker = self.voice_picker.as_mut()?;
+        match action {
+            Action::Up => picker.up(),
+            Action::Down => picker.down(),
+            Action::Submit => {
+                let voice = picker.selected_voice().map(str::to_string);
+                self.voice_picker = None;
+                if let Some(voice) = voice {
+                    return Some(Command::SetVoice(voice));
+                }
+            }
+            Action::Escape | Action::Quit => self.voice_picker = None,
+            _ => {}
+        }
+        None
+    }
+
     /// Scroll the transcript up by `lines`, leaving autoscroll. `transcript_top` already tracks the
     /// bottom while following (render keeps it synced), so subtracting from it scrolls up correctly.
     fn scroll_up(&mut self, lines: u16) {
@@ -356,7 +399,8 @@ impl AppModel {
     }
 
     /// Submit the prompt. A leading `/` is a local command, never sent to the model:
-    /// `/exit`|`/quit`|`/q` quits; `/resume` opens the session picker; `/new` starts a fresh session.
+    /// `/exit`|`/quit`|`/q` quits; `/resume` opens the session picker; `/new` starts a fresh session;
+    /// `/voice` opens the voice picker.
     /// When the slash suggester is open, Enter accepts the highlighted command (so `/re`↵ runs
     /// `/resume`) rather than the partial text. Otherwise echo the typed line into the transcript
     /// (the engine doesn't round-trip typed text, unlike spoken audio) and emit a
@@ -380,6 +424,10 @@ impl AppModel {
                 self.input.clear();
                 self.reset_conversation_view();
                 return Some(Command::NewSession);
+            }
+            "/voice" => {
+                self.input.clear();
+                return Some(Command::OpenVoicePicker);
             }
             _ => {}
         }
@@ -434,6 +482,9 @@ impl AppModel {
                 self.transcript.push_error(format!("{kind}: {message}"));
             }
             UiEvent::History(_) => {}
+            // A settings change was broadcast (e.g. the voice we just applied). Refresh the footer's
+            // voice readout from the snapshot; the `/voice` picker re-reads the live schema on open.
+            UiEvent::Settings { settings } => self.voice = picker::current_voice(&settings),
         }
         None
     }
@@ -558,10 +609,11 @@ mod tests {
     #[test]
     fn arrows_navigate_the_suggester_and_enter_runs_the_selection() {
         let mut m = AppModel::new(true);
-        m.on_action(Action::Insert('/')); // bare slash → [/resume, /new, /exit]
+        m.on_action(Action::Insert('/')); // bare slash → [/resume, /new, /voice, /exit]
         m.on_action(Action::Down); // → /new
+        m.on_action(Action::Down); // → /voice
         m.on_action(Action::Down); // → /exit
-        assert_eq!(m.suggestion_cursor(), 2);
+        assert_eq!(m.suggestion_cursor(), 3);
         assert_eq!(
             m.on_action(Action::Submit),
             None,
@@ -643,6 +695,74 @@ mod tests {
         let cmd = m.on_action(Action::Submit);
         assert_eq!(cmd, Some(Command::ResumeSession("bbb".to_string())));
         assert!(m.picker.is_none(), "picker closed after selection");
+    }
+
+    #[test]
+    fn voice_command_opens_the_voice_picker() {
+        let mut m = AppModel::new(true);
+        "/voice".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert_eq!(m.on_action(Action::Submit), Some(Command::OpenVoicePicker));
+        assert!(m.input.value().is_empty(), "prompt cleared");
+    }
+
+    #[test]
+    fn voice_picker_navigates_and_applies_selected() {
+        let mut m = AppModel::new(true);
+        m.open_voice_picker(VoicePicker::new(
+            vec!["Aoede".to_string(), "Charon".to_string()],
+            Some("Aoede".to_string()),
+        ));
+        // While open, typing does not leak into the prompt.
+        assert_eq!(m.on_action(Action::Insert('x')), None);
+        assert!(m.input.value().is_empty());
+        // ↓ then Enter applies the second voice and closes the picker.
+        m.on_action(Action::Down);
+        let cmd = m.on_action(Action::Submit);
+        assert_eq!(cmd, Some(Command::SetVoice("Charon".to_string())));
+        assert!(m.voice_picker.is_none(), "picker closed after selection");
+    }
+
+    #[test]
+    fn voice_picker_escape_cancels_without_applying() {
+        let mut m = AppModel::new(true);
+        m.open_voice_picker(VoicePicker::new(vec!["Aoede".to_string()], None));
+        assert_eq!(m.on_action(Action::Escape), None);
+        assert!(m.voice_picker.is_none(), "Esc closes the picker");
+    }
+
+    #[test]
+    fn settings_event_refreshes_the_voice_readout() {
+        use joi_core::settings::{
+            ApplyTiming, SettingDescriptor, SettingId, SettingKind, SettingValue,
+        };
+        let snapshot = |value: &str| {
+            vec![SettingDescriptor {
+                id: SettingId::Voice,
+                label: "Voice".to_string(),
+                value: SettingValue::Text(value.to_string()),
+                kind: SettingKind::Choice {
+                    options: vec!["Aoede".to_string(), "Charon".to_string()],
+                },
+                apply: ApplyTiming::NextSession,
+            }]
+        };
+        let mut m = AppModel::new(true);
+        assert_eq!(m.voice, None);
+        // A broadcast snapshot updates the footer's voice; the fold itself emits no command.
+        assert_eq!(
+            m.on_ui_event(UiEvent::Settings {
+                settings: snapshot("Charon"),
+            }),
+            None
+        );
+        assert_eq!(m.voice.as_deref(), Some("Charon"));
+        // Clearing the voice (back to the model default) is reflected too.
+        m.on_ui_event(UiEvent::Settings {
+            settings: snapshot(""),
+        });
+        assert_eq!(m.voice, None);
     }
 
     #[test]

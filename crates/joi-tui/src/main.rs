@@ -29,6 +29,7 @@ use futures_util::StreamExt;
 use joi_app::{JoiApp, MediaMode};
 use joi_core::config::Config;
 use joi_core::session::event::UiEvent;
+use joi_core::settings::{SettingId, SettingValue};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::broadcast::error::RecvError;
@@ -61,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the configurable colors (background + accent) from the shared `ui.terminal` config.
     let ui = app.ui_config();
     model.theme = theme::Theme::from_config(&ui.terminal.background, &ui.terminal.accent);
+    // Seed the footer's voice readout from the current settings; later changes refresh it via the
+    // `UiEvent::Settings` broadcast the engine emits.
+    model.voice = picker::current_voice(&app.settings_schema());
     let mut events = app.subscribe_events();
 
     // From here on the terminal is in raw/alt-screen mode — restore it on *every* exit path,
@@ -149,6 +153,23 @@ async fn run_command(app: &JoiApp, model: &mut app::AppModel, command: app::Comm
         Command::NewSession => {
             if let Err(e) = app.new_session().await {
                 tracing::warn!("new_session failed: {e}");
+            }
+        }
+        Command::OpenVoicePicker => {
+            // Build the picker straight from the engine's settings schema — the offered voices and
+            // the active one to highlight. Nothing to show if the provider has no voice choice.
+            if let Some(picker) = picker::VoicePicker::from_schema(&app.settings_schema()) {
+                model.open_voice_picker(picker);
+            }
+        }
+        Command::SetVoice(voice) => {
+            // Persist the choice (atomic, key blanked). Applies on the next session start, not the
+            // live one — the manager reads the voice at connect.
+            if let Err(e) = app
+                .update_setting(SettingId::Voice, SettingValue::Text(voice))
+                .await
+            {
+                tracing::warn!("set voice failed: {e}");
             }
         }
     }
