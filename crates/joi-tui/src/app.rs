@@ -79,7 +79,8 @@ pub enum Command {
     StopScreenshare,
     /// Open the `/resume` picker: the loop fetches `list_sessions()` and populates it.
     OpenPicker,
-    /// Resume the session with this id, then start it (the loop calls `resume_session` + `start`).
+    /// Resume (retarget the store to) the session with this id. Does *not* start the stream — the
+    /// user opens the API stream manually with F2; the next start re-seeds this session's history.
     ResumeSession(String),
     /// Switch to a brand-new session (the loop calls `new_session`).
     NewSession,
