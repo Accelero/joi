@@ -22,6 +22,9 @@ pub const DANGER: Color = Color::Rgb(0xe0, 0x8c, 0x8c);
 pub const WARN: Color = Color::Rgb(0xd8, 0xc0, 0x8a);
 pub const SPEAK: Color = Color::Rgb(0xc3, 0xb6, 0xe6);
 pub const THINK: Color = Color::Rgb(0x93, 0xb2, 0xd6);
+/// "You are here" — marks the currently-active session in the `/resume` picker. A soft green,
+/// distinct from the accent (cursor) so the active session reads even when it isn't selected.
+pub const CURRENT: Color = Color::Rgb(0x8f, 0xd6, 0x9f);
 
 /// The two configurable colors, resolved from config. Everything else in the palette is fixed.
 #[derive(Debug, Clone, Copy)]

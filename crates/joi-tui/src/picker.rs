@@ -5,19 +5,28 @@
 
 use joi_core::history::SessionSummary;
 
-/// An open `/resume` picker: the session rows (newest-activity first) and the highlighted index.
+/// An open `/resume` picker: the session rows (newest-activity first), the highlighted index, and
+/// the id of the currently-active session (rendered with a distinct highlight, see `ui::render_picker`).
 pub struct Picker {
     sessions: Vec<SessionSummary>,
     selected: usize,
+    current_id: Option<String>,
 }
 
 impl Picker {
-    /// Build a picker over `sessions` (already newest-first from the store), selecting the first row.
+    /// Build a picker over `sessions` (already newest-first from the store). The cursor starts on the
+    /// currently-active session when it's in the list, so opening `/resume` lands you where you are;
+    /// otherwise it starts at the first (newest) row.
     #[must_use]
-    pub fn new(sessions: Vec<SessionSummary>) -> Self {
+    pub fn new(sessions: Vec<SessionSummary>, current_id: Option<String>) -> Self {
+        let selected = current_id
+            .as_deref()
+            .and_then(|id| sessions.iter().position(|s| s.id == id))
+            .unwrap_or(0);
         Self {
             sessions,
-            selected: 0,
+            selected,
+            current_id,
         }
     }
 
@@ -25,6 +34,12 @@ impl Picker {
     #[must_use]
     pub fn sessions(&self) -> &[SessionSummary] {
         &self.sessions
+    }
+
+    /// The id of the currently-active session, if any — the row to highlight as "current".
+    #[must_use]
+    pub fn current_id(&self) -> Option<&str> {
+        self.current_id.as_deref()
     }
 
     /// Index of the highlighted row.
@@ -77,7 +92,7 @@ mod tests {
 
     #[test]
     fn navigation_clamps_at_both_ends() {
-        let mut p = Picker::new(vec![summary("a"), summary("b"), summary("c")]);
+        let mut p = Picker::new(vec![summary("a"), summary("b"), summary("c")], None);
         assert_eq!(p.selected_id(), Some("a"));
         p.up(); // clamp at top
         assert_eq!(p.selected_id(), Some("a"));
@@ -92,11 +107,29 @@ mod tests {
 
     #[test]
     fn empty_picker_has_no_selection() {
-        let mut p = Picker::new(Vec::new());
+        let mut p = Picker::new(Vec::new(), None);
         assert!(p.is_empty());
         assert_eq!(p.selected_id(), None);
         p.down(); // no panic on empty
         p.up();
         assert_eq!(p.selected_id(), None);
+    }
+
+    #[test]
+    fn cursor_starts_on_the_current_session() {
+        // Opening /resume lands the cursor on the session you're already in, not the newest row.
+        let p = Picker::new(
+            vec![summary("a"), summary("b"), summary("c")],
+            Some("b".to_string()),
+        );
+        assert_eq!(p.selected_id(), Some("b"));
+        assert_eq!(p.current_id(), Some("b"));
+    }
+
+    #[test]
+    fn current_id_absent_from_list_falls_back_to_first_row() {
+        // A stale/unknown current id (or none) just selects the newest row.
+        let p = Picker::new(vec![summary("a"), summary("b")], Some("gone".to_string()));
+        assert_eq!(p.selected_id(), Some("a"));
     }
 }

@@ -79,7 +79,8 @@ pub enum Command {
     StopScreenshare,
     /// Open the `/resume` picker: the loop fetches `list_sessions()` and populates it.
     OpenPicker,
-    /// Resume the session with this id, then start it (the loop calls `resume_session` + `start`).
+    /// Resume (retarget the store to) the session with this id. Does *not* start the stream — the
+    /// user opens the API stream manually with F2; the next start re-seeds this session's history.
     ResumeSession(String),
     /// Switch to a brand-new session (the loop calls `new_session`).
     NewSession,
@@ -162,10 +163,15 @@ impl AppModel {
         !matches!(self.state, AppState::Stopped | AppState::Error)
     }
 
-    /// Populate (open) the `/resume` picker with the session list the loop fetched. Called by the
-    /// host after the async `list_sessions()` resolves — not by a pure reducer.
-    pub fn open_picker(&mut self, sessions: Vec<joi_core::history::SessionSummary>) {
-        self.picker = Some(Picker::new(sessions));
+    /// Populate (open) the `/resume` picker with the session list the loop fetched, plus the id of
+    /// the currently-active session so it can be highlighted. Called by the host after the async
+    /// `list_sessions()`/`current_session()` resolve — not by a pure reducer.
+    pub fn open_picker(
+        &mut self,
+        sessions: Vec<joi_core::history::SessionSummary>,
+        current_id: Option<String>,
+    ) {
+        self.picker = Some(Picker::new(sessions, current_id));
     }
 
     /// Reset the on-screen conversation when switching/resuming sessions: clear the transcript and
@@ -447,7 +453,7 @@ mod tests {
             },
         };
         let mut m = AppModel::new(true);
-        m.open_picker(vec![summary("aaa"), summary("bbb")]);
+        m.open_picker(vec![summary("aaa"), summary("bbb")], None);
         // While the picker is open, typing does not leak into the prompt.
         assert_eq!(m.on_action(Action::Insert('x')), None);
         assert!(m.input.value().is_empty());
@@ -462,15 +468,18 @@ mod tests {
     fn picker_escape_cancels() {
         use joi_core::history::{SessionMeta, SessionSummary};
         let mut m = AppModel::new(true);
-        m.open_picker(vec![SessionSummary {
-            id: "x".into(),
-            meta: SessionMeta {
-                name: None,
-                created_at: 0,
-                last_opened: 0,
-                last_updated: 0,
-            },
-        }]);
+        m.open_picker(
+            vec![SessionSummary {
+                id: "x".into(),
+                meta: SessionMeta {
+                    name: None,
+                    created_at: 0,
+                    last_opened: 0,
+                    last_updated: 0,
+                },
+            }],
+            None,
+        );
         assert_eq!(m.on_action(Action::Escape), None);
         assert!(m.picker.is_none(), "Esc closes the picker without resuming");
     }
