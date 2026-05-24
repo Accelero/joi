@@ -66,3 +66,5 @@ ui:                                 # web frontend (loaded by the engine, applie
     theme: joi-dark
     font: JetBrains Mono
     scrollback: 5000
+    background: transparent           # "#rrggbb" or "transparent" (use the terminal's background)
+    accent: "#9aede4"                 # accent color (hex)

@@ -24,8 +24,8 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::LINE))
-        .style(Style::new().bg(theme::BASE))
-        .title_top(brand_line())
+        .style(Style::new().bg(model.theme.background))
+        .title_top(brand_line(model.theme.accent))
         .title_top(
             Line::from(format!(" {clock} "))
                 .right_aligned()
@@ -58,15 +58,15 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     frame.render_widget(Paragraph::new(footer_line(model)), rows[7]);
 
     // HUD corner brackets over the deck's rounded corners (echoes the web `.deck-corner` crop marks).
-    draw_corners(frame, area);
+    draw_corners(frame, area, model.theme.accent);
 
     if model.show_help {
-        render_help(frame, area);
+        render_help(frame, area, model.theme);
     }
 }
 
 /// A centered keybinding overlay (F1). Clears its area first so it floats over the deck.
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
     let keys = [
         ("F2", "start / stop session"),
         ("F3", "mute / unmute mic"),
@@ -81,7 +81,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .iter()
         .map(|(k, d)| {
             Line::from(vec![
-                Span::styled(format!(" {k:<17}"), Style::new().fg(theme::ACCENT)),
+                Span::styled(format!(" {k:<17}"), Style::new().fg(theme.accent)),
                 Span::styled((*d).to_string(), Style::new().fg(theme::FG_DIM)),
             ])
         })
@@ -93,8 +93,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::ACCENT))
-        .style(Style::new().bg(theme::BASE))
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.background))
         .title_top(Line::from(" keys ").style(Style::new().fg(theme::FG_FAINT)));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(body).block(block), rect);
@@ -111,7 +111,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// Overwrite the four deck corners with bracket glyphs in the accent color.
-fn draw_corners(frame: &mut Frame, area: Rect) {
+fn draw_corners(frame: &mut Frame, area: Rect, accent: Color) {
     let buf = frame.buffer_mut();
     let corners = [
         (area.left(), area.top(), "⌜"),
@@ -125,7 +125,7 @@ fn draw_corners(frame: &mut Frame, area: Rect) {
     ];
     for (x, y, sym) in corners {
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_symbol(sym).set_fg(theme::ACCENT);
+            cell.set_symbol(sym).set_fg(accent);
         }
     }
 }
@@ -142,7 +142,7 @@ fn controls_line(model: &AppModel) -> Line<'static> {
     let session = if running {
         Span::styled("F2 ■ stop", Style::new().fg(theme::DANGER))
     } else {
-        Span::styled("F2 ▶ start", Style::new().fg(theme::ACCENT))
+        Span::styled("F2 ▶ start", Style::new().fg(model.theme.accent))
     };
     let mute = if model.mic_muted {
         Span::styled("F3 ⊘ muted", Style::new().fg(theme::DANGER))
@@ -152,7 +152,7 @@ fn controls_line(model: &AppModel) -> Line<'static> {
     let share_color = if !running {
         theme::FG_FAINT
     } else if model.sharing {
-        theme::ACCENT
+        model.theme.accent
     } else {
         theme::FG_DIM
     };
@@ -177,8 +177,13 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
         return;
     }
     let avail = (area.width - CHEVRON_COLS) as usize;
-    let base = Style::new().bg(theme::BASE);
-    let chevron = Span::styled("❯ ", Style::new().fg(theme::ACCENT).bg(theme::BASE));
+    let base = Style::new().bg(model.theme.background);
+    let chevron = Span::styled(
+        "❯ ",
+        Style::new()
+            .fg(model.theme.accent)
+            .bg(model.theme.background),
+    );
 
     // Scroll horizontally just enough to keep the caret in view at the right edge. An empty prompt
     // is just the chevron + the block cursor — no placeholder text.
@@ -230,6 +235,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     // Pre-wrap every entry into display rows so we can slice an exact window (no reliance on
     // Paragraph's internal scroll/line-count). No speaker labels — turns are distinguished by color
     // (see `kind_color`) and separated by a blank line whenever the speaker changes.
+    let accent = model.theme.accent;
     let mut lines: Vec<Line> = Vec::new();
     let mut prev_kind: Option<LineKind> = None;
     for entry in model.transcript.entries() {
@@ -237,7 +243,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
             lines.push(Line::default()); // blank line between turns
         }
         prev_kind = Some(entry.kind);
-        let style = Style::new().fg(kind_color(entry.kind));
+        let style = Style::new().fg(kind_color(entry.kind, accent));
         for piece in textwrap::wrap(&entry.text, width) {
             lines.push(Line::from(piece.into_owned()).style(style));
         }
@@ -262,23 +268,23 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
 
     let window: Vec<Line> = lines.into_iter().skip(top).take(height).collect();
     frame.render_widget(
-        Paragraph::new(window).style(Style::new().bg(theme::BASE)),
+        Paragraph::new(window).style(Style::new().bg(model.theme.background)),
         area,
     );
 }
 
-fn kind_color(kind: LineKind) -> Color {
+fn kind_color(kind: LineKind, accent: Color) -> Color {
     match kind {
-        LineKind::User => theme::ACCENT,
+        LineKind::User => accent,
         LineKind::Agent => theme::FG,
         LineKind::Error => theme::DANGER,
     }
 }
 
-fn brand_line() -> Line<'static> {
+fn brand_line(accent: Color) -> Line<'static> {
     Line::from(Span::styled(
         " JOI ",
-        Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        Style::new().fg(accent).add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -289,12 +295,16 @@ fn status_line(model: &AppModel) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             "●",
-            Style::new().fg(theme::status_dot(model.state, model.tick)),
+            Style::new().fg(theme::status_dot(
+                model.state,
+                model.tick,
+                model.theme.accent,
+            )),
         ),
         Span::raw(" "),
         Span::styled(
             state_label(model.state),
-            Style::new().fg(theme::state_color(model.state)),
+            Style::new().fg(theme::state_color(model.state, model.theme.accent)),
         ),
     ])
 }
@@ -315,11 +325,11 @@ fn footer_line(model: &AppModel) -> Line<'static> {
 
     let (dot_color, label) = if model.is_running() {
         (
-            theme::connection_color(model.connection),
+            theme::connection_color(model.connection, model.theme.accent),
             connection_label(model.connection),
         )
     } else {
-        reachability_display(model.reachability)
+        reachability_display(model.reachability, model.theme.accent)
     };
 
     Line::from(vec![
@@ -347,9 +357,9 @@ fn metrics_text(model: &AppModel) -> String {
 }
 
 /// Color + label for the idle reachability indicator.
-fn reachability_display(reachability: Reachability) -> (Color, &'static str) {
+fn reachability_display(reachability: Reachability, accent: Color) -> (Color, &'static str) {
     match reachability {
-        Reachability::Online => (theme::ACCENT, "online"),
+        Reachability::Online => (accent, "online"),
         Reachability::Checking => (theme::WARN, "checking…"),
         Reachability::Offline => (theme::DANGER, "offline"),
         Reachability::Unauthorized => (theme::DANGER, "key rejected"),

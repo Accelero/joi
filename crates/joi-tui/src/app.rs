@@ -9,6 +9,7 @@ use joi_core::metrics::MetricsSnapshot;
 use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker, UiEvent};
 
 use crate::input::Input;
+use crate::theme::Theme;
 use crate::transcript::Transcript;
 
 /// Lines the transcript scrolls per mouse-wheel notch.
@@ -87,6 +88,8 @@ pub struct AppModel {
     pub reachability: Reachability,
     /// Whether an API key was configured at load (drives the no-key banner).
     pub has_key: bool,
+    /// Configurable colors (background + accent), resolved from config at startup.
+    pub theme: Theme,
     /// The streaming conversation transcript.
     pub transcript: Transcript,
     /// Autoscroll: when `true` the transcript stays pinned to the newest line as content streams.
@@ -123,6 +126,7 @@ impl AppModel {
             connection: ConnectionStatus::Disconnected,
             reachability: Reachability::Unknown,
             has_key,
+            theme: Theme::default(),
             transcript: Transcript::default(),
             follow: true,
             transcript_top: 0,

@@ -15,4 +15,13 @@ font: string,
 /**
  * Scrollback line count.
  */
-scrollback: number, };
+scrollback: number, 
+/**
+ * Background color — a hex string (`#rrggbb`) or `transparent` to inherit the terminal's own
+ * background. Honored by the TUI host (the web frontend keeps its CSS theme).
+ */
+background: string, 
+/**
+ * Accent color as a hex string (`#rrggbb`).
+ */
+accent: string, };

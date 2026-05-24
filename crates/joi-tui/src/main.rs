@@ -52,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(None)?;
     let app = JoiApp::build(config, MediaMode::LocalDevices);
     let mut model = app::AppModel::new(app.has_api_key());
+    // Resolve the configurable colors (background + accent) from the shared `ui.terminal` config.
+    let ui = app.ui_config();
+    model.theme = theme::Theme::from_config(&ui.terminal.background, &ui.terminal.accent);
     let mut events = app.subscribe_events();
 
     // From here on the terminal is in raw/alt-screen mode — restore it on *every* exit path,

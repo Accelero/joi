@@ -221,6 +221,11 @@ pub struct TerminalCfg {
     pub font: String,
     /// Scrollback line count.
     pub scrollback: u32,
+    /// Background color — a hex string (`#rrggbb`) or `transparent` to inherit the terminal's own
+    /// background. Honored by the TUI host (the web frontend keeps its CSS theme).
+    pub background: String,
+    /// Accent color as a hex string (`#rrggbb`).
+    pub accent: String,
 }
 
 /// Logging settings (SPEC §15).
@@ -313,6 +318,8 @@ impl Default for Config {
                     theme: "joi-dark".to_string(),
                     font: "JetBrains Mono".to_string(),
                     scrollback: 5_000,
+                    background: "transparent".to_string(),
+                    accent: "#9aede4".to_string(),
                 },
             },
         }
