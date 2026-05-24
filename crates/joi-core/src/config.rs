@@ -502,7 +502,8 @@ impl Config {
         Ok(())
     }
 
-    /// Atomically (re)write this config as pretty JSON to `path`, with the API key blanked.
+    /// Atomically (re)write this config as pretty JSON to `path`, omitting the fields that live
+    /// elsewhere: the API key (environment) and the system instruction (`~/.joi/prompt.md`).
     ///
     /// This is the single config write path — used by the defaults bootstrap, the legacy migration,
     /// and the runtime settings interface ([`crate::settings`]). It routes through
@@ -516,12 +517,22 @@ impl Config {
         })
     }
 
-    /// Pretty-JSON serialization with the API key blanked out. The key belongs in the environment,
-    /// never on disk (SEC-1), so every persisted form omits it.
+    /// Pretty-JSON serialization of what Joi persists to the config file. Two fields are dropped
+    /// because they have a different home: the **API key** (environment only — SEC-1) and the
+    /// **system instruction** (the persona lives in `~/.joi/prompt.md`). Both are still loaded if a
+    /// stale config carries them, but Joi never writes them back here.
     fn to_redacted_json(&self) -> Result<String, ConfigError> {
         let mut redacted = self.clone();
         redacted.live_api.gemini.api_key = ApiKey::default();
-        serde_json::to_string_pretty(&redacted).map_err(|e| ConfigError::Load(e.to_string()))
+        let mut value =
+            serde_json::to_value(&redacted).map_err(|e| ConfigError::Load(e.to_string()))?;
+        if let Some(gemini) = value
+            .pointer_mut("/live_api/gemini")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            gemini.remove("system_instruction");
+        }
+        serde_json::to_string_pretty(&value).map_err(|e| ConfigError::Load(e.to_string()))
     }
 
     /// Convert a pre-JSON `~/.joi/config` (YAML) into `config.json` (JSON), once. The legacy file is
@@ -809,10 +820,15 @@ mod tests {
         assert!(!path.exists());
         Config::write_default_if_missing(&path).unwrap();
         assert!(path.exists());
-        // The bootstrap file is valid JSON (and carries no secret).
+        // The bootstrap file is valid JSON, carries no secret, and no inline persona (it lives in
+        // prompt.md) — nor a pinned voice (model default until the user picks one).
         let written = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(value["live_api"]["gemini"]["api_key"], "");
+        assert!(value["live_api"]["gemini"]
+            .get("system_instruction")
+            .is_none());
+        assert!(value["live_api"]["gemini"].get("voice").is_none());
         // It round-trips back to the defaults; a model is supplied via env since none is shipped.
         figment::Jail::expect_with(|jail| {
             jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "m");
