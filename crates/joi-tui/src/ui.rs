@@ -34,14 +34,15 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     let inner = deck.inner(area);
     frame.render_widget(deck, area);
 
-    // Top→bottom: controls, divider, transcript (fills), JOI's status line, divider, prompt,
-    // divider, footer. The status line sits with the transcript (it's JOI's state, not the user's
-    // input); dividers fence off the prompt above and the bottom rail below.
+    // Top→bottom: controls, divider, transcript (fills), JOI's status line, a blank breather, the
+    // divider above the prompt, prompt, divider, footer. The status line sits with the transcript
+    // (it's JOI's state, not the user's input); dividers fence off the prompt and the bottom rail.
     let rows = Layout::vertical([
         Constraint::Length(1), // controls
         Constraint::Length(1), // divider
         Constraint::Min(0),    // transcript
         Constraint::Length(1), // status line (JOI's)
+        Constraint::Length(1), // blank line above the prompt's divider
         Constraint::Length(1), // divider
         Constraint::Length(1), // prompt
         Constraint::Length(1), // divider
@@ -52,10 +53,11 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     frame.render_widget(Paragraph::new(divider(rows[1].width)), rows[1]);
     render_transcript(frame, rows[2], model);
     frame.render_widget(Paragraph::new(status_line(model)), rows[3]);
-    frame.render_widget(Paragraph::new(divider(rows[4].width)), rows[4]);
-    render_prompt(frame, rows[5], model);
-    frame.render_widget(Paragraph::new(divider(rows[6].width)), rows[6]);
-    frame.render_widget(Paragraph::new(footer_line(model)), rows[7]);
+    // rows[4] is intentionally left blank (shows the background).
+    frame.render_widget(Paragraph::new(divider(rows[5].width)), rows[5]);
+    render_prompt(frame, rows[6], model);
+    frame.render_widget(Paragraph::new(divider(rows[7].width)), rows[7]);
+    frame.render_widget(Paragraph::new(footer_line(model)), rows[8]);
 
     // HUD corner brackets over the deck's rounded corners (echoes the web `.deck-corner` crop marks).
     draw_corners(frame, area, model.theme.accent);
