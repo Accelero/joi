@@ -126,5 +126,9 @@ fn test_sample_rate_matches_configured() {
 fn test_channel_count_matches_configured() {
     let codec = OpusCodec::new(24000, 1).expect("Failed to create OpusCodec at 24kHz mono");
 
-    assert_eq!(codec.channels(), Channels::Mono, "Codec channels do not match configured mono");
+    assert_eq!(
+        codec.channels(),
+        Channels::Mono,
+        "Codec channels do not match configured mono"
+    );
 }

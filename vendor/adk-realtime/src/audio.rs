@@ -55,7 +55,12 @@ impl AudioFormat {
         bits_per_sample: u8,
         encoding: AudioEncoding,
     ) -> Self {
-        Self { sample_rate, channels, bits_per_sample, encoding }
+        Self {
+            sample_rate,
+            channels,
+            bits_per_sample,
+            encoding,
+        }
     }
 
     /// Standard PCM16 format at 24kHz (OpenAI default).
@@ -202,7 +207,11 @@ pub struct SmartAudioBuffer {
 impl SmartAudioBuffer {
     /// Create a new smart audio buffer.
     pub fn new(sample_rate: u32, target_duration_ms: u32) -> Self {
-        Self { buffer: Vec::new(), sample_rate, target_duration_ms }
+        Self {
+            buffer: Vec::new(),
+            sample_rate,
+            target_duration_ms,
+        }
     }
 
     /// Push new samples into the buffer.
@@ -218,12 +227,20 @@ impl SmartAudioBuffer {
 
     /// Flush the buffer if the target duration has been reached.
     pub fn flush(&mut self) -> Option<Vec<i16>> {
-        if self.should_flush() { Some(std::mem::take(&mut self.buffer)) } else { None }
+        if self.should_flush() {
+            Some(std::mem::take(&mut self.buffer))
+        } else {
+            None
+        }
     }
 
     /// Flush any remaining samples in the buffer.
     pub fn flush_remaining(&mut self) -> Option<Vec<i16>> {
-        if self.buffer.is_empty() { None } else { Some(std::mem::take(&mut self.buffer)) }
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.buffer))
+        }
     }
 }
 

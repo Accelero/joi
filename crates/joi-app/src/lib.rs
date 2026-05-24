@@ -1,31 +1,39 @@
-//! Host-agnostic application layer for JOI (Seam A). A host — the Tauri shell, the `joi-cli` binary,
-//! or a future HTTP/WS server — builds a [`JoiApp`] from a [`Config`] and drives it via these
-//! methods plus the event/audio streams. No Tauri, webview, HTTP, or CLI types appear here, so the
-//! engine can be operated headlessly.
+//! Composition root + Seam-A API for JOI. A host — the TUI today, a future out-of-process backend
+//! or WS server — builds a [`JoiApp`] from a [`Config`] and drives it via these methods plus the
+//! event/audio streams. No host, frontend, or transport types appear here, so the engine can be
+//! operated headlessly (PLAN §8).
 //!
-//! The command set mirrors the IPC surface (SPEC §11.1): [`JoiApp::start`]/[`stop`](JoiApp::stop)/
-//! [`send_text`](JoiApp::send_text)/[`set_mic_muted`](JoiApp::set_mic_muted)/
-//! [`start_screenshare`](JoiApp::start_screenshare)/[`stop_screenshare`](JoiApp::stop_screenshare)/
-//! [`has_api_key`](JoiApp::has_api_key). Outputs are the [`subscribe_events`](JoiApp::subscribe_events)
-//! `UiEvent` stream and, for headless hosts, the [`send_audio`](JoiApp::send_audio) /
-//! [`subscribe_audio`](JoiApp::subscribe_audio) raw-audio transport.
+//! The command surface: [`JoiApp::start`]/[`stop`](JoiApp::stop)/[`send_text`](JoiApp::send_text)/
+//! [`set_mic_muted`](JoiApp::set_mic_muted)/[`start_screenshare`](JoiApp::start_screenshare)/
+//! [`stop_screenshare`](JoiApp::stop_screenshare)/[`has_api_key`](JoiApp::has_api_key) plus the
+//! session commands [`list_sessions`](JoiApp::list_sessions)/[`current_session`](JoiApp::current_session)/
+//! [`new_session`](JoiApp::new_session)/[`resume_session`](JoiApp::resume_session). Outputs are the
+//! [`subscribe_events`](JoiApp::subscribe_events) `UiEvent` stream and, for headless hosts, the
+//! [`send_audio`](JoiApp::send_audio) / [`subscribe_audio`](JoiApp::subscribe_audio) raw-audio
+//! transport.
 
 use std::sync::Arc;
 
 use joi_core::clock::SystemClock;
 use joi_core::config::{Config, UiCfg};
 use joi_core::error::SessionError;
-use joi_core::history::{HistoryStore, InMemoryHistory, SessionStore};
+use joi_core::history::{HistoryStore, InMemoryHistory, SessionStore, SessionSummary};
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
 use joi_core::media::AudioFormat;
 use joi_core::session::event::UiEvent;
 use joi_media::{MediaConfig, MediaEngine};
 use tokio::sync::broadcast;
 
+/// Error when a session operation is requested but no persisted-session store exists (no API key,
+/// or the in-memory fallback is active).
+fn sessions_unavailable() -> SessionError {
+    SessionError::Provider("session history is not available".to_string())
+}
+
 /// Whether the engine drives local audio/screen devices itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaMode {
-    /// Desktop: native cpal mic/playback + xcap screen, bound to the session.
+    /// Desktop/TUI: native cpal mic/playback + xcap screen, bound to the session.
     LocalDevices,
     /// Headless: no local devices. The host feeds/consumes audio via [`JoiApp::send_audio`] /
     /// [`JoiApp::subscribe_audio`] instead.
@@ -38,8 +46,11 @@ pub struct JoiApp {
     handle: Option<SessionManagerHandle>,
     media: Option<MediaEngine>,
     has_key: bool,
-    /// Web-frontend settings, surfaced to hosts via [`JoiApp::ui_config`] (Seam B's `get_ui_config`).
+    /// Frontend settings, surfaced to hosts via [`JoiApp::ui_config`].
     ui: UiCfg,
+    /// Persisted-session repository for list/resume/new, shared with the manager (it appends turns
+    /// to the same store). `None` when sessions aren't persisted (no key, or in-memory fallback).
+    sessions: Option<Arc<SessionStore>>,
 }
 
 impl JoiApp {
@@ -57,16 +68,20 @@ impl JoiApp {
                 // Persist this run's conversation as a new session under ~/.joi/sessions. Falls back
                 // to in-memory history if the dir is unset (headless/tests) or can't be created, so
                 // the app still runs. `config.history.dir` was resolved by `Config::load`.
-                let history: Arc<dyn HistoryStore> = match config.history.dir.clone() {
-                    Some(dir) => match SessionStore::create_new(dir, clock.clone()) {
-                        Ok(store) => Arc::new(store),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "session store unavailable; using in-memory history");
-                            Arc::new(InMemoryHistory::new())
-                        }
-                    },
-                    None => Arc::new(InMemoryHistory::new()),
-                };
+                let (history, sessions): (Arc<dyn HistoryStore>, Option<Arc<SessionStore>>) =
+                    match config.history.dir.clone() {
+                        Some(dir) => match SessionStore::create_new(dir, clock.clone()) {
+                            Ok(store) => {
+                                let store = Arc::new(store);
+                                (store.clone(), Some(store))
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "session store unavailable; using in-memory history");
+                                (Arc::new(InMemoryHistory::new()), None)
+                            }
+                        },
+                        None => (Arc::new(InMemoryHistory::new()), None),
+                    };
                 // Read what local media needs from `config` before moving it into the manager.
                 let media_config = MediaConfig {
                     input_device: config.media.audio.input_device.clone(),
@@ -93,6 +108,7 @@ impl JoiApp {
                     media,
                     has_key,
                     ui,
+                    sessions,
                 }
             }
             Err(e) => {
@@ -102,6 +118,7 @@ impl JoiApp {
                     media: None,
                     has_key,
                     ui,
+                    sessions: None,
                 }
             }
         }
@@ -137,8 +154,8 @@ impl JoiApp {
         self.session()?.send_text(text).await
     }
 
-    /// Push a mic frame (16 kHz mono PCM16) — for headless hosts; the desktop's `MediaEngine` feeds
-    /// audio itself.
+    /// Push a mic frame (16 kHz mono PCM16) — for headless hosts; the desktop/TUI's `MediaEngine`
+    /// feeds audio itself.
     pub async fn send_audio(&self, pcm: Vec<i16>) -> Result<(), SessionError> {
         self.session()?.send_audio(pcm).await
     }
@@ -189,8 +206,47 @@ impl JoiApp {
         self.has_key
     }
 
-    /// The web-frontend settings (the `ui` config section) for a host to hand to its UI. Engine
-    /// logic never reads these — they exist only to be delivered to the presentation layer.
+    /// List persisted sessions, **newest-activity first** — the data a `/resume` picker renders.
+    /// Empty when sessions aren't persisted (headless / no key).
+    pub async fn list_sessions(&self) -> Vec<SessionSummary> {
+        match &self.sessions {
+            Some(s) => SessionStore::list(s.dir()).await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Summary of the session currently in use (`None` when sessions aren't persisted).
+    pub async fn current_session(&self) -> Option<SessionSummary> {
+        match &self.sessions {
+            Some(s) => Some(s.current_summary().await),
+            None => None,
+        }
+    }
+
+    /// Switch to a brand-new session. **Stops** any live session first so no trailing turn lands in
+    /// it; the next [`start`](Self::start) seeds the (empty) new session. Returns its summary.
+    pub async fn new_session(&self) -> Result<SessionSummary, SessionError> {
+        self.stop(false).await?;
+        let store = self.sessions.as_ref().ok_or_else(sessions_unavailable)?;
+        store
+            .start_new()
+            .await
+            .map_err(|e| SessionError::Provider(e.to_string()))
+    }
+
+    /// Resume an existing session by id. **Stops** any live session first, then retargets the store
+    /// so the next [`start`](Self::start) seeds the resumed conversation. Returns its summary.
+    pub async fn resume_session(&self, id: &str) -> Result<SessionSummary, SessionError> {
+        self.stop(false).await?;
+        let store = self.sessions.as_ref().ok_or_else(sessions_unavailable)?;
+        store
+            .switch_to(id)
+            .await
+            .map_err(|e| SessionError::Provider(e.to_string()))
+    }
+
+    /// The frontend settings (the `ui` config section) for a host to hand to its UI. Engine logic
+    /// never reads these — they exist only to be delivered to the presentation layer.
     #[must_use]
     pub fn ui_config(&self) -> UiCfg {
         self.ui.clone()

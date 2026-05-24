@@ -47,7 +47,10 @@ async fn test_openai_webrtc_text_exchange() {
             .with_voice("alloy");
 
         // Connect via WebRTC (SDP signaling happens internally)
-        let session = model.connect(config).await.expect("Failed to connect via OpenAI WebRTC");
+        let session = model
+            .connect(config)
+            .await
+            .expect("Failed to connect via OpenAI WebRTC");
 
         assert!(
             session.is_connected(),
@@ -78,9 +81,15 @@ async fn test_openai_webrtc_text_exchange() {
             }
         }
 
-        assert!(received_event, "Should have received at least one response event via WebRTC");
+        assert!(
+            received_event,
+            "Should have received at least one response event via WebRTC"
+        );
 
-        session.close().await.expect("Failed to close WebRTC session");
+        session
+            .close()
+            .await
+            .expect("Failed to close WebRTC session");
     })
     .await
     .expect("Test timed out after 30s");
@@ -107,7 +116,10 @@ async fn test_openai_webrtc_audio_roundtrip() {
             .with_instruction("You are a helpful assistant.")
             .with_voice("alloy");
 
-        let session = model.connect(config).await.expect("Failed to connect via OpenAI WebRTC");
+        let session = model
+            .connect(config)
+            .await
+            .expect("Failed to connect via OpenAI WebRTC");
 
         // Create a short PCM16 audio chunk (480 samples of silence at 24kHz = 20ms)
         let silence_pcm: Vec<i16> = vec![0i16; 480];
@@ -120,13 +132,22 @@ async fn test_openai_webrtc_audio_roundtrip() {
             .await
             .expect("Failed to send audio over WebRTC media track");
 
-        session.commit_audio().await.expect("Failed to commit audio buffer");
+        session
+            .commit_audio()
+            .await
+            .expect("Failed to commit audio buffer");
 
         // We may or may not get a meaningful response from silence,
         // but the session should remain connected and not error out.
-        assert!(session.is_connected(), "Session should remain connected after sending audio");
+        assert!(
+            session.is_connected(),
+            "Session should remain connected after sending audio"
+        );
 
-        session.close().await.expect("Failed to close WebRTC session");
+        session
+            .close()
+            .await
+            .expect("Failed to close WebRTC session");
     })
     .await
     .expect("Test timed out after 30s");
@@ -147,14 +168,20 @@ async fn test_openai_webrtc_session_id() {
 
         let config = RealtimeConfig::default();
 
-        let session = model.connect(config).await.expect("Failed to connect via OpenAI WebRTC");
+        let session = model
+            .connect(config)
+            .await
+            .expect("Failed to connect via OpenAI WebRTC");
 
         assert!(
             !session.session_id().is_empty(),
             "Session ID should be non-empty after WebRTC connection"
         );
 
-        session.close().await.expect("Failed to close WebRTC session");
+        session
+            .close()
+            .await
+            .expect("Failed to close WebRTC session");
     })
     .await
     .expect("Test timed out after 30s");

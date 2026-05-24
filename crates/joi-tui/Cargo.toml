@@ -1,6 +1,6 @@
 [package]
 name = "joi-tui"
-description = "Native terminal-UI host for the JOI engine (ratatui/crossterm). No Tauri."
+description = "Native terminal-UI host for the JOI engine (ratatui/crossterm). The only frontend today."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

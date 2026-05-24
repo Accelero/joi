@@ -1,6 +1,6 @@
 //! Rendering: turn an [`AppModel`] into ratatui widgets. Thin and logic-free — it only reads the
-//! model and the wall clock. The deck frame (rounded border + brand/clock header) echoes the web
-//! `.deck`; the transcript, prompt, controls, and footer fill in across M2–M5.
+//! model and the wall clock. The deck frame (rounded border + brand/clock header) wraps the
+//! transcript, prompt, controls, and footer; overlays (help, the `/resume` picker) float on top.
 
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -61,11 +61,15 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     frame.render_widget(Paragraph::new(divider(rows[7].width)), rows[7]);
     frame.render_widget(Paragraph::new(footer_line(model)), rows[8]);
 
-    // HUD corner brackets over the deck's rounded corners (echoes the web `.deck-corner` crop marks).
+    // HUD corner brackets over the deck's rounded corners.
     draw_corners(frame, area, model.theme.accent);
 
     if model.show_help {
         render_help(frame, area, model.theme);
+    }
+    // The picker floats over everything else when open.
+    if model.picker.is_some() {
+        render_picker(frame, area, model);
     }
 }
 
@@ -80,6 +84,8 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
         ("Home / End", "oldest / newest"),
         ("F1 / Esc", "toggle help / clear"),
         ("Ctrl+C / Ctrl+Q", "quit"),
+        ("/resume", "list & resume a session"),
+        ("/new", "start a fresh session"),
         ("/exit", "quit (or /quit, /q)"),
     ];
     let body: Vec<Line> = keys
@@ -103,6 +109,80 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
         .title_top(Line::from(" keys ").style(Style::new().fg(theme::FG_FAINT)));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(body).block(block), rect);
+}
+
+/// The `/resume` session picker overlay: a centered list of sessions, newest-activity first, with
+/// the highlighted row in the accent color. ↑/↓ move, Enter resumes, Esc cancels.
+fn render_picker(frame: &mut Frame, area: Rect, model: &AppModel) {
+    let Some(picker) = model.picker.as_ref() else {
+        return;
+    };
+    let theme = model.theme;
+
+    let body: Vec<Line> = if picker.is_empty() {
+        vec![Line::from(Span::styled(
+            " no saved sessions yet",
+            Style::new().fg(theme::FG_FAINT),
+        ))]
+    } else {
+        picker
+            .sessions()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == picker.selected();
+                let marker = if selected { "❯ " } else { "  " };
+                let name = s.meta.name.as_deref().unwrap_or("(unnamed session)");
+                let when = format_when(s.meta.last_updated);
+                let style = if selected {
+                    Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(theme::FG_DIM)
+                };
+                Line::from(vec![
+                    Span::styled(format!("{marker}{name}"), style),
+                    Span::styled(format!("  {when}"), Style::new().fg(theme::FG_FAINT)),
+                ])
+            })
+            .collect()
+    };
+
+    let width = 60.min(area.width);
+    // Title + bottom hint + the rows, capped to the available height.
+    let height = (body.len() as u16 + 3).min(area.height);
+    let rect = centered_rect(area, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.background))
+        .title_top(Line::from(" resume session ").style(Style::new().fg(theme::FG_FAINT)))
+        .title_bottom(
+            Line::from(" ↑/↓ select · enter open · esc cancel ")
+                .centered()
+                .style(Style::new().fg(theme::FG_FAINT)),
+        );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .style(Style::new().bg(theme.background)),
+        rect,
+    );
+}
+
+/// Format a `last_updated` millis timestamp as a short local `MM-DD HH:MM`, or `—` if unparseable.
+fn format_when(ms: u64) -> String {
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    let nsec = ((ms % 1000) * 1_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, nsec).map_or_else(
+        || "—".to_string(),
+        |dt| {
+            chrono::DateTime::<chrono::Local>::from(dt)
+                .format("%m-%d %H:%M")
+                .to_string()
+        },
+    )
 }
 
 /// A `w`×`h` rectangle centered within `area` (clamped to it).
@@ -201,8 +281,11 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
     ]);
     frame.render_widget(Paragraph::new(line).style(base), area);
 
-    let cursor_x = area.x + CHEVRON_COLS + (caret_col - h_scroll) as u16;
-    frame.set_cursor_position((cursor_x.min(area.x + area.width - 1), area.y));
+    // While the picker is open the prompt is inert — don't steal the cursor into it.
+    if model.picker.is_none() {
+        let cursor_x = area.x + CHEVRON_COLS + (caret_col - h_scroll) as u16;
+        frame.set_cursor_position((cursor_x.min(area.x + area.width - 1), area.y));
+    }
 }
 
 /// The substring of `s` spanning display columns `[start, start + width)`. Wide chars straddling an
@@ -228,7 +311,7 @@ fn slice_by_cols(s: &str, start: usize, width: usize) -> String {
 }
 
 /// Render the transcript, wrapped to width and anchored to the bottom (newest visible), offset by
-/// `transcript_scroll` lines. Clamps the stored scroll against the real content height — the only
+/// `transcript_top` lines. Clamps the stored scroll against the real content height — the only
 /// thing render mutates on the model.
 fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     let width = area.width as usize;
@@ -292,10 +375,10 @@ fn brand_line(accent: Color) -> Line<'static> {
     ))
 }
 
-/// The lifecycle status line (above the prompt): a glowing dot + state label, like the web
-/// `tui-status`. The dot animates per state (see `theme::status_dot`); the label keeps the steady
-/// state color. When stopped there's no live state to show, so the line is left blank — its row
-/// stays reserved by the layout so nothing below it shifts.
+/// The lifecycle status line (above the prompt): a glowing dot + state label. The dot animates per
+/// state (see `theme::status_dot`); the label keeps the steady state color. When stopped there's no
+/// live state to show, so the line is left blank — its row stays reserved by the layout so nothing
+/// below it shifts.
 fn status_line(model: &AppModel) -> Line<'static> {
     if model.state == AppState::Stopped {
         return Line::default();
@@ -529,6 +612,30 @@ mod tests {
             "corners missing: {text}"
         );
         assert!(text.contains('─'), "divider rule missing: {text}");
+    }
+
+    #[test]
+    fn picker_overlay_lists_sessions() {
+        use joi_core::history::{SessionMeta, SessionSummary};
+        let mut model = AppModel::new(true);
+        model.open_picker(vec![SessionSummary {
+            id: "abc".into(),
+            meta: SessionMeta {
+                name: Some("morning chat".into()),
+                created_at: 0,
+                last_opened: 0,
+                last_updated: 0,
+            },
+        }]);
+        let text = render_to_string(model);
+        assert!(
+            text.contains("resume session"),
+            "picker title missing: {text}"
+        );
+        assert!(
+            text.contains("morning chat"),
+            "session name missing: {text}"
+        );
     }
 
     #[test]

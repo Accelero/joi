@@ -67,7 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     println!("Injecting ping message...");
-    runner.send_text("Hello, answer with 'pong' if you hear me.").await?;
+    runner
+        .send_text("Hello, answer with 'pong' if you hear me.")
+        .await?;
 
     println!("Waiting for response (5s)...");
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;

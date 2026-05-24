@@ -38,12 +38,18 @@ fn main() {
     // Step 2: Create the avatar configuration
     let avatar_config = AvatarConfig {
         source_url: "avatar_id_from_heygen_dashboard".to_string(),
-        lip_sync: Some(LipSyncConfig { enabled: true, sync_mode: Some("viseme".to_string()) }),
+        lip_sync: Some(LipSyncConfig {
+            enabled: true,
+            sync_mode: Some("viseme".to_string()),
+        }),
         rendering: None,
         provider: Some(AvatarProviderKind::HeyGen),
     };
 
-    println!("Avatar config: {}", serde_json::to_string_pretty(&avatar_config).unwrap());
+    println!(
+        "Avatar config: {}",
+        serde_json::to_string_pretty(&avatar_config).unwrap()
+    );
 
     // Step 3: Show how to wire into RealtimeAgentBuilder
     println!("\n// Usage with RealtimeAgentBuilder:");

@@ -103,7 +103,12 @@ impl OpusCodec {
         let decoder = Decoder::new(sample_rate, channels)
             .map_err(|e| RealtimeError::opus(format!("Failed to create Opus decoder: {e}")))?;
 
-        Ok(Self { encoder, decoder, sample_rate, channels })
+        Ok(Self {
+            encoder,
+            decoder,
+            sample_rate,
+            channels,
+        })
     }
 
     /// Encodes PCM16 audio samples to an Opus frame.
@@ -610,7 +615,9 @@ impl OpenAIWebRTCSession {
         // scaled from the codec sample rate (24 kHz) to the negotiated clock rate.
         let clock_hz = self.clock_rate.get() as u64;
         let samples_at_clock = (pcm_samples.len() as u64) * clock_hz / 24000;
-        let rtp_offset = self.rtp_sample_offset.fetch_add(samples_at_clock, Ordering::Relaxed);
+        let rtp_offset = self
+            .rtp_sample_offset
+            .fetch_add(samples_at_clock, Ordering::Relaxed);
 
         // Write Opus frame to the str0m audio track.
         // str0m is Sans-IO: `writer(mid).write(...)` queues the media for the
@@ -676,8 +683,10 @@ impl OpenAITransportLink for OpenAIWebRTCSession {
             )));
         }
 
-        let pcm_samples: Vec<i16> =
-            raw_bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let pcm_samples: Vec<i16> = raw_bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
 
         self.write_audio_to_track(&pcm_samples).await
     }

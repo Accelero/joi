@@ -79,7 +79,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             ServerEvent::Error { error, .. } => {
-                eprintln!("\nError from server: {} - {}", error.error_type, error.message);
+                eprintln!(
+                    "\nError from server: {} - {}",
+                    error.error_type, error.message
+                );
                 break;
             }
             _ => {

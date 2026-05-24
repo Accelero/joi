@@ -14,7 +14,7 @@ pub enum ConfigError {
     /// A field was present but outside its allowed range / enum.
     #[error("invalid configuration: {field}: {reason}")]
     Invalid {
-        /// Dotted path of the offending field, e.g. `audio.frame_ms`.
+        /// Dotted path of the offending field, e.g. `media.audio.frame_ms`.
         field: String,
         /// Human-readable reason the value was rejected.
         reason: String,
@@ -47,8 +47,9 @@ pub enum SessionError {
     /// The provider sent a protocol-level error.
     #[error("provider error: {0}")]
     Provider(String),
-    /// This adapter is a compile-only stub (e.g. OpenAI in the MVP — SPEC §4.4).
-    #[error("provider not implemented: {0}")]
+    /// A capability whose seam exists but is not wired in the MVP (e.g. tool results — FR-24
+    /// is `[LATER]`; PLAN §2, §8).
+    #[error("not implemented: {0}")]
     Unimplemented(&'static str),
 }
 
@@ -63,7 +64,7 @@ pub enum HistoryError {
     Serde(String),
 }
 
-/// Failure on a [`crate::capture::ScreenSource`].
+/// Failure on a [`crate::media::ScreenSource`].
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
     /// No capture backend is available on this platform/session.

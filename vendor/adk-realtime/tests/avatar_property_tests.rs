@@ -49,13 +49,22 @@ fn arb_resolution() -> impl Strategy<Value = String> {
 
 /// Generate an arbitrary RenderingConfig.
 fn arb_rendering_config() -> impl Strategy<Value = RenderingConfig> {
-    (proptest::option::of(arb_resolution()), proptest::option::of(1u32..120))
-        .prop_map(|(resolution, frame_rate)| RenderingConfig { resolution, frame_rate })
+    (
+        proptest::option::of(arb_resolution()),
+        proptest::option::of(1u32..120),
+    )
+        .prop_map(|(resolution, frame_rate)| RenderingConfig {
+            resolution,
+            frame_rate,
+        })
 }
 
 /// Generate an arbitrary AvatarProviderKind.
 fn arb_provider_kind() -> impl Strategy<Value = AvatarProviderKind> {
-    prop_oneof![Just(AvatarProviderKind::HeyGen), Just(AvatarProviderKind::DId),]
+    prop_oneof![
+        Just(AvatarProviderKind::HeyGen),
+        Just(AvatarProviderKind::DId),
+    ]
 }
 
 /// Generate an arbitrary AvatarConfig.

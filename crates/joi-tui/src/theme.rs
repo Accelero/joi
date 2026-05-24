@@ -1,6 +1,6 @@
-//! The minimal-mono / refined-HUD palette, ported from the web frontend (`src/index.css`,
-//! `Terminal.tsx`) to ratatui `Color::Rgb`. Pure presentation data — colors and the per-state status
-//! mapping that mirrors `Prompt.tsx`'s `STATUS` map. Animation helpers (glow/blink) arrive in M5.
+//! The minimal-mono / refined-HUD palette as ratatui `Color::Rgb`. Pure presentation data — colors,
+//! the per-state status mapping, and the status-dot animation. The two configurable colors
+//! (background + accent) come from `ui.terminal`; everything else is fixed.
 
 use joi_core::session::event::{AppState, ConnectionStatus};
 use ratatui::style::Color;
@@ -69,7 +69,7 @@ fn parse_hex(s: &str) -> Option<Color> {
     Some(Color::Rgb(red, green, blue))
 }
 
-/// Lifecycle-state accent, mirroring the web `STATUS` color map.
+/// Lifecycle-state accent.
 pub fn state_color(state: AppState, accent: Color) -> Color {
     match state {
         AppState::Stopped => FG_FAINT,
@@ -81,7 +81,7 @@ pub fn state_color(state: AppState, accent: Color) -> Color {
     }
 }
 
-/// Connection-status accent (reuses the lifecycle vocabulary, like `App.tsx`'s `CONN_COLOR`).
+/// Connection-status accent (reuses the lifecycle vocabulary).
 pub fn connection_color(status: ConnectionStatus, accent: Color) -> Color {
     match status {
         ConnectionStatus::Disconnected => FG_FAINT,
@@ -90,10 +90,10 @@ pub fn connection_color(status: ConnectionStatus, accent: Color) -> Color {
     }
 }
 
-/// The animated status-dot color for the current render tick, mirroring `Prompt.tsx`'s STATUS
-/// animations: a calm glow while listening, a faster one while thinking, a livelier (deeper) pulse
-/// while speaking, and a brightness blink for the transient connecting/reconnecting states. Steady
-/// when stopped or errored. Periods are in render ticks (~80 ms each).
+/// The animated status-dot color for the current render tick: a calm glow while listening, a faster
+/// one while thinking, a livelier (deeper) pulse while speaking, and a brightness blink for the
+/// transient connecting/reconnecting states. Steady when stopped or errored. Periods are in render
+/// ticks (~80 ms each).
 pub fn status_dot(state: AppState, tick: u64, accent: Color) -> Color {
     match state {
         AppState::Stopped => FG_FAINT,

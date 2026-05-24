@@ -55,7 +55,9 @@ pub enum GeminiLiveBackend {
 impl GeminiLiveBackend {
     /// Create a Studio backend with API key authentication.
     pub fn studio(api_key: impl Into<String>) -> Self {
-        Self::Studio { api_key: api_key.into() }
+        Self::Studio {
+            api_key: api_key.into(),
+        }
     }
 
     /// Create a Vertex AI backend using Application Default Credentials (ADC).
@@ -73,13 +75,18 @@ impl GeminiLiveBackend {
     /// ```
     #[cfg(feature = "vertex-live")]
     pub fn vertex_adc(project_id: impl Into<String>, region: impl Into<String>) -> Result<Self> {
-        let credentials =
-            google_cloud_auth::credentials::Builder::default().build().map_err(|e| {
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .build()
+            .map_err(|e| {
                 RealtimeError::AuthError(format!(
                     "Failed to discover Application Default Credentials: {e}"
                 ))
             })?;
-        Ok(Self::Vertex { credentials, region: region.into(), project_id: project_id.into() })
+        Ok(Self::Vertex {
+            credentials,
+            region: region.into(),
+            project_id: project_id.into(),
+        })
     }
 }
 
@@ -236,7 +243,10 @@ impl GeminiRealtimeSession {
         let bytes_per_second = format.bytes_per_second() as usize;
         // Compute target bytes for a 40ms chunk and round up so we don't under-buffer.
         // `max(1)` keeps the threshold valid even for pathological/invalid formats.
-        bytes_per_second.saturating_mul(AUDIO_FLUSH_TARGET_MS).div_ceil(1000).max(1)
+        bytes_per_second
+            .saturating_mul(AUDIO_FLUSH_TARGET_MS)
+            .div_ceil(1000)
+            .max(1)
     }
 
     /// Connect to Gemini Live API using the specified backend.
@@ -261,7 +271,11 @@ impl GeminiRealtimeSession {
                 ws
             }
             #[cfg(feature = "vertex-live")]
-            GeminiLiveBackend::Vertex { credentials, region, project_id } => {
+            GeminiLiveBackend::Vertex {
+                credentials,
+                region,
+                project_id,
+            } => {
                 let url = build_vertex_live_url(region, project_id)?;
 
                 // Obtain OAuth2 bearer token from ADC credentials
@@ -374,7 +388,11 @@ impl GeminiRealtimeSession {
     async fn flush_audio(&self) -> Result<()> {
         let data = {
             let mut buffer = self.audio_buffer.lock();
-            if !buffer.is_empty() { Some(std::mem::take(&mut *buffer).freeze()) } else { None }
+            if !buffer.is_empty() {
+                Some(std::mem::take(&mut *buffer).freeze())
+            } else {
+                None
+            }
         };
 
         if let Some(data) = data {
@@ -421,7 +439,10 @@ impl GeminiRealtimeSession {
         }
 
         let system_instruction = config.instruction.map(|text| GeminiContent {
-            parts: vec![GeminiPart { text: Some(text), inline_data: None }],
+            parts: vec![GeminiPart {
+                text: Some(text),
+                inline_data: None,
+            }],
         });
 
         let tools = convert_tools(config.tools);
@@ -491,7 +512,8 @@ impl GeminiRealtimeSession {
         // PATCH(joi): count the inbound frame's payload size (base64+JSON) before it's consumed.
         let next = receiver.next().await;
         if let Some(Ok(message)) = &next {
-            self.bytes_received.fetch_add(message.len() as u64, Ordering::Relaxed);
+            self.bytes_received
+                .fetch_add(message.len() as u64, Ordering::Relaxed);
         }
         match next {
             Some(Ok(Message::Text(text))) => match self.translate_gemini_event(&text) {
@@ -535,7 +557,10 @@ impl GeminiRealtimeSession {
             }
             Some(Err(e)) => {
                 self.connected.store(false, Ordering::SeqCst);
-                Some(Err(RealtimeError::connection(format!("Receive error: {}", e))))
+                Some(Err(RealtimeError::connection(format!(
+                    "Receive error: {}",
+                    e
+                ))))
             }
             None => {
                 self.connected.store(false, Ordering::SeqCst);
@@ -558,7 +583,11 @@ impl GeminiRealtimeSession {
         }
         if let Some(response) = count("responseTokenCount") {
             let last = self.last_response_tokens.swap(response, Ordering::Relaxed);
-            let delta = if response >= last { response - last } else { response };
+            let delta = if response >= last {
+                response - last
+            } else {
+                response
+            };
             self.output_tokens.fetch_add(delta, Ordering::Relaxed);
         }
     }
@@ -688,7 +717,10 @@ impl GeminiRealtimeSession {
         // but the server transmits the parameter back as resumptionToken.
         // Reference: https://ai.google.dev/gemini-api/docs/live-api/session-management
         if let Some(resumption_update) = value.get("sessionResumptionUpdate") {
-            if let Some(token) = resumption_update.get("resumptionToken").and_then(|t| t.as_str()) {
+            if let Some(token) = resumption_update
+                .get("resumptionToken")
+                .and_then(|t| t.as_str())
+            {
                 tracing::debug!("Received new Gemini 2.5 Native resumption token");
                 return Ok(vec![ServerEvent::SessionUpdated {
                     event_id: uuid::Uuid::new_v4().to_string(),
@@ -836,7 +868,10 @@ impl RealtimeSession for GeminiRealtimeSession {
             client_content: Some(GeminiClientContent {
                 turns: vec![GeminiTurn {
                     role: "user".to_string(),
-                    parts: vec![GeminiPart { text: Some(text.to_string()), inline_data: None }],
+                    parts: vec![GeminiPart {
+                        text: Some(text.to_string()),
+                        inline_data: None,
+                    }],
                 }],
                 turn_complete: true,
             }),
@@ -970,7 +1005,9 @@ impl RealtimeSession for GeminiRealtimeSession {
                 tracing::error!(
                     "Internal UpdateSession intent leaked to the Gemini transport socket. This should have been intercepted by the RealtimeRunner."
                 );
-                Err(RealtimeError::ProviderError("Internal intent leaked to transport".to_string()))
+                Err(RealtimeError::ProviderError(
+                    "Internal intent leaked to transport".to_string(),
+                ))
             }
         }
     }
@@ -1030,10 +1067,14 @@ impl std::fmt::Debug for GeminiRealtimeSession {
 #[cfg(feature = "vertex-live")]
 pub fn build_vertex_live_url(region: &str, project_id: &str) -> Result<String> {
     if region.is_empty() {
-        return Err(RealtimeError::config("Vertex AI Live requires a non-empty region"));
+        return Err(RealtimeError::config(
+            "Vertex AI Live requires a non-empty region",
+        ));
     }
     if project_id.is_empty() {
-        return Err(RealtimeError::config("Vertex AI Live requires a non-empty project_id"));
+        return Err(RealtimeError::config(
+            "Vertex AI Live requires a non-empty project_id",
+        ));
     }
     Ok(format!(
         "wss://{region}-aiplatform.googleapis.com/ws/\
@@ -1053,14 +1094,20 @@ pub(crate) fn translate_client_message(
     for p in parts {
         match p {
             adk_core::types::Part::Text { text } => {
-                gemini_parts.push(GeminiPart { text: Some(text), inline_data: None });
+                gemini_parts.push(GeminiPart {
+                    text: Some(text),
+                    inline_data: None,
+                });
             }
             adk_core::types::Part::InlineData { mime_type, data } => {
                 // Gemini natively encodes binary artifacts (images/audio) via a base64 payload envelope.
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
                 gemini_parts.push(GeminiPart {
                     text: None,
-                    inline_data: Some(GeminiInlineData { mime_type, data: encoded }),
+                    inline_data: Some(GeminiInlineData {
+                        mime_type,
+                        data: encoded,
+                    }),
                 });
             }
 
@@ -1137,7 +1184,10 @@ pub(crate) fn translate_client_message(
         realtime_input: None,
         tool_response: None,
         client_content: Some(GeminiClientContent {
-            turns: vec![GeminiTurn { role: gemini_role, parts: final_parts }],
+            turns: vec![GeminiTurn {
+                role: gemini_role,
+                parts: final_parts,
+            }],
             turn_complete: true,
         }),
     }
@@ -1168,7 +1218,9 @@ mod tests {
 
     #[test]
     fn test_gemini_translate_text_only() {
-        let parts = vec![Part::Text { text: "Hello".to_string() }];
+        let parts = vec![Part::Text {
+            text: "Hello".to_string(),
+        }];
         let msg = translate_client_message("user", parts);
 
         let content = msg.client_content.unwrap();
@@ -1184,8 +1236,13 @@ mod tests {
     #[test]
     fn test_gemini_translate_text_and_inline_data() {
         let parts = vec![
-            Part::Text { text: "Look:".to_string() },
-            Part::InlineData { mime_type: "image/png".to_string(), data: vec![0x1, 0x2] },
+            Part::Text {
+                text: "Look:".to_string(),
+            },
+            Part::InlineData {
+                mime_type: "image/png".to_string(),
+                data: vec![0x1, 0x2],
+            },
         ];
         let msg = translate_client_message("user", parts);
 
@@ -1202,7 +1259,9 @@ mod tests {
 
     #[test]
     fn test_gemini_system_override_text_first() {
-        let parts = vec![Part::Text { text: "Be helpful".to_string() }];
+        let parts = vec![Part::Text {
+            text: "Be helpful".to_string(),
+        }];
         let msg = translate_client_message("system", parts);
 
         let content = msg.client_content.unwrap();
@@ -1219,8 +1278,13 @@ mod tests {
     #[test]
     fn test_gemini_system_override_non_text_first() {
         let parts = vec![
-            Part::InlineData { mime_type: "image/png".to_string(), data: vec![0x1] },
-            Part::Text { text: "Analyze this".to_string() },
+            Part::InlineData {
+                mime_type: "image/png".to_string(),
+                data: vec![0x1],
+            },
+            Part::Text {
+                text: "Analyze this".to_string(),
+            },
         ];
         let msg = translate_client_message("system", parts);
 
@@ -1238,7 +1302,10 @@ mod tests {
 
     #[test]
     fn test_gemini_system_override_no_text() {
-        let parts = vec![Part::InlineData { mime_type: "image/png".to_string(), data: vec![0x1] }];
+        let parts = vec![Part::InlineData {
+            mime_type: "image/png".to_string(),
+            data: vec![0x1],
+        }];
         let msg = translate_client_message("system", parts);
 
         let content = msg.client_content.unwrap();
@@ -1246,20 +1313,30 @@ mod tests {
         assert_eq!(gemini_parts.len(), 2);
 
         // Ensure a new text part was inserted at the beginning
-        assert_eq!(gemini_parts[0].text.as_deref(), Some("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]"));
+        assert_eq!(
+            gemini_parts[0].text.as_deref(),
+            Some("[CRITICAL SYSTEM DIRECTIVE OVERRIDE]")
+        );
         assert!(gemini_parts[1].inline_data.is_some());
     }
 
     #[test]
     fn test_gemini_skips_unsupported_parts() {
         let parts = vec![
-            Part::Text { text: "First".to_string() },
+            Part::Text {
+                text: "First".to_string(),
+            },
             Part::FileData {
                 mime_type: "image/jpeg".to_string(),
                 file_uri: "http://example.com/img".to_string(),
             }, // Should be skipped
-            Part::Thinking { thinking: "Hmm".to_string(), signature: None }, // Should be skipped
-            Part::Text { text: "Last".to_string() },
+            Part::Thinking {
+                thinking: "Hmm".to_string(),
+                signature: None,
+            }, // Should be skipped
+            Part::Text {
+                text: "Last".to_string(),
+            },
         ];
         let msg = translate_client_message("user", parts);
 
@@ -1289,7 +1366,11 @@ mod tests {
         let js = serde_json::to_value(&wrapper).unwrap();
         let setup_json = js.get("setup").expect("setup missing").as_object().unwrap();
         assert_eq!(
-            setup_json.get("model").expect("model missing from setup payload").as_str().unwrap(),
+            setup_json
+                .get("model")
+                .expect("model missing from setup payload")
+                .as_str()
+                .unwrap(),
             "models/gemini-2.5-flash-native-audio-latest"
         );
     }

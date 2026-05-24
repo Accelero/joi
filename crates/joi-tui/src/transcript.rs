@@ -1,15 +1,13 @@
 //! The transcript buffer: folds the engine's streaming `Transcript`/`Error` events into a list of
-//! speaker-labeled entries, mirroring the web `Terminal.tsx` semantics. Pure data + fold logic (no
-//! ratatui), so it's unit-tested directly.
+//! speaker-labeled entries. Pure data + fold logic (no ratatui), so it's unit-tested directly.
 //!
-//! Fold rules (per SPEC §8 / `Terminal.tsx`): transcript text arrives as **incremental deltas**. A
-//! line stays "open" while the same speaker streams — deltas append to it; a speaker change starts a
-//! new labeled line; `final` commits (closes) the open line. An error closes any open line and
-//! appends its own line.
+//! Fold rules (FR-3/FR-12): transcript text arrives as **incremental deltas**. A line stays "open"
+//! while the same speaker streams — deltas append to it; a speaker change starts a new labeled line;
+//! `final` commits (closes) the open line. An error closes any open line and appends its own line.
 
 use joi_core::session::event::Speaker;
 
-/// Hard cap on retained entries (oldest dropped) — the TUI equivalent of xterm's scrollback.
+/// Hard cap on retained entries (oldest dropped) — the TUI's scrollback bound.
 const MAX_ENTRIES: usize = 2000;
 
 /// What a transcript line represents — drives its label and color.

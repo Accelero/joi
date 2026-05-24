@@ -58,7 +58,10 @@ async fn main() -> anyhow::Result<()> {
         .tool(
             weather_tool,
             FnToolHandler::new(|call| {
-                let city = call.arguments["city"].as_str().unwrap_or("unknown").to_string();
+                let city = call.arguments["city"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
                 info!("weather tool called for {city}");
                 Ok(json!({"city": city, "temp_f": 72, "condition": "sunny"}))
             }),
@@ -127,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
     info!("session updated — phase 2: travel agent");
 
     // Send a travel query
-    runner.send_text("I need a flight from Seattle to Tokyo next month").await?;
+    runner
+        .send_text("I need a flight from Seattle to Tokyo next month")
+        .await?;
     runner.create_response().await?;
 
     response_text.clear();

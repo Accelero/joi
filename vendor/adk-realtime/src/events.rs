@@ -17,7 +17,9 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    base64::engine::general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    base64::engine::general_purpose::STANDARD
+        .decode(&s)
+        .map_err(serde::de::Error::custom)
 }
 
 fn serialize_audio_bytes<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
@@ -533,6 +535,9 @@ impl ToolResponse {
 
     /// Create a tool response from a string output.
     pub fn from_string(call_id: impl Into<String>, output: impl Into<String>) -> Self {
-        Self { call_id: call_id.into(), output: Value::String(output.into()) }
+        Self {
+            call_id: call_id.into(),
+            output: Value::String(output.into()),
+        }
     }
 }

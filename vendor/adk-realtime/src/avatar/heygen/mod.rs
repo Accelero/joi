@@ -115,7 +115,11 @@ impl HeyGenProvider {
             "heygen: api_base_url must use https:// for secure transport, got: {}",
             config.api_base_url
         );
-        Self { config, http_client: reqwest::Client::new(), sessions: RwLock::new(HashMap::new()) }
+        Self {
+            config,
+            http_client: reqwest::Client::new(),
+            sessions: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Build a URL under the API base, enforcing HTTPS.
@@ -197,10 +201,11 @@ impl AvatarProvider for HeyGenProvider {
         tracing::info!(session_id = %session_id, "heygen: session created, connecting to LiveKit room");
 
         // Step 3: Connect to the LiveKit room.
-        let (room, _events) =
-            Room::connect(&livekit_url, &access_token, RoomOptions::default()).await.map_err(
-                |e| RealtimeError::provider(format!("heygen: LiveKit room connection failed: {e}")),
-            )?;
+        let (room, _events) = Room::connect(&livekit_url, &access_token, RoomOptions::default())
+            .await
+            .map_err(|e| {
+                RealtimeError::provider(format!("heygen: LiveKit room connection failed: {e}"))
+            })?;
 
         // Step 4: Set up audio source for publishing.
         let audio_source = NativeAudioSource::new(
@@ -216,7 +221,10 @@ impl AvatarProvider for HeyGenProvider {
             RtcAudioSource::Native(audio_source.clone()),
         );
         room.local_participant()
-            .publish_track(LocalTrack::Audio(audio_track), TrackPublishOptions::default())
+            .publish_track(
+                LocalTrack::Audio(audio_track),
+                TrackPublishOptions::default(),
+            )
             .await
             .map_err(|e| {
                 RealtimeError::provider(format!("heygen: failed to publish audio track: {e}"))
@@ -237,8 +245,16 @@ impl AvatarProvider for HeyGenProvider {
         };
 
         // Step 7: Store session state.
-        let heygen_session = HeyGenSession { room, audio_source, livekit_url, access_token };
-        self.sessions.write().await.insert(session_id, heygen_session);
+        let heygen_session = HeyGenSession {
+            room,
+            audio_source,
+            livekit_url,
+            access_token,
+        };
+        self.sessions
+            .write()
+            .await
+            .insert(session_id, heygen_session);
 
         Ok(session_info)
     }
@@ -284,9 +300,15 @@ impl AvatarProvider for HeyGenProvider {
             samples_per_channel,
         };
 
-        session.audio_source.capture_frame(&frame).await.map_err(|e| {
-            RealtimeError::provider(format!("heygen: failed to push audio frame to LiveKit: {e}"))
-        })?;
+        session
+            .audio_source
+            .capture_frame(&frame)
+            .await
+            .map_err(|e| {
+                RealtimeError::provider(format!(
+                    "heygen: failed to push audio frame to LiveKit: {e}"
+                ))
+            })?;
 
         Ok(())
     }
@@ -303,8 +325,10 @@ impl AvatarProvider for HeyGenProvider {
         }
 
         // Send a keep-alive task request to HeyGen.
-        let request_body =
-            api::TaskRequest { session_id: session_id.to_string(), text: String::new() };
+        let request_body = api::TaskRequest {
+            session_id: session_id.to_string(),
+            text: String::new(),
+        };
 
         let url = self.secure_url("/v1/streaming.task")?;
         let response = self
@@ -340,7 +364,9 @@ impl AvatarProvider for HeyGenProvider {
         };
 
         // Step 1: Call HeyGen REST API to stop the streaming session.
-        let request_body = api::StopSessionRequest { session_id: session_id.to_string() };
+        let request_body = api::StopSessionRequest {
+            session_id: session_id.to_string(),
+        };
 
         let url = self.secure_url("/v1/streaming.stop")?;
         tracing::info!(session_id = %session_id, "heygen: stopping session");

@@ -1,5 +1,6 @@
-//! Native media I/O for Joi (PLAN-NATIVE-MEDIA). All audio/screen capture and playback happen in
-//! Rust via [`cpal`] (and later screen-capture crates), so no media ever crosses into the webview.
+//! Native media I/O for Joi (PLAN §7). All audio/screen capture and playback happen in Rust via
+//! [`cpal`] (mic/speaker), `sonora` (the APM chain), and `xcap` (screen) — devices live only here,
+//! never in `joi-core`.
 //!
 //! `cpal`'s [`Stream`](cpal::Stream) is `!Send`, so each engine owns its stream on a dedicated OS
 //! thread and is driven over a channel; callers hold only the `Send` channel sender.

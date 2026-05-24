@@ -77,7 +77,9 @@ async fn main() -> anyhow::Result<()> {
     info!("connected — phase 1: technical support");
 
     // Send initial query
-    runner.send_text("Hi, I'm having trouble with my account ABC-123").await?;
+    runner
+        .send_text("Hi, I'm having trouble with my account ABC-123")
+        .await?;
     runner.create_response().await?;
 
     // Collect response
@@ -146,7 +148,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Send a billing query
-    runner.send_text("Can you look up invoice INV-2026-0042?").await?;
+    runner
+        .send_text("Can you look up invoice INV-2026-0042?")
+        .await?;
     runner.create_response().await?;
 
     response_text.clear();

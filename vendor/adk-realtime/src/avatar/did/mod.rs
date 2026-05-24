@@ -107,7 +107,11 @@ impl DIDProvider {
             "d-id: api_base_url must use https:// for secure transport, got: {}",
             config.api_base_url
         );
-        Self { config, http_client: reqwest::Client::new(), sessions: RwLock::new(HashMap::new()) }
+        Self {
+            config,
+            http_client: reqwest::Client::new(),
+            sessions: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Build a URL under the API base, enforcing HTTPS.
@@ -136,7 +140,9 @@ impl AvatarProvider for DIDProvider {
             return Err(RealtimeError::config("d-id: agent_id must not be empty"));
         }
         if avatar_config.source_url.is_empty() {
-            return Err(RealtimeError::config("d-id: avatar source_url must not be empty"));
+            return Err(RealtimeError::config(
+                "d-id: avatar source_url must not be empty",
+            ));
         }
 
         // Step 1: Build the create-session request.
@@ -153,7 +159,10 @@ impl AvatarProvider for DIDProvider {
         let response = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Basic {}", self.config.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Basic {}", self.config.api_key.expose_secret()),
+            )
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -255,14 +264,19 @@ impl AvatarProvider for DIDProvider {
 
         // Call D-ID REST API to delete the agent chat session.
         // Enforce HTTPS to prevent cleartext transmission of session identifiers.
-        let url =
-            self.secure_url(&format!("/agents/{}/chat/{session_id}", self.config.agent_id))?;
+        let url = self.secure_url(&format!(
+            "/agents/{}/chat/{session_id}",
+            self.config.agent_id
+        ))?;
         tracing::info!(session_id = %session_id, "d-id: stopping session");
 
         let result = self
             .http_client
             .delete(&url)
-            .header("Authorization", format!("Basic {}", self.config.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Basic {}", self.config.api_key.expose_secret()),
+            )
             .send()
             .await;
 

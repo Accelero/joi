@@ -1,6 +1,6 @@
 [package]
 name = "joi-providers"
-description = "RealtimeSession adapters: mock (tests/M1), gemini (M2), and the OpenAI compile-only stub."
+description = "RealtimeSession adapters: mock (tests/headless) and gemini (real, over vendored adk-realtime)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,14 +10,12 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-# All adapters are stubs/mocks today, so default-on keeps the whole surface compiling in CI.
-# When adk-rust lands in M2, the `gemini` feature gains that dependency (PLAN §0, M2).
-default = ["mock", "gemini", "openai"]
+# Both adapters compile by default. `mock` is pure Rust; `gemini` pulls the adk-realtime adapter.
+default = ["mock", "gemini"]
 mock = []
-# `gemini` pulls the adk-realtime adapter (M2 spike: NOTES-adk.md). Only its `gemini` backend
-# feature is enabled — not openai/livekit/vertex — to keep the dependency tree minimal.
+# `gemini` pulls the adk-realtime adapter. Only its `gemini` backend feature is enabled — not
+# openai/livekit/vertex — to keep the dependency tree minimal (PLAN §7.4).
 gemini = ["dep:adk-realtime", "dep:rustls", "dep:reqwest"]
-openai = []
 
 [dependencies]
 joi-core = { path = "../joi-core" }

@@ -392,8 +392,9 @@ impl RealtimeAgentBuilder {
 
     /// Build the RealtimeAgent.
     pub fn build(self) -> Result<RealtimeAgent> {
-        let model =
-            self.model.ok_or_else(|| AdkError::agent("RealtimeModel is required".to_string()))?;
+        let model = self
+            .model
+            .ok_or_else(|| AdkError::agent("RealtimeModel is required".to_string()))?;
 
         Ok(RealtimeAgent {
             name: self.name,
@@ -591,8 +592,11 @@ impl RealtimeAgent {
                 Arc::new(RealtimeToolContext::new(ctx.clone(), call_id.to_string()));
 
             // Execute before_tool callbacks
-            let tool_cb_ctx =
-                Arc::new(ToolCallbackContext::new(ctx.clone(), name.to_string(), args.clone()));
+            let tool_cb_ctx = Arc::new(ToolCallbackContext::new(
+                ctx.clone(),
+                name.to_string(),
+                args.clone(),
+            ));
             for callback in self.before_tool_callbacks.as_ref() {
                 if let Err(e) = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await {
                     return (
@@ -611,8 +615,11 @@ impl RealtimeAgent {
             let actions = tool_ctx.actions();
 
             // Execute after_tool callbacks
-            let tool_cb_ctx =
-                Arc::new(ToolCallbackContext::new(ctx.clone(), name.to_string(), args.clone()));
+            let tool_cb_ctx = Arc::new(ToolCallbackContext::new(
+                ctx.clone(),
+                name.to_string(),
+                args.clone(),
+            ));
             for callback in self.after_tool_callbacks.as_ref() {
                 if let Err(e) = callback(tool_cb_ctx.clone() as Arc<dyn CallbackContext>).await {
                     return (serde_json::json!({ "error": e.to_string() }), actions);
@@ -677,7 +684,9 @@ impl Agent for RealtimeAgent {
             std::collections::HashMap::new();
 
         for toolset in &toolsets {
-            let toolset_tools = toolset.tools(ctx.clone() as Arc<dyn ReadonlyContext>).await?;
+            let toolset_tools = toolset
+                .tools(ctx.clone() as Arc<dyn ReadonlyContext>)
+                .await?;
             for tool in &toolset_tools {
                 let name = tool.name().to_string();
                 if static_tool_names.contains(&name) {
@@ -1062,7 +1071,11 @@ struct RealtimeToolContext {
 
 impl RealtimeToolContext {
     fn new(parent_ctx: Arc<dyn InvocationContext>, function_call_id: String) -> Self {
-        Self { parent_ctx, function_call_id, actions: Mutex::new(EventActions::default()) }
+        Self {
+            parent_ctx,
+            function_call_id,
+            actions: Mutex::new(EventActions::default()),
+        }
     }
 }
 

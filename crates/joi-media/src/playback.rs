@@ -17,7 +17,7 @@ use crate::MediaError;
 pub enum PlaybackCmd {
     /// A frame of 24 kHz mono PCM16 from the provider.
     Pcm(Vec<i16>),
-    /// Drop all buffered audio immediately (barge-in / interrupt, FR-2).
+    /// Drop all buffered audio immediately (barge-in / interrupt, FR-2/FR-7).
     Flush,
 }
 

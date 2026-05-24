@@ -114,7 +114,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _room = bundle.room;
     let mut room_events = bundle.events;
-    let audio_source = bundle.audio_source.expect("Audio source was not created by builder");
+    let audio_source = bundle
+        .audio_source
+        .expect("Audio source was not created by builder");
 
     // --- 3. Wrap event handler with LiveKit audio output ---
     // The LiveKitEventHandler intercepts on_audio to push model audio to the
@@ -143,7 +145,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bridge_runner = Arc::clone(&runner);
     let bridge_handle = tokio::spawn(async move {
         while let Some(event) = room_events.recv().await {
-            if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
+            if let RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(audio_track),
+                ..
+            } = event
             {
                 tracing::info!("Subscribed to remote audio track. Bridging input...");
                 let r = bridge_runner.clone();

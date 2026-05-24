@@ -1,7 +1,7 @@
 //! Injectable time source.
 //!
 //! Core logic that needs "now" takes a [`Clock`] so tests are deterministic and never sleep on
-//! the wall clock (PLAN §1, §5). Production wires [`SystemClock`]; tests wire [`TestClock`].
+//! the wall clock (PLAN §1, §8). Production wires [`SystemClock`]; tests wire [`TestClock`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -66,6 +66,7 @@ impl Clock for TestClock {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

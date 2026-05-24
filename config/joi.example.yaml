@@ -1,20 +1,23 @@
 # Joi example configuration — copy this to your real config path and edit:
 #
-#     ~/.config/joi/joi.yaml
+#     ~/.joi/config/joi.yaml
 #
 # (Joi also writes a defaults file there on first run if it's missing.) Every field can be set in
 # the file OR overridden by an environment variable; ENV ALWAYS WINS over the file.
 #
 # Top-level sections map to modules: live_api/history/logging (engine), media (joi-media),
-# ui (web frontend). Env mapping: nested keys chain with `JOI_` + `__`, e.g.
+# ui (frontend). Env mapping: nested keys chain with `JOI_` + `__`, e.g.
 # JOI_MEDIA__AUDIO__FRAME_MS=30 sets media.audio.frame_ms. The Gemini key/model also have the
 # conventional shortcuts GEMINI_API_KEY and GEMINI_MODEL.
 
 live_api:
-  provider: gemini                  # only gemini is supported today
+  provider: gemini                  # gemini | mock (mock is for tests/headless only)
   gemini:
-    # Exact model id — set the one your API key has access to (a bidiGenerateContent / Live model).
-    model: gemini-live-2.5-flash-native-audio
+    # REQUIRED — Joi ships NO default model. Use the BARE model name (no `models/` prefix) of a Live
+    # (bidiGenerateContent) model your key can access; gemini-3.1-flash-live-preview is known-good.
+    # NOTE: appearing in models.list is not enough — some models (e.g. the
+    # gemini-2.5-flash-native-audio-* family) are rejected by the Live endpoint. (Env: GEMINI_MODEL.)
+    model: gemini-3.1-flash-live-preview
     # API key. Prefer leaving this empty and exporting GEMINI_API_KEY in your shell instead —
     # a key written here sits in plaintext on disk. (Equivalent: JOI_LIVE_API__GEMINI__API_KEY.)
     api_key: ""
@@ -25,24 +28,24 @@ live_api:
     system_instruction: You are Joi, a concise local voice companion.
     input_transcription: true       # FR-3: render the user transcript
     output_transcription: true      # FR-3: render the agent transcript
-  # Background API-reachability probe cadence, in seconds (emits a UiEvent::reachability). It hits a
+  # Background API-reachability probe cadence, in seconds (emits a UiEvent::Reachability). It hits a
   # token-free metadata endpoint, so it NEVER consumes tokens. 0 disables periodic polling (a probe
   # still runs at startup and on demand).
   reachability_probe_secs: 20
 
 history:
   dir: null                         # null → ~/.joi/sessions (per-session <uuid>.jsonl + index.json)
-  token_budget: 32000               # approx tokens; Live session input budget (SPEC §6.2)
+  token_budget: 32000               # approx tokens; Live session input budget (SPEC §6); min 1000
 
 logging:
   level: info                       # error | warn | info | debug | trace ; RUST_LOG overrides
-  file: null                        # null → XDG state dir (~/.local/state/joi/joi.log)
+  file: null                        # null → ~/.joi/logs/joi.log
 
 media:                              # native device I/O (joi-media)
   audio:
     input_sample_rate: 16000        # to provider (16 kHz mono PCM16)
     output_sample_rate: 24000       # from provider (24 kHz mono PCM16)
-    frame_ms: 20                    # 20 ms = 320 samples at 16 kHz
+    frame_ms: 20                    # 20 ms = 320 samples at 16 kHz; validated 5..=60
     # Audio devices. "default" = follow the OS/desktop default device (what your system mixer or
     # taskbar selects). Set an exact device name to pin a specific mic/speaker and ignore the OS
     # default — useful to bypass a virtual/processed default (e.g. a PipeWire echo-cancel source).
@@ -53,21 +56,20 @@ media:                              # native device I/O (joi-media)
     # routing through PipeWire's echo-cancel source) so you don't double-process — and note an AGC
     # without a co-located echo canceller is echo-blind and can amplify residual echo into false
     # barge-ins.
-    echo_cancellation: true           # subtract Joi's own playback from the mic (speakers)
-    noise_suppression: true           # WebRTC noise suppression
+    echo_cancellation: true           # subtract Joi's own playback from the mic (AEC3)
+    noise_suppression: true           # high-pass filter + WebRTC noise suppression
     auto_gain: true                   # automatic gain control (AGC2)
   screen:
     enabled: false
-    capture_path: auto              # auto | webview | native
-    fps: 1.0
+    fps: 1.0                        # validated (0, 60]
     # Gemini Live downsamples each video frame to ~768 px (one tile); sending more is wasted bytes.
     max_width: 768
-    quality: 80                     # 1-100
+    quality: 80                     # JPEG quality, 1-100
 
-ui:                                 # web frontend (loaded by the engine, applied by the UI)
+ui:                                 # frontend appearance (read by joi-tui)
   terminal:
     theme: joi-dark
-    font: JetBrains Mono
+    font: JetBrains Mono              # informational
     scrollback: 5000
     background: transparent           # "#rrggbb" or "transparent" (use the terminal's background)
-    accent: "#9aede4"                 # accent color (hex)
+    accent: "#9aede4"                 # accent color (hex or named)

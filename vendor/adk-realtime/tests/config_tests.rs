@@ -12,7 +12,9 @@ fn test_realtime_config_default() {
 
 #[test]
 fn test_realtime_config_builder() {
-    let config = RealtimeConfig::default().with_instruction("You are helpful.").with_voice("alloy");
+    let config = RealtimeConfig::default()
+        .with_instruction("You are helpful.")
+        .with_voice("alloy");
 
     assert_eq!(config.instruction, Some("You are helpful.".to_string()));
     assert_eq!(config.voice, Some("alloy".to_string()));
@@ -62,7 +64,10 @@ fn test_config_modalities() {
 
 #[test]
 fn test_config_temperature() {
-    let config = RealtimeConfig { temperature: Some(0.7), ..Default::default() };
+    let config = RealtimeConfig {
+        temperature: Some(0.7),
+        ..Default::default()
+    };
 
     assert_eq!(config.temperature, Some(0.7));
 }

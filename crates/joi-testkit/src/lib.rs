@@ -1,10 +1,10 @@
-//! Adapter conformance suite + shared fixtures (SPEC §16).
+//! Adapter conformance suite + shared fixtures (PLAN §8, M3).
 //!
 //! [`run_conformance`] runs one ordered scenario against any [`RealtimeSession`] implementation. A
-//! functional adapter (mock, later Gemini) must produce a correctly ordered turn; a compile-only
-//! stub (OpenAI, SPEC §4.4) is allowed to reject `connect` with
-//! [`SessionError::Unimplemented`] — and is reported as [`ConformanceOutcome::StubVerified`]. This
-//! is how provider-agnosticism is *proven*: the same suite passes against every adapter.
+//! functional adapter (the mock, and the real Gemini) must produce a correctly ordered turn; a
+//! compile-only stub is allowed to reject `connect` with [`SessionError::Unimplemented`] — and is
+//! reported as [`ConformanceOutcome::StubVerified`]. This is how provider-agnosticism is *proven*:
+//! the same suite passes against every adapter (SPEC §7 criterion 6).
 
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum ConformanceOutcome {
     /// The adapter connected and produced a correctly ordered turn.
     FullLoop,
-    /// The adapter is a compile-only stub: `connect` returned `Unimplemented` (SPEC §4.4).
+    /// The adapter is a compile-only stub: `connect` returned `Unimplemented`.
     StubVerified,
 }
 
@@ -56,7 +56,7 @@ pub fn sample_session_config() -> SessionConfig {
 /// Run the conformance scenario against `session`.
 ///
 /// Functional adapters must, after `send_text`, emit a final agent transcript **before**
-/// `TurnComplete` (the transcript-before-turn-end ordering guarantee of SPEC §4).
+/// `TurnComplete` (the transcript-before-turn-end ordering guarantee of SPEC §2).
 pub async fn run_conformance<S: RealtimeSession>(
     mut session: S,
 ) -> Result<ConformanceOutcome, ConformanceError> {
@@ -133,18 +133,10 @@ pub async fn run_conformance<S: RealtimeSession>(
 mod tests {
     use super::*;
     use joi_providers::mock::MockSession;
-    use joi_providers::openai::OpenAIAdapter;
 
     #[tokio::test]
     async fn mock_passes_full_loop() {
         let outcome = run_conformance(MockSession::new()).await.unwrap();
         assert_eq!(outcome, ConformanceOutcome::FullLoop);
-    }
-
-    #[tokio::test]
-    async fn openai_stub_is_verified_not_failed() {
-        // Proves no Gemini-ism leaked: the abstraction is honest against an unimplemented adapter.
-        let outcome = run_conformance(OpenAIAdapter::new()).await.unwrap();
-        assert_eq!(outcome, ConformanceOutcome::StubVerified);
     }
 }

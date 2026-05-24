@@ -22,11 +22,17 @@ fn main() {
         }
         black_box(s);
 
-        let s: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let s: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         black_box(s);
 
         let s: Cow<[i16]> = unsafe {
-            Cow::Borrowed(std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2))
+            Cow::Borrowed(std::slice::from_raw_parts(
+                bytes.as_ptr() as *const i16,
+                bytes.len() / 2,
+            ))
         };
         black_box(s);
     }
@@ -42,13 +48,19 @@ fn main() {
         samples1 = s;
 
         let start = Instant::now();
-        let s: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let s: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         iter_durations.push(start.elapsed());
         samples2 = s;
 
         let start = Instant::now();
         let s: Cow<[i16]> = unsafe {
-            Cow::Borrowed(std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2))
+            Cow::Borrowed(std::slice::from_raw_parts(
+                bytes.as_ptr() as *const i16,
+                bytes.len() / 2,
+            ))
         };
         black_box(s);
         bytemuck_durations.push(start.elapsed());
@@ -58,7 +70,10 @@ fn main() {
 
     print_stats("Manual Loop", &mut manual_durations);
     print_stats("Iterator / Collect", &mut iter_durations);
-    print_stats("Absolute Zero-Copy (bytemuck simulated)", &mut bytemuck_durations);
+    print_stats(
+        "Absolute Zero-Copy (bytemuck simulated)",
+        &mut bytemuck_durations,
+    );
 }
 
 fn print_stats(name: &str, durations: &mut [Duration]) {

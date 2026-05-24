@@ -31,7 +31,10 @@ pub struct GeminiRealtimeModel {
 impl GeminiRealtimeModel {
     /// Create a new Gemini Live model.
     pub fn new(backend: GeminiLiveBackend, model_id: impl Into<String>) -> Self {
-        Self { backend, model_id: model_id.into() }
+        Self {
+            backend,
+            model_id: model_id.into(),
+        }
     }
 
     /// Create with the default Live model.

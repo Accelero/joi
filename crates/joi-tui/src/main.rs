@@ -1,13 +1,14 @@
-//! Native terminal-UI host for the JOI engine (Seam A). A fourth host alongside the Tauri shell,
-//! `joi-cli`, and `joi-server` — see `PLAN-TUI.md`. Unlike the other headless hosts (which run
-//! [`MediaMode::None`](joi_app::MediaMode::None)), the TUI is a native process, so it drives the
-//! engine in [`MediaMode::LocalDevices`](joi_app::MediaMode::LocalDevices): real cpal mic/playback +
-//! xcap screen via `joi-media`, the same media path the desktop app uses. No audio crosses the TUI —
-//! ratatui only renders the text `UiEvent` stream.
+//! Native terminal-UI host for the JOI engine (Seam A). The only frontend built today (PLAN §2).
+//! Unlike the headless integration test (which runs [`MediaMode::None`](joi_app::MediaMode::None)),
+//! the TUI is a native process, so it drives the engine in
+//! [`MediaMode::LocalDevices`](joi_app::MediaMode::LocalDevices): real cpal mic/playback + xcap
+//! screen via `joi-media`. No audio crosses the TUI — ratatui only renders the text `UiEvent`
+//! stream and dispatches commands.
 
 mod app;
 mod input;
 mod keys;
+mod picker;
 mod theme;
 mod transcript;
 mod ui;
@@ -39,8 +40,13 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load config *first*, before the terminal and stderr are taken over, so a config error (e.g.
+    // no model set — Joi ships no default) prints plainly to the real stderr instead of vanishing
+    // into the redirected log.
+    let config = Config::load(None)?;
+
     // A ratatui app owns the alternate screen; any log line written to stdout/stderr would shred the
-    // frame. So logging goes to a file for the whole life of the process (PLAN-TUI §2).
+    // frame. So logging goes to a file for the whole life of the process.
     let (_guard, log_path) = init_logging()?;
     // Native audio/screen libraries (ALSA, libjack, PipeWire, cpal) write warnings straight to the
     // process's stderr (fd 2), bypassing Rust's logging. A GUI host never notices — they go to the
@@ -49,7 +55,6 @@ async fn main() -> anyhow::Result<()> {
     redirect_stderr_to(&log_path);
     tracing::info!(path = %log_path.display(), "joi-tui starting");
 
-    let config = Config::load(None)?;
     let app = JoiApp::build(config, MediaMode::LocalDevices);
     let mut model = app::AppModel::new(app.has_api_key());
     // Resolve the configurable colors (background + accent) from the shared `ui.terminal` config.
@@ -86,7 +91,7 @@ async fn run(
             maybe = input.next() => match maybe {
                 Some(Ok(event)) => {
                     if let Some(command) = model.on_action(keys::map(&event)) {
-                        run_command(app, command).await;
+                        run_command(app, model, command).await;
                     }
                 }
                 Some(Err(e)) => { tracing::warn!("terminal input error: {e}"); model.should_quit = true; }
@@ -94,7 +99,7 @@ async fn run(
             },
             event = next_ui_event(events) => {
                 if let Some(command) = model.on_ui_event(event) {
-                    run_command(app, command).await;
+                    run_command(app, model, command).await;
                 }
             }
             _ = tick.tick() => model.tick = model.tick.wrapping_add(1),
@@ -108,8 +113,9 @@ async fn run(
 }
 
 /// Apply one model-emitted [`Command`](app::Command) to the engine. Engine errors are logged (not
-/// fatal) — the session stays up and a `UiEvent::Error` would surface separately.
-async fn run_command(app: &JoiApp, command: app::Command) {
+/// fatal) — the session stays up and a `UiEvent::Error` would surface separately. The session
+/// commands (`OpenPicker`/`ResumeSession`/`NewSession`) fold their async result back into the model.
+async fn run_command(app: &JoiApp, model: &mut app::AppModel, command: app::Command) {
     use app::Command;
     match command {
         Command::Start => log_command_err("start", app.start(false).await),
@@ -118,6 +124,16 @@ async fn run_command(app: &JoiApp, command: app::Command) {
         Command::SetMicMuted(muted) => app.set_mic_muted(muted),
         Command::StartScreenshare => app.start_screenshare(),
         Command::StopScreenshare => app.stop_screenshare(),
+        Command::OpenPicker => model.open_picker(app.list_sessions().await),
+        Command::ResumeSession(id) => match app.resume_session(&id).await {
+            Ok(_) => log_command_err("start", app.start(true).await),
+            Err(e) => tracing::warn!("resume_session failed: {e}"),
+        },
+        Command::NewSession => {
+            if let Err(e) = app.new_session().await {
+                tracing::warn!("new_session failed: {e}");
+            }
+        }
     }
 }
 
@@ -145,9 +161,9 @@ async fn next_ui_event(events: &mut Option<Receiver<UiEvent>>) -> UiEvent {
 fn setup_terminal() -> anyhow::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // A blinking block matches the web prompt's caret; ratatui shows it only on frames that set a
-    // cursor position (the prompt does), so it appears exactly at the caret. Mouse capture lets the
-    // wheel scroll the transcript (hold Shift for the terminal's native text selection).
+    // A blinking block caret. ratatui shows it only on frames that set a cursor position (the prompt
+    // does), so it appears exactly at the caret. Mouse capture lets the wheel scroll the transcript
+    // (hold Shift for the terminal's native text selection).
     crossterm::execute!(
         stdout,
         EnterAlternateScreen,

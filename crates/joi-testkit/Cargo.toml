@@ -1,6 +1,6 @@
 [package]
 name = "joi-testkit"
-description = "Shared test utilities and the RealtimeSession adapter conformance suite (SPEC §16)."
+description = "Shared test doubles and the RealtimeSession adapter conformance suite (PLAN §8, M3)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -37,8 +37,9 @@ impl OpenAIRealtimeSession {
     /// Connect to OpenAI Realtime API.
     pub async fn connect(url: &str, api_key: &str, config: RealtimeConfig) -> Result<Self> {
         // Parse URL and build request with auth header
-        let uri: Uri =
-            url.parse().map_err(|e| RealtimeError::connection(format!("Invalid URL: {}", e)))?;
+        let uri: Uri = url
+            .parse()
+            .map_err(|e| RealtimeError::connection(format!("Invalid URL: {}", e)))?;
 
         let host = uri.host().unwrap_or("api.openai.com");
 
@@ -123,7 +124,10 @@ impl OpenAITransportLink for OpenAIRealtimeSession {
             }
             Some(Err(e)) => {
                 self.connected.store(false, Ordering::SeqCst);
-                Some(Err(RealtimeError::connection(format!("Receive error: {}", e))))
+                Some(Err(RealtimeError::connection(format!(
+                    "Receive error: {}",
+                    e
+                ))))
             }
             None => {
                 self.connected.store(false, Ordering::SeqCst);

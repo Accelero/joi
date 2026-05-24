@@ -47,8 +47,9 @@ pub use webrtc::OpusCodec;
 pub const OPENAI_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime";
 
 /// Available voices for OpenAI Realtime.
-pub const OPENAI_VOICES: &[&str] =
-    &["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
+pub const OPENAI_VOICES: &[&str] = &[
+    "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse",
+];
 
 /// Default model for OpenAI Realtime.
 pub const DEFAULT_MODEL: &str = "gpt-4o-realtime-preview-2024-12-17";

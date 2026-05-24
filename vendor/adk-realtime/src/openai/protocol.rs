@@ -245,7 +245,9 @@ impl<T: OpenAITransportLink> RealtimeSession for OpenAIProtocolHandler<T> {
                 tracing::error!(
                     "internal UpdateSession intent leaked to the OpenAI transport socket"
                 );
-                Err(RealtimeError::ProviderError("Internal intent leaked to transport".to_string()))
+                Err(RealtimeError::ProviderError(
+                    "Internal intent leaked to transport".to_string(),
+                ))
             }
             other => {
                 let value = serde_json::to_value(&other)
@@ -345,7 +347,9 @@ mod tests {
 
     #[test]
     fn test_openai_translate_text_only() {
-        let parts = vec![Part::Text { text: "Hello".to_string() }];
+        let parts = vec![Part::Text {
+            text: "Hello".to_string(),
+        }];
         let value = translate_client_message("user", parts);
         let item = &value["item"];
         assert_eq!(item["role"], "user");
@@ -358,8 +362,13 @@ mod tests {
     #[test]
     fn test_openai_translate_text_and_audio() {
         let parts = vec![
-            Part::Text { text: "Listen:".to_string() },
-            Part::InlineData { mime_type: "audio/wav".to_string(), data: vec![0x1, 0x2, 0x3] },
+            Part::Text {
+                text: "Listen:".to_string(),
+            },
+            Part::InlineData {
+                mime_type: "audio/wav".to_string(),
+                data: vec![0x1, 0x2, 0x3],
+            },
         ];
         let value = translate_client_message("user", parts);
         let content = value["item"]["content"].as_array().unwrap();
@@ -373,10 +382,20 @@ mod tests {
     #[test]
     fn test_openai_skips_unsupported_parts() {
         let parts = vec![
-            Part::Text { text: "First".to_string() },
-            Part::InlineData { mime_type: "image/png".to_string(), data: vec![0x1] },
-            Part::Thinking { thinking: "Hmm".to_string(), signature: None },
-            Part::Text { text: "Last".to_string() },
+            Part::Text {
+                text: "First".to_string(),
+            },
+            Part::InlineData {
+                mime_type: "image/png".to_string(),
+                data: vec![0x1],
+            },
+            Part::Thinking {
+                thinking: "Hmm".to_string(),
+                signature: None,
+            },
+            Part::Text {
+                text: "Last".to_string(),
+            },
         ];
         let value = translate_client_message("user", parts);
         let content = value["item"]["content"].as_array().unwrap();

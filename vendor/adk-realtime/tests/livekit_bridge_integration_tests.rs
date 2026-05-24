@@ -59,12 +59,18 @@ impl EventHandler for RecordingEventHandler {
     }
 
     async fn on_text(&self, text: &str, item_id: &str) -> adk_realtime::Result<()> {
-        self.text_calls.lock().await.push((text.to_string(), item_id.to_string()));
+        self.text_calls
+            .lock()
+            .await
+            .push((text.to_string(), item_id.to_string()));
         Ok(())
     }
 
     async fn on_transcript(&self, transcript: &str, item_id: &str) -> adk_realtime::Result<()> {
-        self.transcript_calls.lock().await.push((transcript.to_string(), item_id.to_string()));
+        self.transcript_calls
+            .lock()
+            .await
+            .push((transcript.to_string(), item_id.to_string()));
         Ok(())
     }
 
@@ -123,7 +129,10 @@ async fn test_livekit_event_handler_audio_forwarding() {
 
         // Simulate audio event — PCM16 samples (must be even number of bytes)
         let pcm_audio: Vec<u8> = vec![0u8; 960]; // 480 samples of silence
-        handler.on_audio(&pcm_audio, "item_1").await.expect("on_audio should succeed");
+        handler
+            .on_audio(&pcm_audio, "item_1")
+            .await
+            .expect("on_audio should succeed");
 
         // Verify inner handler received the audio
         let recorded_audio = audio_calls.lock().await;
@@ -139,7 +148,10 @@ async fn test_livekit_event_handler_audio_forwarding() {
         drop(recorded_audio);
 
         // Simulate text event — should be delegated to inner handler
-        handler.on_text("Hello from model", "item_2").await.expect("on_text should succeed");
+        handler
+            .on_text("Hello from model", "item_2")
+            .await
+            .expect("on_text should succeed");
 
         let recorded_text = text_calls.lock().await;
         assert_eq!(
@@ -186,20 +198,32 @@ async fn test_livekit_event_handler_non_audio_delegation() {
         assert_eq!(transcript_calls.lock().await.len(), 1);
 
         // Test speech_started delegation
-        handler.on_speech_started(1000).await.expect("on_speech_started should succeed");
+        handler
+            .on_speech_started(1000)
+            .await
+            .expect("on_speech_started should succeed");
         assert_eq!(speech_started_calls.lock().await[0], 1000);
 
         // Test speech_stopped delegation
-        handler.on_speech_stopped(2000).await.expect("on_speech_stopped should succeed");
+        handler
+            .on_speech_stopped(2000)
+            .await
+            .expect("on_speech_stopped should succeed");
         assert_eq!(speech_stopped_calls.lock().await[0], 2000);
 
         // Test response_done delegation
-        handler.on_response_done().await.expect("on_response_done should succeed");
+        handler
+            .on_response_done()
+            .await
+            .expect("on_response_done should succeed");
         assert_eq!(*response_done_count.lock().await, 1);
 
         // Test error delegation
         let error = RealtimeError::connection("test error");
-        handler.on_error(&error).await.expect("on_error should succeed");
+        handler
+            .on_error(&error)
+            .await
+            .expect("on_error should succeed");
         assert_eq!(error_calls.lock().await.len(), 1);
     })
     .await

@@ -1,4 +1,4 @@
-//! The [`SessionManager`] actor — the single owner of the live session (PLAN §1, §6).
+//! The [`SessionManager`] actor — the single owner of the live session (PLAN §8).
 //!
 //! A single owning task holds the [`RealtimeSession`], the [`HistoryStore`], and the [`Config`],
 //! and `select!`s over (a) inbound [`Command`]s on an `mpsc` and (b) the provider's
@@ -39,7 +39,7 @@ const UI_CHANNEL: usize = 256;
 const MEDIA_CHANNEL: usize = 512;
 
 /// Creates the [`RealtimeSession`] for a start/resume. Injected so the manager never names a
-/// concrete provider (the composition root picks one by `config.provider.name`).
+/// concrete provider (the composition root picks one by `config.live_api.provider`).
 pub trait SessionFactory: Send + Sync {
     /// Build a fresh, unconnected session.
     fn create(&self) -> Box<dyn RealtimeSession>;
@@ -54,7 +54,7 @@ where
     }
 }
 
-/// A command sent to the [`SessionManager`] actor (mirrors the IPC commands in SPEC §11.1).
+/// A command sent to the [`SessionManager`] actor (the command half of Seam A — PLAN §6).
 #[derive(Debug)]
 pub enum Command {
     /// Start (`resume=false`) or resume (`resume=true`) a session.
@@ -64,7 +64,7 @@ pub enum Command {
         /// Reply with the connect result.
         reply: oneshot::Sender<Result<(), SessionError>>,
     },
-    /// Stop or pause the session (both fully disconnect — SPEC §5.3).
+    /// Stop or pause the session (both fully disconnect — FR-14/15).
     Stop {
         /// `true` = pause (intent only; both close the socket).
         pause: bool,
@@ -88,7 +88,7 @@ pub enum Command {
         /// The encoded frame.
         frame: Box<VideoFrame>,
     },
-    /// Mute/unmute the mic at the manager (the worklet is the primary gate — FR-6).
+    /// Mute/unmute the mic at the manager (the capture gate is the primary mute — FR-6).
     SetMicMuted {
         /// Muted state.
         muted: bool,
@@ -102,7 +102,7 @@ pub enum Command {
     Shutdown,
 }
 
-/// Cheap, cloneable handle to a running [`SessionManager`]. Held by the Tauri command layer.
+/// Cheap, cloneable handle to a running [`SessionManager`]. Held by `JoiApp` and the media engine.
 #[derive(Clone)]
 #[allow(clippy::struct_field_names)] // cmd_tx/ui_tx/audio_tx are distinct channels, not noise
 pub struct SessionManagerHandle {
@@ -119,14 +119,14 @@ impl SessionManagerHandle {
         SessionError::Provider("session manager unavailable".to_string())
     }
 
-    /// Subscribe to UI events (SPEC §11.3).
+    /// Subscribe to UI events (the event half of Seam A).
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
         self.ui_tx.subscribe()
     }
 
-    /// Subscribe to audio-output frames (24 kHz mono PCM16). The single production consumer is the
-    /// binary Channel forwarder (SPEC §11.2).
+    /// Subscribe to audio-output frames (24 kHz mono PCM16). The production consumer is the
+    /// `joi-media` playback pump; an empty frame is the flush/barge-in sentinel.
     #[must_use]
     pub fn subscribe_audio(&self) -> broadcast::Receiver<Vec<i16>> {
         self.audio_tx.subscribe()
@@ -224,7 +224,7 @@ pub struct SessionManager {
     mic_muted: bool,
     last_resumption_handle: Option<String>,
     /// Accumulates the in-flight agent transcript line's incremental deltas so the full line can be
-    /// appended to history when it finalizes (the provider streams deltas; SPEC §11.3).
+    /// appended to history when it finalizes (the provider streams deltas).
     agent_line: String,
     /// Accumulates the in-flight user (input-transcription) line the same way. Kept separate from
     /// `agent_line` so an interleaved user/agent delta order can't splice the two together.
@@ -308,7 +308,7 @@ impl SessionManager {
     }
 
     /// The actor loop. `session` and the two receivers are locals, so command and event handlers
-    /// borrow `self` without aliasing (the borrow-safe core of PLAN §6).
+    /// borrow `self` without aliasing (the borrow-safe core of PLAN §8).
     async fn run(
         mut self,
         mut cmd_rx: mpsc::Receiver<Command>,
@@ -382,7 +382,7 @@ impl SessionManager {
                     };
                     if let Some(Err(e)) = result {
                         // A send failure means the socket is gone; stop cleanly rather than logging
-                        // an error per 20 ms frame. (M3 will distinguish transient drops → reconnect.)
+                        // an error per 20 ms frame.
                         self.on_error("audio_send", &e);
                         self.do_stop(session).await;
                         self.set_state(AppState::Error);
@@ -503,7 +503,7 @@ impl SessionManager {
         }
     }
 
-    /// Load persisted turns within budget, oldest-first, for re-seeding (SPEC §6.3).
+    /// Load persisted turns within budget, oldest-first, for re-seeding (FR-20/21).
     async fn restore_context(&self) -> Vec<HistoryTurn> {
         let budget = TokenBudget(self.config.history.token_budget);
         match self.history.load_within_budget(budget).await {
@@ -581,13 +581,14 @@ impl SessionManager {
             }
             SessionEvent::Closed { reason } => {
                 if reason != CloseReason::Client && self.state != AppState::Stopped {
-                    // M3 will distinguish transient drops (-> Reconnecting); MVP stops cleanly.
+                    // A server/error close in the MVP stops cleanly; transient-drop → reconnect is
+                    // future work (FR-16).
                     self.set_state(AppState::Stopped);
                     self.emit_connection(ConnectionStatus::Disconnected, None);
                 }
             }
             SessionEvent::ToolCall { .. } => {
-                // [POST] No tool dispatch in the MVP (SPEC §10).
+                // [LATER] No tool dispatch in the MVP (FR-24).
             }
         }
     }
@@ -781,7 +782,10 @@ mod tests {
     impl RealtimeSession for ScriptedSession {
         async fn connect(&mut self, cfg: SessionConfig) -> Result<(), SessionError> {
             if let Some(seeded) = &self.seeded {
-                seeded.store(cfg.initial_context.len(), std::sync::atomic::Ordering::SeqCst);
+                seeded.store(
+                    cfg.initial_context.len(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
             }
             let (tx, rx) = mpsc::channel(64);
             self.tx = Some(tx);
@@ -1064,8 +1068,9 @@ mod tests {
             Arc::new(TestClock::new(1_000)),
             history.clone(),
             Arc::new(move || {
-                Box::new(ScriptedSession::with_seed_recorder(Arc::clone(&factory_seeded)))
-                    as Box<dyn RealtimeSession>
+                Box::new(ScriptedSession::with_seed_recorder(Arc::clone(
+                    &factory_seeded,
+                ))) as Box<dyn RealtimeSession>
             }),
             None,
         );

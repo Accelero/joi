@@ -1,4 +1,4 @@
-//! In-memory [`HistoryStore`] for tests and the M1 mock loop.
+//! In-memory [`HistoryStore`] — the no-key/no-disk fallback and the test double.
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;

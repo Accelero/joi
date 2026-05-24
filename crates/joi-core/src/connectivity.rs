@@ -7,7 +7,7 @@
 //!
 //! It runs **outside** the [`SessionManager`](crate::manager::SessionManager) actor — a slow or
 //! hanging probe must never block command handling — and shares only the `UiEvent` broadcast sender
-//! so the same `ui_event` stream carries reachability to every host/the webview (Seam B).
+//! so the same `UiEvent` stream carries reachability to every subscriber.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,8 +61,8 @@ pub trait ConnectivityProbe: Send + Sync {
 /// Behaviour:
 /// - **startup:** emit `Checking`, probe once, emit the result.
 /// - **periodic:** every `interval` (when `interval > 0`), probe and emit the result *unconditionally*
-///   — a steady re-emit doubles as a heartbeat so a late `ui_event` subscriber (e.g. a reloaded
-///   webview) gets the current state within one interval without needing a query command.
+///   — a steady re-emit doubles as a heartbeat so a late `UiEvent` subscriber gets the current state
+///   within one interval without needing a query command.
 /// - **on demand:** when `trigger` is notified (a host's `check_reachability`, or a session connect
 ///   failure), emit `Checking`, probe, emit the result — so a manual retry always gives feedback.
 ///

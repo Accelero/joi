@@ -1,6 +1,6 @@
 //! Key-event → [`Action`] mapping. Kept separate from the model so the binding scheme is one
-//! readable table. The input line is always focused (like the web prompt), so session controls use
-//! function keys (added in M4); only the quit chords exist for now.
+//! readable table. The input line is always focused, so session controls use function keys; the
+//! arrow keys drive the `/resume` picker when it is open.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
@@ -38,6 +38,9 @@ fn map_key(key: &KeyEvent) -> Action {
         KeyCode::Delete => Action::Delete,
         KeyCode::Left => Action::Left,
         KeyCode::Right => Action::Right,
+        // Vertical arrows drive the picker selection (inert when no picker is open).
+        KeyCode::Up => Action::Up,
+        KeyCode::Down => Action::Down,
         KeyCode::Enter => Action::Submit,
         KeyCode::PageUp => Action::ScrollUp,
         KeyCode::PageDown => Action::ScrollDown,

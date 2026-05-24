@@ -2,8 +2,8 @@
 //!
 //! Provider adapters bridge their wire messages into one **ordered** [`SessionEvent`] stream
 //! (transcript-before-turn-end), delivered over an owned [`EventReceiver`] taken once after
-//! `connect` (SPEC §4). The [`crate::manager::SessionManager`] maps these to [`UiEvent`]s — the
-//! serializable shape mirrored by the frontend (SPEC §11.3).
+//! `connect`. The [`crate::manager::SessionManager`] maps these to [`UiEvent`]s — the single,
+//! serializable event surface a frontend folds (PLAN §6).
 
 use serde::{Deserialize, Serialize};
 
@@ -12,15 +12,14 @@ use crate::history::HistoryMeta;
 use crate::metrics::MetricsSnapshot;
 use crate::tools::ToolCallId;
 
-/// Owned receiver for a session's event stream (SPEC §4 — taken once via `take_events`).
+/// Owned receiver for a session's event stream (taken once via `take_events`).
 pub type EventReceiver = tokio::sync::mpsc::Receiver<SessionEvent>;
 /// Sender half adapters push [`SessionEvent`]s into.
 pub type EventSender = tokio::sync::mpsc::Sender<SessionEvent>;
 
-/// Who is speaking in a transcript line (SPEC §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+/// Who is speaking in a transcript line (SPEC §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum Speaker {
     /// The human user.
     User,
@@ -28,7 +27,7 @@ pub enum Speaker {
     Agent,
 }
 
-/// Turn-taking boundary events (SPEC §4).
+/// Turn-taking boundary events (SPEC §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEvent {
@@ -40,7 +39,7 @@ pub enum TurnEvent {
     Interrupted,
 }
 
-/// Why a session closed (SPEC §4).
+/// Why a session closed (SPEC §3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseReason {
@@ -52,10 +51,10 @@ pub enum CloseReason {
     Error,
 }
 
-/// One item in a session's ordered outbound event stream (SPEC §4).
+/// One item in a session's ordered outbound event stream (SPEC §2).
 ///
-/// Not serialized across IPC directly — the manager maps it to [`UiEvent`] (and routes audio over
-/// the binary Channel).
+/// Internal to the engine — the manager maps it to [`UiEvent`] for the frontend and routes audio
+/// over the broadcast audio channel.
 #[derive(Debug)]
 pub enum SessionEvent {
     /// 24 kHz mono PCM16 to play back.
@@ -74,7 +73,7 @@ pub enum SessionEvent {
     },
     /// A turn-taking boundary.
     TurnEvent(TurnEvent),
-    /// `[POST]` A model-emitted tool call. Unused in the MVP (SPEC §10).
+    /// `[LATER]` A model-emitted tool call. Unused in the MVP (FR-24).
     ToolCall {
         /// Provider-assigned id.
         id: ToolCallId,
@@ -83,7 +82,7 @@ pub enum SessionEvent {
         /// Tool arguments.
         args: serde_json::Value,
     },
-    /// A session-resumption handle for transient reconnects (SPEC §5.2).
+    /// A session-resumption handle for transient reconnects (FR-16).
     SessionResumptionUpdate {
         /// Opaque provider handle.
         handle: String,
@@ -98,9 +97,8 @@ pub enum SessionEvent {
 }
 
 /// High-level lifecycle/UI state surfaced to the user at all times (FR-4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum AppState {
     /// No session, no cost.
     Stopped,
@@ -112,16 +110,15 @@ pub enum AppState {
     Thinking,
     /// The model is speaking.
     Speaking,
-    /// Transiently reconnecting (SPEC §5.2).
+    /// Transiently reconnecting (FR-16).
     Reconnecting,
     /// An error state requiring user attention.
     Error,
 }
 
-/// Connection status detail surfaced via the `connection` event (SPEC §11.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+/// Connection status detail surfaced via the `connection` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum ConnectionStatus {
     /// Disconnected.
     Disconnected,
@@ -136,9 +133,8 @@ pub enum ConnectionStatus {
 /// Whether the provider's API is reachable, from the token-free background probe (see
 /// [`crate::connectivity`]). Distinct from [`ConnectionStatus`], which tracks a *live session's*
 /// socket; reachability is meaningful even with no session running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum Reachability {
     /// Not probed yet (initial state).
     Unknown,
@@ -152,27 +148,26 @@ pub enum Reachability {
     Offline,
 }
 
-/// UI-facing event emitted to the webview (SPEC §11.3). Audio is **not** here — it streams over the
-/// binary `tauri::ipc::Channel` (SPEC §11.2).
+/// UI-facing event — the single event surface a frontend folds (PLAN §6). Audio is **not** here —
+/// it streams over the broadcast audio channel (`subscribe_audio`).
 ///
 /// Not `Eq`: the `Metrics` payload carries `f64` rates (`MetricsSnapshot`), which have no total
 /// equality. `PartialEq` is kept for tests and change-detection.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
 pub enum UiEvent {
     /// Lifecycle/UI state change (FR-4).
     State {
         /// The new state.
         state: AppState,
     },
-    /// A transcript line for the terminal (SPEC §8).
+    /// A transcript line for the terminal (FR-3/FR-12).
     Transcript {
         /// Who spoke.
         speaker: Speaker,
         /// The text.
         text: String,
-        /// Whether this line is finalized. Serializes as `final` (m-4 raw-keyword dodge).
+        /// Whether this line is finalized. Serializes as `final` (raw-keyword dodge).
         #[serde(rename = "final")]
         final_: bool,
     },

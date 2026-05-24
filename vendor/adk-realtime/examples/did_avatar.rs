@@ -43,12 +43,18 @@ fn main() {
     // Step 2: Create the avatar configuration
     let avatar_config = AvatarConfig {
         source_url: "https://example.com/avatar-photo.jpg".to_string(),
-        lip_sync: Some(LipSyncConfig { enabled: true, sync_mode: None }),
+        lip_sync: Some(LipSyncConfig {
+            enabled: true,
+            sync_mode: None,
+        }),
         rendering: None,
         provider: Some(AvatarProviderKind::DId),
     };
 
-    println!("Avatar config: {}", serde_json::to_string_pretty(&avatar_config).unwrap());
+    println!(
+        "Avatar config: {}",
+        serde_json::to_string_pretty(&avatar_config).unwrap()
+    );
 
     // Step 3: Show how to wire into RealtimeAgentBuilder
     println!("\n// Usage with RealtimeAgentBuilder:");

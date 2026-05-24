@@ -1,12 +1,12 @@
-//! Bounded, restorable conversation history (SPEC §6).
+//! Bounded, restorable conversation history (SPEC §3.6).
 //!
 //! History persists **text** turns (transcripts), not audio — enough to re-seed a fresh session as
-//! `initial_context` on resume (SPEC §6.1, §6.3). It is bounded by a [`TokenBudget`] sized to the
-//! **Live session's input limit**, *not* the underlying text model's 1M-class window (SPEC §6.2).
+//! `initial_context` on resume (FR-20/21). It is bounded by a [`TokenBudget`] sized to the
+//! **Live session's input limit**, *not* the underlying text model's 1M-class window (FR-21).
 //!
-//! Two implementations: [`memory::InMemoryHistory`] (tests) and [`file::JsonlHistory`] (prod).
+//! Two implementations: [`memory::InMemoryHistory`] (fallback/tests) and the persistent
+//! [`session::SessionStore`] (the resumable-session unit the user manages — PLAN §5).
 
-pub mod file;
 pub mod memory;
 pub mod session;
 
@@ -16,11 +16,10 @@ use serde::{Deserialize, Serialize};
 use crate::clock::UnixMillis;
 use crate::error::HistoryError;
 
-pub use file::JsonlHistory;
 pub use memory::InMemoryHistory;
 pub use session::{Session, SessionMeta, SessionStore, SessionSummary};
 
-/// Who produced a turn (SPEC §6.1).
+/// Who produced a turn (PLAN §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -61,13 +60,12 @@ impl HistoryTurn {
     }
 }
 
-/// An approximate token budget bounding stored history (SPEC §6.2).
+/// An approximate token budget bounding stored history (FR-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TokenBudget(pub u32);
 
-/// Summary of the current history, surfaced to the UI (SPEC §11, `history` event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
-#[ts(export)]
+/// Summary of the current history, surfaced to the UI (the `history` event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HistoryMeta {
     /// Number of stored turns.
     pub turns: usize,
@@ -79,14 +77,14 @@ pub struct HistoryMeta {
 
 /// Approximate token count of `text`.
 ///
-/// This is the single swap point for a smarter tokenizer later (PLAN §7 M3); the MVP uses the
-/// chars/4 heuristic. Always returns at least 1 so an empty turn still counts.
+/// This is the single swap point for a smarter tokenizer later; the MVP uses the chars/4 heuristic.
+/// Always returns at least 1 so an empty turn still counts.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> u32 {
     ((text.chars().count() / 4) as u32).max(1)
 }
 
-/// Persisted conversation store. Append-mostly with pruning to a token budget (SPEC §6.4).
+/// Persisted conversation store. Append-mostly with pruning to a token budget (FR-21/22).
 #[async_trait]
 pub trait HistoryStore: Send + Sync {
     /// Append a finalized turn, pruning oldest turns if the budget is exceeded.
@@ -95,7 +93,7 @@ pub trait HistoryStore: Send + Sync {
     /// Newest-first turns whose cumulative token estimate fits `budget`.
     ///
     /// The returned set is **guaranteed re-seedable**: its total estimate is ≤ `budget`, so it can
-    /// be passed straight back as `SessionConfig.initial_context` (SPEC §6.3).
+    /// be passed straight back as `SessionConfig.initial_context` (FR-20/21).
     async fn load_within_budget(
         &self,
         budget: TokenBudget,

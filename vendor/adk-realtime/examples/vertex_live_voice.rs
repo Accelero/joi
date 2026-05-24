@@ -39,7 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_id =
         std::env::var("GOOGLE_CLOUD_PROJECT").expect("GOOGLE_CLOUD_PROJECT env var is required");
 
-    let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
+    let backend = GeminiLiveBackend::Vertex {
+        credentials,
+        region,
+        project_id,
+    };
 
     // --- 3. Create the model and session configuration ---
     let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
@@ -52,7 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connected! Session established.");
 
     // --- 5. Send a text prompt ---
-    session.send_text("Hello! What can you help me with today?").await?;
+    session
+        .send_text("Hello! What can you help me with today?")
+        .await?;
     println!("Sent text prompt, waiting for response...\n");
 
     // --- 6. Process response events ---
@@ -74,7 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             ServerEvent::Error { error, .. } => {
-                eprintln!("\nError from server: {} - {}", error.error_type, error.message);
+                eprintln!(
+                    "\nError from server: {} - {}",
+                    error.error_type, error.message
+                );
                 break;
             }
             _ => {

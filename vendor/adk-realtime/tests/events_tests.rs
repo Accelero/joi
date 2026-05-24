@@ -40,7 +40,11 @@ fn test_tool_response_from_string() {
 
 #[test]
 fn test_client_event_audio_delta_serialization() {
-    let event = ClientEvent::AudioDelta { event_id: None, audio: b"hello".to_vec(), format: None };
+    let event = ClientEvent::AudioDelta {
+        event_id: None,
+        audio: b"hello".to_vec(),
+        format: None,
+    };
 
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("input_audio_buffer.append"));
@@ -84,7 +88,12 @@ fn test_server_event_audio_delta_deserialization() {
 
     let event: ServerEvent = serde_json::from_str(json).unwrap();
     match event {
-        ServerEvent::AudioDelta { event_id, delta, item_id, .. } => {
+        ServerEvent::AudioDelta {
+            event_id,
+            delta,
+            item_id,
+            ..
+        } => {
             assert_eq!(event_id, "evt_123");
             assert_eq!(delta, b"hello"); // decoded from base64
             assert_eq!(item_id, "item_789");
@@ -151,7 +160,12 @@ fn test_server_event_function_call_done_deserialization() {
 
     let event: ServerEvent = serde_json::from_str(json).unwrap();
     match event {
-        ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+        ServerEvent::FunctionCallDone {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
             assert_eq!(call_id, "call_abc");
             assert_eq!(name, "get_weather");
             assert!(arguments.contains("NYC"));

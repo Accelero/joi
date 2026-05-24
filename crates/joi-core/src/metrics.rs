@@ -1,4 +1,4 @@
-//! Throughput metering surfaced to the UI (SPEC §11.3, via [`crate::session::UiEvent::Metrics`]).
+//! Throughput metering surfaced to the UI (via [`crate::session::UiEvent::Metrics`]).
 //!
 //! The [`crate::manager::SessionManager`] records the payload bytes crossing the provider boundary
 //! in each direction and the agent's output tokens, then samples a rolling rate on a fixed cadence
@@ -23,8 +23,7 @@ const CHARS_PER_TOKEN: f64 = 4.0;
 /// All four figures are instantaneous rates over the most recent [`SAMPLE_INTERVAL`] window, so
 /// the frontend can render a live up/down bandwidth + up/down token-rate indicator without doing
 /// any math of its own (the architecture rule: logic in Rust, the UI only renders).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     /// Upstream rate to the provider in kbit/s — actual WebSocket frame bytes (base64+JSON) when the
     /// provider reports them, otherwise a payload-level estimate (mic audio + screen frames + text).
@@ -159,7 +158,7 @@ pub struct TransportBytes {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::float_cmp)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod tests {
     use super::*;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mirror the CI quality gate locally (PLAN §8, §9). Run before every commit.
+# Mirror the CI quality gate locally (PLAN §10). Run before every commit.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -12,32 +12,32 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
 echo "── cargo test ──"
 cargo test --workspace
 
-# `cargo test` regenerates the ts-rs IPC bindings (joi-core `#[ts(export)]` → src/bindings). If the
-# committed copies differ, the Rust types and the frontend's TS contract have drifted — fail loudly.
-echo "── generated TS bindings are up to date (src/bindings) ──"
-if [ -n "$(git status --porcelain src/bindings)" ]; then
-  echo "!! src/bindings is out of date — run 'cargo test -p joi-core' and commit the result" >&2
-  git --no-pager diff -- src/bindings >&2
-  git --no-pager status --porcelain src/bindings >&2
+# Layering is honest only if the dependency graph proves it (PLAN §5, §10). These assertions are
+# the architectural gate: they fail the build if a crate grows a dependency it must never have.
+echo "── dependency assertions (layering) ──"
+
+# joi-core is the pure domain: no device I/O, no provider SDK, no host/UI, no HTTP.
+core_tree="$(cargo tree -p joi-core -e no-dev 2>/dev/null)"
+if echo "$core_tree" | grep -qiE 'cpal|xcap|sonora|adk-realtime|reqwest|ratatui|crossterm'; then
+  echo "!! joi-core must not depend on devices/providers/HTTP/UI (cpal/xcap/sonora/adk-realtime/reqwest/ratatui)" >&2
+  echo "$core_tree" | grep -iE 'cpal|xcap|sonora|adk-realtime|reqwest|ratatui|crossterm' >&2
   exit 1
 fi
 
-echo "── engine stays host-agnostic (joi-app/joi-cli/joi-server/joi-tui must not depend on Tauri) ──"
-for crate in joi-app joi-cli joi-server joi-tui; do
-  if cargo tree -p "$crate" -e no-dev 2>/dev/null | grep -qiE 'tauri|webkit'; then
-    echo "!! $crate must not depend on Tauri/WebKit — the JOI engine must be host-agnostic" >&2
+# Terminal UI deps live only in joi-tui.
+for crate in joi-core joi-providers joi-media joi-app; do
+  if cargo tree -p "$crate" -e no-dev 2>/dev/null | grep -qiE 'ratatui|crossterm'; then
+    echo "!! $crate must not depend on ratatui/crossterm — terminal UI belongs to joi-tui only" >&2
     exit 1
   fi
 done
 
-# Frontend gate. Requires bun (or swap for pnpm). Skipped if bun is unavailable.
-if command -v bun >/dev/null 2>&1; then
-  echo "── frontend typecheck / test / build ──"
-  bun run typecheck
-  bun run test
-  bun run build
-else
-  echo "!! bun not found — skipping frontend gate (install bun or use pnpm)"
-fi
+# No host/webview/binding-generator anywhere in the workspace.
+for crate in joi-core joi-providers joi-media joi-app joi-tui; do
+  if cargo tree -p "$crate" -e no-dev 2>/dev/null | grep -qiE 'tauri|webkit|ts-rs'; then
+    echo "!! $crate must not depend on tauri/webkit/ts-rs — this is a native, TUI-first rewrite" >&2
+    exit 1
+  fi
+done
 
 echo "✓ all checks passed"

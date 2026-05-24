@@ -99,17 +99,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let room = bundle.room;
     let mut room_events = bundle.events;
-    let audio_source = bundle.audio_source.expect("Audio source was not created by builder");
-    let _audio_track = bundle.audio_track.expect("Audio track was not created by builder");
+    let audio_source = bundle
+        .audio_source
+        .expect("Audio source was not created by builder");
+    let _audio_track = bundle
+        .audio_track
+        .expect("Audio track was not created by builder");
 
-    tracing::info!("Connected to LiveKit room '{}' and published audio track.", room.name());
+    tracing::info!(
+        "Connected to LiveKit room '{}' and published audio track.",
+        room.name()
+    );
 
     // --- 4. Wrap event handler with LiveKit audio output ---
     // The LiveKitEventHandler intercepts `on_audio` events emitted by the
     // RealtimeRunner and pushes those PCM bytes to the NativeAudioSource.
     let inner_handler = PrintingEventHandler;
-    let lk_handler =
-        LiveKitEventHandler::new(inner_handler, audio_source, GEMINI_SAMPLE_RATE, NUM_CHANNELS);
+    let lk_handler = LiveKitEventHandler::new(
+        inner_handler,
+        audio_source,
+        GEMINI_SAMPLE_RATE,
+        NUM_CHANNELS,
+    );
 
     // --- 5. Build the RealtimeRunner ---
     let config = RealtimeConfig::default()
@@ -137,7 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
         while let Some(event) = room_events.recv().await {
-            if let RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio_track), .. } = event
+            if let RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(audio_track),
+                ..
+            } = event
             {
                 tracing::info!("Subscribed to remote audio track. Bridging input...");
                 let r = bridge_runner.clone();

@@ -1,6 +1,6 @@
-//! Native screen capture (SPEC §7.3): grab the primary monitor at `fps` via `xcap`, downscale to
-//! `max_width`, JPEG-encode, and push [`VideoFrame`]s to the session. Replaces the planned webview
-//! `getDisplayMedia` path — capture stays in Rust.
+//! Native screen capture (PLAN §7.2, FR-8): grab the primary monitor at `fps` via `xcap`, downscale
+//! to `max_width`, JPEG-encode, and push [`VideoFrame`]s to the session. Capture stays in Rust —
+//! the frame bytes only ever cross into the provider adapter, never a frontend.
 
 use std::sync::mpsc::{channel, Sender, TryRecvError};
 use std::time::{Duration, Instant};

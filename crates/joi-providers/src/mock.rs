@@ -1,8 +1,8 @@
 //! [`MockSession`] — a scripted, deterministic [`RealtimeSession`] with no network.
 //!
-//! It drives the M1 loop and backs the conformance suite (SPEC §16). Each `send_text` emits a
-//! fixed, ordered turn (transcript-before-turn-end); each `send_audio` emits one output chunk, so
-//! the full media + abstraction path is exercised without a provider.
+//! It drives the headless gate (PLAN §2, M5) and backs the conformance suite (PLAN §8, M3). Each
+//! `send_text` emits a fixed, ordered turn (transcript-before-turn-end); each `send_audio` emits
+//! one output chunk, so the full media + abstraction path is exercised without a provider.
 
 use async_trait::async_trait;
 use joi_core::error::SessionError;

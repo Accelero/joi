@@ -40,7 +40,9 @@ struct RecordingHandler {
 
 impl RecordingHandler {
     fn new() -> Self {
-        Self { calls: Arc::new(Mutex::new(Vec::new())) }
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     async fn recorded_calls(&self) -> Vec<RecordedCall> {
@@ -56,10 +58,10 @@ impl EventHandler for RecordingHandler {
     }
 
     async fn on_text(&self, text: &str, item_id: &str) -> adk_realtime::Result<()> {
-        self.calls
-            .lock()
-            .await
-            .push(RecordedCall::Text { text: text.to_string(), item_id: item_id.to_string() });
+        self.calls.lock().await.push(RecordedCall::Text {
+            text: text.to_string(),
+            item_id: item_id.to_string(),
+        });
         Ok(())
     }
 
@@ -72,12 +74,18 @@ impl EventHandler for RecordingHandler {
     }
 
     async fn on_speech_started(&self, audio_start_ms: u64) -> adk_realtime::Result<()> {
-        self.calls.lock().await.push(RecordedCall::SpeechStarted { audio_start_ms });
+        self.calls
+            .lock()
+            .await
+            .push(RecordedCall::SpeechStarted { audio_start_ms });
         Ok(())
     }
 
     async fn on_speech_stopped(&self, audio_end_ms: u64) -> adk_realtime::Result<()> {
-        self.calls.lock().await.push(RecordedCall::SpeechStopped { audio_end_ms });
+        self.calls
+            .lock()
+            .await
+            .push(RecordedCall::SpeechStopped { audio_end_ms });
         Ok(())
     }
 
@@ -87,7 +95,9 @@ impl EventHandler for RecordingHandler {
     }
 
     async fn on_error(&self, error: &RealtimeError) -> adk_realtime::Result<()> {
-        self.calls.lock().await.push(RecordedCall::Error { message: error.to_string() });
+        self.calls.lock().await.push(RecordedCall::Error {
+            message: error.to_string(),
+        });
         Ok(())
     }
 }
@@ -123,7 +133,11 @@ fn arb_timestamp() -> impl Strategy<Value = u64> {
 
 /// Helper to run an async block in a tokio runtime for proptest.
 fn run_async<F: std::future::Future<Output = ()>>(f: F) {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(f);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f);
 }
 
 proptest! {

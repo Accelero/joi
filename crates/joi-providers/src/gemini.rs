@@ -1,4 +1,4 @@
-//! `[M2]` [`GeminiAdapter`] — Gemini Live native audio over `adk-realtime` (SPEC §4.3, §4.5).
+//! [`GeminiAdapter`] — Gemini Live native audio over the vendored `adk-realtime` (PLAN §7.4, M2).
 //!
 //! The realtime SDK is an implementation detail confined to this module (see `NOTES-adk.md` for the
 //! spike that pinned its API). We use `adk-realtime`'s **low-level** `RealtimeSession` (not the
@@ -6,7 +6,7 @@
 //! into Joi's owned [`EventReceiver`], so nothing about adk leaks past [`RealtimeSession`].
 //!
 //! The API key is injected at construction (the factory reads it from `config.live_api.gemini`) and
-//! held as a [`secrecy::SecretString`] — it never travels through [`SessionConfig`].
+//! held as a [`secrecy::SecretString`] — it never travels through [`SessionConfig`] (SEC-1).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,7 +80,7 @@ impl RealtimeSession for GeminiAdapter {
         init_crypto();
 
         let backend = GeminiLiveBackend::studio(self.api_key.expose_secret().to_string());
-        let model = GeminiRealtimeModel::new(backend, cfg.model);
+        let model = GeminiRealtimeModel::new(backend, model_resource_name(&cfg.model));
 
         let mut rc = RealtimeConfig::default()
             .with_instruction(cfg.system_instruction)
@@ -105,8 +105,14 @@ impl RealtimeSession for GeminiAdapter {
         // Seed the prior conversation as context (turnComplete=false) so this fresh connection
         // continues the same chat without replaying old turns as new prompts. An empty log (first
         // run) seeds nothing. A seed failure is non-fatal — the session works, just without memory.
+        //
+        // The Live protocol rejects any `clientContent` sent before the server acknowledges setup
+        // ("Request contains an invalid argument"), and adk's `connect` returns *without* awaiting
+        // that ack — so wait for `setupComplete` before seeding. The first start has an empty seed,
+        // which is why this only ever bit a resume.
         let seed = history_to_seed_turns(&cfg.initial_context);
         if !seed.is_empty() {
+            wait_for_setup(&session).await;
             match session.send_history(&seed).await {
                 Ok(()) => tracing::info!(turns = seed.len(), "seeded prior conversation"),
                 Err(e) => tracing::warn!(error = %e, turns = seed.len(), "failed to seed history"),
@@ -181,7 +187,7 @@ impl RealtimeSession for GeminiAdapter {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Honest MVP flags: resumption is wired in M3, native screen in M4, tools are POST.
+        // Honest MVP flags: resumption, native screen input, and tool calls are all future work.
         Capabilities {
             session_resumption: false,
             native_screen_input: false,
@@ -198,6 +204,22 @@ impl RealtimeSession for GeminiAdapter {
         let (up, down) = self.session.as_ref()?.token_usage()?;
         Some(TokenUsage { up, down })
     }
+}
+
+/// Block until the server acknowledges setup (`setupComplete`, surfaced by adk as
+/// [`ServerEvent::SessionCreated`]) or a short timeout elapses. The Live API rejects any
+/// `clientContent` (e.g. the history seed) sent before setup is acknowledged, and adk's `connect`
+/// does not await it. Events consumed here precede `setupComplete` and carry nothing the UI needs,
+/// so discarding them is safe; the pump reads everything after.
+async fn wait_for_setup(session: &Arc<dyn AdkSession>) {
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(result) = session.next_event().await {
+            if matches!(result, Ok(ServerEvent::SessionCreated { .. })) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// Forward adk `ServerEvent`s into Joi's owned event stream until the session closes or the manager
@@ -295,7 +317,7 @@ impl EventMapper {
                     error.message
                 )))]
             }
-            // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (POST), rate limits,
+            // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (LATER), rate limits,
             // and unknown forward-compat variants carry nothing the MVP UI needs.
             _ => vec![],
         }
@@ -345,22 +367,47 @@ fn user_delta(text: String, final_: bool) -> SessionEvent {
     }
 }
 
-/// Map persisted [`HistoryTurn`]s to adk seed turns `(role, text)`, in chronological order, using
-/// Gemini's role names. Whitespace-only turns are skipped (no degenerate seed), and `System` turns
-/// are dropped — system context belongs in the setup's `systemInstruction`, not a dialogue turn.
+/// Build the conversation seed sent on (re)connect as context.
+///
+/// Gemini's Live `clientContent` rejects a multi-turn history that carries `model`-role turns — it
+/// closes the socket with "Request contains an invalid argument" (a single `user` turn is the only
+/// shape it reliably accepts). So rather than replay turns natively, we fold the whole prior
+/// conversation into **one `user` turn**: a labelled transcript the model reads as memory.
+/// `send_history` sends it with `turnComplete=false`, so the model doesn't reply to it — it just
+/// primes the next turn. `System` turns are dropped (that context lives in the setup instruction),
+/// whitespace-only turns are skipped, and an empty/whitespace-only history seeds nothing.
 fn history_to_seed_turns(turns: &[HistoryTurn]) -> Vec<(String, String)> {
-    turns
-        .iter()
-        .filter(|t| !t.text.trim().is_empty())
-        .filter_map(|t| {
-            let role = match t.role {
-                Role::User => "user",
-                Role::Assistant => "model",
-                Role::System => return None,
-            };
-            Some((role.to_string(), t.text.clone()))
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for turn in turns {
+        let text = turn.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // "Me"/"You" so the model reads the lines as the human's and its own prior words.
+        let who = match turn.role {
+            Role::User => "Me",
+            Role::Assistant => "You",
+            Role::System => continue,
+        };
+        lines.push(format!("{who}: {text}"));
+    }
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let context = format!(
+        "[Context: a transcript of our earlier conversation so you can continue it. Don't reply to \
+         this note — just use it as memory.]\n\n{}",
+        lines.join("\n")
+    );
+    vec![("user".to_string(), context)]
+}
+
+/// Build the wire resource name for the Live (`bidiGenerateContent`) endpoint, which addresses
+/// models as `models/<id>`. Config carries the **bare** model name (`gemini-3.1-flash-live-preview`)
+/// — `Config::validate` rejects a `models/` prefix — so this only qualifies it; it performs no
+/// lenient adaptation of the input.
+fn model_resource_name(model: &str) -> String {
+    format!("models/{}", model.trim())
 }
 
 /// Classify a connect-time error so the UI can tell "bad key" from "network down".
@@ -481,6 +528,20 @@ mod tests {
     fn debug_never_renders_the_key() {
         let rendered = format!("{:?}", adapter());
         assert!(!rendered.contains("test-key"), "key leaked: {rendered}");
+    }
+
+    #[test]
+    fn bare_model_name_is_qualified_for_the_wire() {
+        // Config holds the bare name (a `models/` prefix is rejected by Config::validate); the
+        // adapter qualifies it as the Live endpoint's `models/<id>` resource name.
+        assert_eq!(
+            model_resource_name("gemini-3.1-flash-live-preview"),
+            "models/gemini-3.1-flash-live-preview"
+        );
+        assert_eq!(
+            model_resource_name("  gemini-3.1-flash-live-preview  "),
+            "models/gemini-3.1-flash-live-preview"
+        );
     }
 
     fn transcript_delta(delta: &str) -> ServerEvent {
@@ -668,22 +729,32 @@ mod tests {
     }
 
     #[test]
-    fn history_maps_to_gemini_seed_turns_in_order() {
+    fn history_folds_into_one_user_context_turn() {
+        // The whole prior conversation becomes a single user turn (a labelled transcript) — the only
+        // shape Gemini's clientContent reliably accepts. Back-to-back same-role turns and a trailing
+        // model turn (both of which Gemini rejects as native turns) are harmless inside the text.
         let turns = vec![
-            HistoryTurn::new(Role::User, "hello", 1),
-            HistoryTurn::new(Role::Assistant, "hi there", 2),
-            HistoryTurn::new(Role::User, "   ", 3), // whitespace-only → skipped
-            HistoryTurn::new(Role::System, "be nice", 4), // system → dropped (goes in setup)
+            HistoryTurn::new(Role::User, "Hello, can you hear me?", 1),
+            HistoryTurn::new(Role::User, "What was my first word?", 2),
+            HistoryTurn::new(Role::Assistant, "Yes — it was Hello.", 3),
+            HistoryTurn::new(Role::User, "   ", 4), // whitespace-only → skipped
+            HistoryTurn::new(Role::System, "be nice", 5), // system → dropped (goes in setup)
         ];
-        assert_eq!(
-            history_to_seed_turns(&turns),
-            vec![
-                ("user".to_string(), "hello".to_string()),
-                ("model".to_string(), "hi there".to_string()),
-            ]
-        );
-        // An empty log seeds nothing.
+        let seed = history_to_seed_turns(&turns);
+        assert_eq!(seed.len(), 1, "exactly one (user) turn");
+        let (role, text) = &seed[0];
+        assert_eq!(role, "user");
+        assert!(text.contains("Me: Hello, can you hear me?"), "{text}");
+        assert!(text.contains("Me: What was my first word?"), "{text}");
+        assert!(text.contains("You: Yes — it was Hello."), "{text}");
+        assert!(!text.contains("be nice"), "system turn dropped: {text}");
+    }
+
+    #[test]
+    fn empty_or_contentless_history_seeds_nothing() {
         assert!(history_to_seed_turns(&[]).is_empty());
+        assert!(history_to_seed_turns(&[HistoryTurn::new(Role::System, "x", 1)]).is_empty());
+        assert!(history_to_seed_turns(&[HistoryTurn::new(Role::User, "   ", 1)]).is_empty());
     }
 
     #[test]

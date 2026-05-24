@@ -182,7 +182,12 @@ impl LiveKitRoomBuilder<Present> {
             audio_track = Some(track);
         }
 
-        Ok(LiveKitRoomBundle { room, events, audio_source, audio_track })
+        Ok(LiveKitRoomBundle {
+            room,
+            events,
+            audio_source,
+            audio_track,
+        })
     }
 }
 
@@ -225,7 +230,9 @@ mod tests {
         let secret = std::env::var("LIVEKIT_API_SECRET").unwrap_or_else(|_| "secret".into());
 
         let config = LiveKitConfig::new(url, key, secret).unwrap();
-        let builder = LiveKitRoomBuilder::new(config).identity("test-agent").room_name("test-room");
+        let builder = LiveKitRoomBuilder::new(config)
+            .identity("test-agent")
+            .room_name("test-room");
 
         // Should fail gracefully if credentials are bad, or succeed if a local server is running.
         let _ = builder.connect().await;

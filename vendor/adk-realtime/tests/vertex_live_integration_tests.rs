@@ -48,7 +48,11 @@ async fn test_vertex_live_text_exchange() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
+        let backend = GeminiLiveBackend::Vertex {
+            credentials,
+            region,
+            project_id,
+        };
 
         let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
 
@@ -56,12 +60,21 @@ async fn test_vertex_live_text_exchange() {
             .with_instruction("You are a helpful assistant. Respond briefly.");
 
         // Connect to Vertex AI Live
-        let session = model.connect(config).await.expect("Failed to connect to Vertex AI Live");
+        let session = model
+            .connect(config)
+            .await
+            .expect("Failed to connect to Vertex AI Live");
 
-        assert!(session.is_connected(), "Session should be connected after successful connect");
+        assert!(
+            session.is_connected(),
+            "Session should be connected after successful connect"
+        );
 
         // Send a text message
-        session.send_text("Hello, say one word.").await.expect("Failed to send text");
+        session
+            .send_text("Hello, say one word.")
+            .await
+            .expect("Failed to send text");
 
         // Verify we receive at least one ServerEvent response
         let mut received_event = false;
@@ -110,13 +123,20 @@ async fn test_vertex_live_session_id() {
             .build()
             .expect("Failed to obtain Application Default Credentials");
 
-        let backend = GeminiLiveBackend::Vertex { credentials, region, project_id };
+        let backend = GeminiLiveBackend::Vertex {
+            credentials,
+            region,
+            project_id,
+        };
 
         let model = GeminiRealtimeModel::new(backend, "gemini-3.1-flash-live-preview");
 
         let config = RealtimeConfig::default();
 
-        let session = model.connect(config).await.expect("Failed to connect to Vertex AI Live");
+        let session = model
+            .connect(config)
+            .await
+            .expect("Failed to connect to Vertex AI Live");
 
         // Session ID should be non-empty after connection
         assert!(

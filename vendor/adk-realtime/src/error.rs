@@ -99,7 +99,10 @@ impl RealtimeError {
 
     /// Create a new server error.
     pub fn server<S: Into<String>>(code: S, message: S) -> Self {
-        Self::ServerError { code: code.into(), message: message.into() }
+        Self::ServerError {
+            code: code.into(),
+            message: message.into(),
+        }
     }
 
     /// Create a new provider error.
@@ -162,7 +165,10 @@ mod tests {
         // Verify it matches the Boxed variant and formats correctly
         match realtime_err {
             crate::error::RealtimeError::LiveKitNativeError(boxed_err) => {
-                assert!(matches!(*boxed_err, crate::livekit::LiveKitError::ConfigError(_)));
+                assert!(matches!(
+                    *boxed_err,
+                    crate::livekit::LiveKitError::ConfigError(_)
+                ));
                 assert_eq!(
                     format!("{}", boxed_err),
                     "LiveKit configuration error: test config error"

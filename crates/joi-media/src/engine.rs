@@ -1,8 +1,8 @@
-//! [`MediaEngine`]: the single interface the Tauri shell uses for all native media. It owns the
-//! capture/playback/screen lifecycle and the pumps that move frames between the cpal/xcap threads
-//! and the session, so the composition root stays thin (PLAN-NATIVE-MEDIA §4). The
-//! [`SessionManagerHandle`] API it binds to is unchanged — the engine simply takes the role the
-//! webview used to play.
+//! [`MediaEngine`]: the single interface the composition root (`joi-app`) uses for all native
+//! media. It owns the capture/playback/screen lifecycle and the pumps that move frames between the
+//! cpal/xcap threads and the session, so `JoiApp` stays thin (PLAN §7.5). The
+//! [`SessionManagerHandle`] it binds to is the only seam it touches — the engine drives the mic,
+//! speaker, and screen on the host machine.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,8 +48,7 @@ pub struct MediaConfig {
 }
 
 /// Owns all native media for one app instance. Construct once with [`MediaEngine::new`] (within a
-/// Tokio runtime); drive it with the lifecycle methods from IPC commands. `Send + Sync`, so it lives
-/// in Tauri-managed state.
+/// Tokio runtime); drive it with the lifecycle methods from `JoiApp`. `Send + Sync`.
 pub struct MediaEngine {
     config: MediaConfig,
     /// Mic frames are pushed here by the capture thread and drained into the session.
@@ -108,7 +107,7 @@ impl MediaEngine {
     /// drop muted audio.
     pub fn start_capture(&self) {
         // Hold `capture` across the whole operation so concurrent calls can't both spawn (and so the
-        // lock order is capture → render_sink, matching `stop_capture` — no deadlock).
+        // lock order is capture → render_sink, matching `stop_capture` — no deadlock; PLAN §7.3 #6).
         if let Ok(mut cap) = self.capture.lock() {
             if cap.is_some() {
                 return; // already capturing
@@ -186,10 +185,10 @@ impl MediaEngine {
 }
 
 /// Provider audio → native cpal playback. The manager's empty-frame is the barge-in sentinel →
-/// flush the playback buffer immediately (FR-2). The AEC reference is **not** fed here: provider
+/// flush the playback buffer immediately (FR-2/FR-7). The AEC reference is **not** fed here: provider
 /// audio arrives in bursts, but the echo the mic hears is the jitter-buffered, real-time playback —
 /// so the reference is tapped inside the playback engine at the output callback (what's actually
-/// emitted), keeping it aligned with the near-end echo for AEC3.
+/// emitted), keeping it aligned with the near-end echo for AEC3 (PLAN §7.3 #2).
 fn spawn_playback_pump(
     handle: &SessionManagerHandle,
     output_device: String,

@@ -1,7 +1,7 @@
-//! `[POST]` Tool-system seam (SPEC §10). **No tools ship in the MVP.**
+//! `[LATER]` Tool-system seam (FR-24/25). **No tools ship in the MVP.**
 //!
 //! These types exist only so tools — including the permission-gated `bash` tool and the memory
-//! tool — can drop in later without rewrites (SPEC §10, DESIGN §6.4). They are referenced by the
+//! tool — can drop in later without rewrites (PLAN §2). They are referenced by the
 //! [`crate::session::RealtimeSession`] trait (`send_tool_result`, [`crate::session::SessionConfig`]
 //! `tools`) but are unused at runtime in the MVP.
 

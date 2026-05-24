@@ -47,8 +47,9 @@ fn generate_sdp_offer() -> String {
     // Add the "oai-events" data channel for JSON event exchange
     changes.add_channel("oai-events".to_string());
 
-    let (offer, _pending) =
-        changes.apply().expect("SDP offer generation should succeed for audio + data channel");
+    let (offer, _pending) = changes
+        .apply()
+        .expect("SDP offer generation should succeed for audio + data channel");
 
     offer.to_sdp_string()
 }
@@ -191,5 +192,9 @@ fn test_sdp_offer_contains_ice_credentials() {
         "SDP offer missing a=ice-ufrag. SDP:\n{}",
         sdp_string
     );
-    assert!(sdp_string.contains("a=ice-pwd"), "SDP offer missing a=ice-pwd. SDP:\n{}", sdp_string);
+    assert!(
+        sdp_string.contains("a=ice-pwd"),
+        "SDP offer missing a=ice-pwd. SDP:\n{}",
+        sdp_string
+    );
 }

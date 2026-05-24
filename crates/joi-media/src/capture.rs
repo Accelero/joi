@@ -1,10 +1,8 @@
 //! Native mic capture with conditioning. The realtime cpal callback only downmixes to mono and
 //! forwards raw samples; the capture thread resamples to 16 kHz and runs a WebRTC-style audio
 //! processing module (Sonora: echo cancellation + noise suppression + AGC) before framing to 20 ms
-//! PCM16 for the session. This restores the echo cancellation / `noiseSuppression` /
-//! `autoGainControl` the webview's `getUserMedia` used to provide; Gemini only does VAD, so a
-//! leveled, denoised, echo-free mic improves detection and stops the model interrupting itself when
-//! playing through speakers.
+//! PCM16 for the session. Gemini only does VAD, so a leveled, denoised, echo-free mic improves
+//! detection and stops the model interrupting itself when playing through speakers (PLAN §7.2/7.3).
 //!
 //! **AEC:** the playback engine's provider audio is forwarded here as the render (far-end)
 //! reference via `render_rx`; the APM subtracts it from the mic so Joi's own voice picked up by the
@@ -28,7 +26,7 @@ const APM_RATE: u32 = AudioFormat::INPUT.sample_rate;
 const APM_FRAME: usize = (APM_RATE / 100) as usize;
 /// Cap on buffered far-end (render) audio (~200 ms at 16 kHz). If the provider ever streams faster
 /// than real time, drop the oldest so the AEC reference lead stays within AEC3's delay-tracking
-/// range instead of growing unboundedly.
+/// range instead of growing unboundedly (PLAN §7.3 #5).
 const MAX_RENDER_BACKLOG: usize = APM_FRAME * 20;
 /// Emit a mic-level diagnostic line once per this many APM frames (1 s = 100 × 10 ms frames).
 #[cfg(debug_assertions)]
@@ -119,9 +117,9 @@ fn run_capture(
     let config = supported.config();
     let err_fn = |e| tracing::error!("capture stream error: {e}");
 
-    // Realtime callback: mute-gate, downmix to mono f32, forward. No heavy DSP on the audio thread.
-    // Muting drops frames here; the manager separately signals the provider that the audio stream
-    // paused (`end_audio_stream`), so no silence needs to be streamed to keep the session healthy.
+    // Realtime callback: mute-gate, downmix to mono f32, forward. No heavy DSP on the audio thread
+    // (PLAN §7.3 #3). Muting drops frames here; the manager separately signals the provider that the
+    // audio stream paused (`end_audio_stream`), so no silence needs to be streamed to keep healthy.
     let (raw_tx, raw_rx) = channel::<Vec<f32>>();
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
@@ -243,10 +241,11 @@ impl LevelMeter {
 /// Per-second capture diagnostics: mic RMS levels (raw / pre-APM / post-APM / far-end reference)
 /// and the actual input sample rate vs the assumed one.
 ///
-/// **Debug builds only.** Compiled behind `debug_assertions`, so `cargo run`/`tauri dev` get it but
-/// the release standalone (`tauri build`) gets the zero-cost no-op stubs below — none of the
-/// metering or `tracing::debug!` calls are in the shipped binary. View output with
-/// `RUST_LOG=joi_media=debug`.
+/// **Debug builds only.** Compiled behind `debug_assertions`, so a `cargo run` debug build gets it
+/// but the release standalone binary gets the zero-cost no-op stubs below — none of the metering or
+/// `tracing::debug!` calls are in the shipped binary. To see the meters, run a **debug** build with
+/// `RUST_LOG=joi_media=debug cargo run -p joi-tui` — `RUST_LOG` only filters statements that exist,
+/// so it cannot surface these in a release build where they are compiled out.
 #[cfg(debug_assertions)]
 struct CaptureDiag {
     echo_cancellation: bool,
@@ -359,9 +358,9 @@ impl CaptureDiag {
 }
 
 /// Resample → APM (echo cancellation + noise suppression + AGC) → 20 ms PCM16 framing. Lives on the
-/// capture thread, so the APM (which is `!Send`-agnostic here) never crosses to the realtime
-/// callback. Both the near-end (mic) and far-end (playback) streams are fed at 16 kHz in 10 ms APM
-/// frames; the echo canceller subtracts the far-end from the near-end.
+/// capture thread, so the APM never crosses to the realtime callback. Both the near-end (mic) and
+/// far-end (playback) streams are fed at 16 kHz in 10 ms APM frames; the echo canceller subtracts
+/// the far-end from the near-end.
 struct CapturePipeline {
     apm: AudioProcessing,
     device_rate: u32,
@@ -425,9 +424,9 @@ impl CapturePipeline {
 
         while self.apm_in.len() >= APM_FRAME {
             // AEC3 needs the far-end (render) fed **every** capture frame at the same cadence —
-            // silence when nothing is playing. Feeding it only during agent speech (as we did)
-            // drifts its render/capture alignment until it cancels the *near-end* (user) voice,
-            // i.e. the mic stops getting through after a few turns. Pair one render frame (real, or
+            // silence when nothing is playing (PLAN §7.3 #1). Feeding it only during agent speech
+            // drifts its render/capture alignment until it cancels the *near-end* (user) voice, i.e.
+            // the mic stops getting through after a few turns. Pair one render frame (real, or
             // silence) with each capture frame.
             if self.echo_cancellation {
                 let render_frame: Vec<f32> = if self.render_in.len() >= APM_FRAME {
@@ -464,7 +463,7 @@ impl CapturePipeline {
     /// engine just emitted, at its device rate ([`Self::render_rate`]), resampled to the 16 kHz APM
     /// rate. It is consumed 1:1 with capture frames in [`process`](Self::process); here we only
     /// enqueue it. The backlog is capped so that a transient burst keeps the far-end lead within
-    /// AEC3's delay-tracking range instead of growing unboundedly.
+    /// AEC3's delay-tracking range instead of growing unboundedly (PLAN §7.3 #5).
     fn buffer_render(&mut self, render: &[i16]) {
         if !self.echo_cancellation {
             return; // AEC off: no reference needed; drained frames are simply dropped.

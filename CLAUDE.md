@@ -1,76 +1,46 @@
 # Joi — agent guide
 
-Joi is a local, provider-agnostic **voice + screen + terminal-UI** companion: a Tauri v2 desktop app
-with a Rust backend and a thin web (React/TS) frontend.
+> **Status:** the clean rewrite is implemented — the six crates in `crates/` (core, providers,
+> media, app, testkit, tui) follow the architecture below; `scripts/check.sh` is green. The
+> normative architecture lives in @doc/ARCH.md and the rewrite plan in @doc/PLAN.md — read them before
+> making structural decisions.
 
-## Architecture principle (read first)
+## What Joi is
 
-**All logic and heavy lifting live in the Rust backend. The TypeScript frontend is UI only.**
+Joi is a local, **provider-agnostic** voice + screen companion: a Rust application that connects a
+human to a realtime multimodal model, streams audio/video both ways, renders a live transcript, and
+**persists every conversation as a resumable session** (the Claude-Code model — list past sessions,
+resume one, branch a new one, and the history re-seeds the model so it "remembers").
 
-- **Rust** owns everything substantive: session/provider logic, audio capture + playback, screen
-  capture, DSP, resampling, jitter buffering, history, config, secrets, state machine. Media never
-  crosses into the webview — `crates/joi-media` does all capture/playback natively via cpal/xcap.
-- **TypeScript** (`src/`) is presentation + input only: render `UiEvent`s into the terminal/controls
-  and dispatch commands. **No business logic, no media, no DSP in TS.** If you're tempted to compute,
-  buffer, transform, or orchestrate in the frontend, it belongs in Rust behind an IPC command.
-- When adding a feature, default to: new logic in a crate → exposed via a `SessionManagerHandle`/
-  engine method → surfaced over IPC → thin TS that calls it and renders the result.
+It is a **Rust app**, not tied to any single frontend. The rewrite is **TUI-first**; more frontends
+will follow. Everything substantive is engine logic that any frontend drives — so don't design a
+feature "for the TUI." Design it once in the engine; the frontends get it for free.
 
-## Three layers, two interfaces
+## Coding principles
 
-The project is split so each layer compiles on its own (see `PLAN-MODULARIZATION.md`):
+1. **All logic lives in Rust; frontends are presentation and input only.** Session lifecycle,
+   provider protocol, history, audio DSP, config, state — all in the engine. A frontend renders
+   events and dispatches commands. It never computes, buffers, transforms, orchestrates, or touches
+   media. Litmus test: *"Could a headless process with no UI do this?"* If yes, it's engine logic.
 
-1. **JOI engine** — host-agnostic, **no Tauri** (`joi-core`/`joi-providers`/`joi-media`/`joi-app`).
-2. **Tauri backend** (`src-tauri`) — a thin adapter over the engine.
-3. **Web frontend** (`src/`) — pure UI, depends on no Rust crate.
+2. **The engine is host-agnostic.** It knows nothing about any specific frontend, GUI toolkit, or
+   transport, and can run headless. No frontend/host/transport types ever leak into it.
 
-- **Seam A** (engine ↔ host): the **`JoiApp`** Rust API in `crates/joi-app` — `build(Config, MediaMode)`
-  + `start/stop/send_text/send_audio/set_mic_muted/screenshare/has_api_key/ui_config` + `subscribe_events`/
-  `subscribe_audio`. No Tauri/HTTP/CLI types cross it. `crates/joi-cli` (stdin), `crates/joi-server`
-  (WebSocket), and `crates/joi-tui` (native ratatui terminal UI) are non-Tauri hosts that prove it.
-- **Seam B** (Tauri ↔ web): the JSON IPC below.
+3. **Stay provider-agnostic.** All wire-protocol knowledge is sealed behind a provider trait. The
+   domain never names a concrete provider; adding or swapping one touches only the provider adapter.
 
-`./scripts/check.sh` asserts `joi-app`/`joi-cli`/`joi-server`/`joi-tui` have **no** Tauri/WebKit in their dependency trees.
+4. **Separate domain mechanism from composition/policy.** *Mechanism* — what a thing is and how it
+   behaves, including its own file I/O (session format, budget rules, auto-naming) — lives in the
+   domain core. *Policy/wiring* — which directory to use, what to fall back to, which devices to
+   drive — lives at the composition root. "No I/O in core" means no **device** I/O (mic, speaker,
+   screen), not "never open a file"; the domain owns its own data files.
 
-## Workspace layout
+5. **One event surface, generated boundary types.** State flows **command-in, event-out**. Types
+   that cross a frontend boundary are generated from Rust, never hand-written, so the boundary can't
+   drift.
 
-| Crate | Responsibility |
-|---|---|
-| `crates/joi-core` | Pure domain: `Config` (YAML file + `JOI_`/`GEMINI_*` env, env wins; per-module sections `live_api`/`history`/`logging`/`media`/`ui`; provider key at `live_api.gemini.api_key` as a redacting `ApiKey`), `Clock`, `RealtimeSession`/`SessionEvent`/`UiEvent`, `HistoryStore`, `ScreenSource`, pure `media` DSP, and the **`SessionManager`** actor + `SessionManagerHandle`. No OS/audio/IO deps. |
-| `crates/joi-providers` | Realtime provider adapters (Gemini Live via adk-rust; OpenAI stub) + `build_session_factory`. |
-| `crates/joi-media` | Native I/O behind the **`MediaEngine`** interface: cpal capture (NS+AGC+AEC) and playback, xcap screen. Bound to a `SessionManagerHandle`. |
-| `crates/joi-app` | **Seam A** — `JoiApp`: host-agnostic composition + command API + event/audio streams. The boundary any host drives. No Tauri. |
-| `crates/joi-cli` | Headless host (text-only, `MediaMode::None`) — proves the engine runs with no GUI. |
-| `crates/joi-server` | Headless **HTTP/WS** host (axum, `MediaMode::None`): `/ws` exposes the same JSON-command + `UiEvent`-stream contract as the Tauri IPC over a WebSocket. |
-| `crates/joi-tui` | Native **terminal-UI** host (ratatui/crossterm) driving `JoiApp` in `MediaMode::LocalDevices` — full voice/screen parity with the desktop, no webview. Pure model/reducers (`app`/`transcript`/`input`) + thin render (`ui`/`theme`/`keys`). See `PLAN-TUI.md`. |
-| `crates/joi-testkit` | Test doubles/helpers. |
-| `src-tauri` | **Thin** Tauri adapter: `#[tauri::command]`s delegate to `JoiApp`; one task pumps its `UiEvent` stream to the webview as `ui_event`. No domain logic or composition. |
-| `src/` | React UI: `App.tsx` (wires events↔commands), `components/Terminal.tsx` (xterm), `components/Controls.tsx`, `ipc.ts` (typed IPC boundary). |
+6. **Prove it headless.** A feature isn't done until it works with no GUI. Keep the seams honest with
+   the kind of dependency/parity checks ARCH.md describes.
 
-## IPC boundary (Seam B)
-
-JSON only — no media crosses IPC (SPEC §11). Two directions:
-- **Commands** (`invoke`): `ipc.ts`'s `commands` object mirrors **exactly** the `generate_handler!`
-  list in `src-tauri/src/main.rs`. Keep them 1:1 — don't expose a command in `ipc.ts` that isn't
-  registered.
-- **Events**: the backend emits the tagged `UiEvent` enum on a single `ui_event` channel. The TS types
-  for `UiEvent` (and the other IPC types) are **generated from `joi-core` by ts-rs** (`#[ts(export)]` →
-  `src/bindings/`, regenerated by `cargo test`); `ipc.ts` re-exports them, `check.sh` fails on drift,
-  and `src/ipc.test.ts` is a runtime parity guard.
-
-## Build / test
-
-```bash
-cargo test --workspace
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
-bun install && bun run test && bun run build
-./scripts/check.sh                 # mirrors CI (Rust + TS)
-```
-
-## Run
-
-- **Dev (hot reload):** `bun run tauri dev` — runs the Vite dev server; the webview loads it.
-- **Standalone:** `bun run tauri build --no-bundle` → `./target/release/joi` (frontend embedded).
-  Do **not** use `cargo build --release` for the standalone — Tauri stays in dev mode and points the
-  webview at the dev URL. The provider key comes from config (`live_api.gemini.api_key`) or the
-  `GEMINI_API_KEY` env var (env wins).
+When in doubt about which layer something belongs in, consult @doc/ARCH.md — it works the layering
+through with session management as the running example, and ends with an invariants checklist.

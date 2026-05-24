@@ -93,12 +93,18 @@ impl VadConfig {
 
     /// Create a semantic VAD config (OpenAI).
     pub fn semantic_vad() -> Self {
-        Self { mode: VadMode::SemanticVad, ..Default::default() }
+        Self {
+            mode: VadMode::SemanticVad,
+            ..Default::default()
+        }
     }
 
     /// Create a config with VAD disabled.
     pub fn disabled() -> Self {
-        Self { mode: VadMode::None, ..Default::default() }
+        Self {
+            mode: VadMode::None,
+            ..Default::default()
+        }
     }
 
     /// Set silence duration threshold.
@@ -130,7 +136,11 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     /// Create a new tool definition.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), description: None, parameters: None }
+        Self {
+            name: name.into(),
+            description: None,
+            parameters: None,
+        }
     }
 
     /// Set the tool description.
@@ -277,7 +287,9 @@ pub struct TranscriptionConfig {
 impl TranscriptionConfig {
     /// Use whisper-1 for transcription.
     pub fn whisper() -> Self {
-        Self { model: "whisper-1".to_string() }
+        Self {
+            model: "whisper-1".to_string(),
+        }
     }
 }
 

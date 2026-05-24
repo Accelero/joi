@@ -1,9 +1,9 @@
 //! Provider selection — the composition-root helper that turns [`Config`] + the API key into a
-//! [`SessionFactory`] (PLAN §1: "only the composition root wires them together; the manager never
+//! [`SessionFactory`] (PLAN §5: "only the composition root wires them together; the manager never
 //! names a concrete provider").
 //!
-//! This lives here, not in `joi-core` (which must stay provider-agnostic) and not duplicated in the
-//! Tauri binary (which stays a thin shell). It is pure and fully unit-testable without a webview.
+//! This lives here, not in `joi-core` (which must stay provider-agnostic). It is pure and fully
+//! unit-testable without devices or a host.
 
 use std::sync::Arc;
 
@@ -50,18 +50,6 @@ pub fn build_session_factory(config: &Config) -> Result<Box<dyn SessionFactory>,
                 Err(FactoryError::ProviderDisabled("gemini"))
             }
         }
-        ProviderName::Openai => {
-            #[cfg(feature = "openai")]
-            {
-                Ok(Box::new(|| {
-                    Box::new(crate::openai::OpenAIAdapter::new()) as Box<dyn RealtimeSession>
-                }))
-            }
-            #[cfg(not(feature = "openai"))]
-            {
-                Err(FactoryError::ProviderDisabled("openai"))
-            }
-        }
         ProviderName::Mock => {
             #[cfg(feature = "mock")]
             {
@@ -96,8 +84,8 @@ pub fn build_connectivity_probe(config: &Config) -> Option<Arc<dyn ConnectivityP
                 None
             }
         }
-        // No reachability probe for the OpenAI stub or the mock provider.
-        ProviderName::Openai | ProviderName::Mock => None,
+        // No reachability probe for the mock provider.
+        ProviderName::Mock => None,
     }
 }
 
@@ -127,12 +115,6 @@ mod tests {
             ))
             .await
             .unwrap();
-    }
-
-    #[cfg(feature = "openai")]
-    #[test]
-    fn openai_factory_builds_without_a_key() {
-        assert!(build_session_factory(&config_with(ProviderName::Openai)).is_ok());
     }
 
     #[cfg(feature = "gemini")]

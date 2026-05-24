@@ -192,7 +192,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match event {
-            ServerEvent::FunctionCallDone { name, arguments, call_id, .. } => {
+            ServerEvent::FunctionCallDone {
+                name,
+                arguments,
+                call_id,
+                ..
+            } => {
                 println!("🔧 Tool call: {name}({arguments})");
 
                 // Execute the tool

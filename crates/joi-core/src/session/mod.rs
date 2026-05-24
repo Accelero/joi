@@ -1,9 +1,9 @@
-//! The provider-agnostic realtime session port (SPEC §4) — the founding abstraction.
+//! The provider-agnostic realtime session port (SPEC §2) — the founding abstraction.
 //!
 //! App logic (lifecycle, history, terminal UI) talks **only** to [`RealtimeSession`], never to a
 //! provider SDK. Adapters absorb every provider divergence (audio formats, VAD/interruption
 //! semantics, resumption, tool-call schema). App code must compile and behave identically against
-//! any adapter that honors this trait — that is how provider-agnosticism is *proven* (SPEC §16).
+//! any adapter that honors this trait — that is how provider-agnosticism is *proven* (PLAN §8, M3).
 
 pub mod event;
 
@@ -21,7 +21,7 @@ pub use event::{
     SessionEvent, Speaker, TurnEvent, UiEvent,
 };
 
-/// Everything needed to open a session (SPEC §4).
+/// Everything needed to open a session (SPEC §2).
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     /// Model id.
@@ -38,11 +38,11 @@ pub struct SessionConfig {
     pub enable_input_transcription: bool,
     /// Request transcription of the agent's audio (FR-3).
     pub enable_output_transcription: bool,
-    /// Prior conversation turns to seed on resume (SPEC §6.3).
+    /// Prior conversation turns to seed on resume (FR-20/21).
     pub initial_context: Vec<HistoryTurn>,
-    /// Provider session-resumption handle for a transient reconnect (SPEC §5.2).
+    /// Provider session-resumption handle for a transient reconnect (FR-16).
     pub resumption_handle: Option<String>,
-    /// `[POST]` Tool schemas. Always empty in the MVP (SPEC §10).
+    /// `[LATER]` Tool schemas. Always empty in the MVP (FR-24).
     pub tools: Vec<ToolSchema>,
 }
 
@@ -69,14 +69,14 @@ impl SessionConfig {
     }
 }
 
-/// Provider capability flags. App logic must **never assume** these (SPEC §4) — it checks them.
+/// Provider capability flags. App logic must **never assume** these (SPEC §2) — it checks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Provider supports session resumption handles (SPEC §5.2).
+    /// Provider supports session resumption handles (FR-16).
     pub session_resumption: bool,
-    /// Provider accepts native screen/video input (SPEC §7.3).
+    /// Provider accepts native screen/video input (FR-8).
     pub native_screen_input: bool,
-    /// `[POST]` Provider supports non-blocking tool calls. Plumbed but ignored in MVP (SPEC §10).
+    /// `[LATER]` Provider supports non-blocking tool calls. Plumbed but ignored in MVP (FR-24).
     pub async_tool_calls: bool,
 }
 
@@ -85,7 +85,7 @@ pub struct Capabilities {
 /// The event stream is taken **once** after `connect` via [`RealtimeSession::take_events`], which
 /// returns an *owned* receiver. A borrowed stream would alias `&mut self` and forbid calling
 /// `send_*` while reading events; the owned receiver lets the [`crate::manager::SessionManager`]
-/// actor `select!` over sends and events concurrently (SPEC §4 design note).
+/// actor `select!` over sends and events concurrently.
 #[async_trait]
 pub trait RealtimeSession: Send {
     /// Open the connection with the given config.
@@ -108,8 +108,8 @@ pub trait RealtimeSession: Send {
         Ok(())
     }
 
-    /// `[POST]` Return a tool result to the provider. Unused in the MVP; the default rejects
-    /// (SPEC §10).
+    /// `[LATER]` Return a tool result to the provider. Unused in the MVP; the default rejects
+    /// (FR-24).
     async fn send_tool_result(
         &mut self,
         _id: ToolCallId,
@@ -121,7 +121,7 @@ pub trait RealtimeSession: Send {
     /// Take the owned event stream. Call exactly once, after `connect`.
     fn take_events(&mut self) -> EventReceiver;
 
-    /// Close the session (no streaming cost afterwards — SPEC §5.3).
+    /// Close the session (no streaming cost afterwards — FR-14).
     async fn close(&mut self) -> Result<(), SessionError>;
 
     /// This provider's capability flags.

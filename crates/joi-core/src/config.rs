@@ -1,18 +1,18 @@
 //! Layered configuration (defaults → YAML file → `JOI_` env), loaded once at startup.
 //!
-//! Precedence, lowest to highest (PLAN §4.1): built-in [`Config::default`], a YAML file, then
-//! `JOI_`-prefixed environment variables (nested via `__`) — **env always wins over the file**. CLI
-//! flags (`--config`/`--log`) are applied by the binary *before* this loader runs. Every config
-//! value can therefore be set in the YAML file or via the environment.
+//! Precedence, lowest to highest (PLAN §6.2): built-in [`Config::default`], a YAML file, then
+//! `JOI_`-prefixed environment variables (nested via `__`) — **env always wins over the file** —
+//! and finally the conventional shortcuts `GEMINI_API_KEY` / `GEMINI_MODEL`. CLI flags
+//! (`--config`/`--log`) are applied by the binary *before* this loader runs.
 //!
 //! On startup the binary writes a defaults file to the config path if none exists
 //! ([`Config::write_default_if_missing`]), so users have a documented YAML to edit.
 //!
 //! The provider API key may be set in the file (`live_api.gemini.api_key`) or, preferably, via the
 //! `GEMINI_API_KEY` (or `JOI_LIVE_API__GEMINI__API_KEY`) environment variable — env wins. It is held
-//! as a redacting [`ApiKey`] so it never leaks into logs.
+//! as a redacting [`ApiKey`] so it never leaks into logs (SEC-1).
 //!
-//! `joi-core` is the single source of truth for XDG paths (PLAN §4.2): the binary must pass these
+//! `joi-core` is the single source of truth for paths (PLAN §6.3): the binary must pass these
 //! resolved paths in rather than re-deriving them, to avoid divergent locations.
 
 use std::path::{Path, PathBuf};
@@ -25,31 +25,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-/// Which provider adapter to drive (SPEC §4).
+/// Which provider adapter to drive (SPEC §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderName {
-    /// Gemini Live native audio (the only functional MVP provider).
+    /// Gemini Live native audio (the real MVP provider).
     Gemini,
-    /// OpenAI Realtime — compile-only stub in the MVP (SPEC §4.4).
-    Openai,
-    /// Scripted mock used for tests and the M1 demo (no network).
+    /// Scripted mock used for tests and the headless gate (no network).
     Mock,
 }
 
-/// How screen frames are captured (SPEC §7.3, PLAN §4.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CapturePath {
-    /// Resolve to `webview` or `native` from the M0 spike result at runtime.
-    Auto,
-    /// `getDisplayMedia` inside the webview.
-    Webview,
-    /// Native Rust capture (`scap`/`xcap`).
-    Native,
-}
-
-/// Log verbosity. `RUST_LOG` overrides this for `tracing-subscriber` (PLAN §4.4).
+/// Log verbosity. `RUST_LOG` overrides this for `tracing-subscriber`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -80,8 +66,8 @@ impl LogLevel {
 }
 
 /// Provider API key, settable in the YAML file or via env. Redacts in `Debug` so it can't leak into
-/// logs; empty means unset. Unlike `secrecy::SecretString` it supports the serde + `Eq` derives
-/// [`Config`] needs (and the key may legitimately live in config now).
+/// logs (SEC-1); empty means unset. Unlike `secrecy::SecretString` it supports the serde + `Eq`
+/// derives [`Config`] needs (and the key may legitimately live in config now).
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct ApiKey(String);
@@ -115,8 +101,8 @@ impl ApiKey {
     }
 }
 
-/// Live-API configuration: which provider to drive and its per-provider settings (SPEC §13). Only
-/// `gemini` is functional in the MVP, so it is the single provider block today.
+/// Live-API configuration: which provider to drive and its per-provider settings. Only `gemini` is
+/// a real provider; `mock` is for tests/headless. Gemini is the single provider block today.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LiveApiCfg {
     /// Which live-API provider to use.
@@ -140,7 +126,12 @@ fn default_reachability_probe_secs() -> u64 {
 /// `JOI_LIVE_API__GEMINI__API_KEY` environment variable (env wins).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct GeminiCfg {
-    /// Exact model id, e.g. `gemini-live-2.5-flash-native-audio`.
+    /// Bare model name of a Live (`bidiGenerateContent`) model your key can access, e.g.
+    /// `gemini-3.1-flash-live-preview` — the **simple name only**, with no `models/` prefix (the
+    /// Gemini adapter qualifies it for the wire). **Required — Joi ships no default**; set it in the
+    /// config file or via `GEMINI_MODEL`. Loading fails with a clear error when it is empty or
+    /// prefixed. (Note: being listed by `models.list` is not sufficient — the model must also
+    /// support the Live endpoint.)
     pub model: String,
     /// API key. Empty = unset; prefer providing it via the environment.
     #[serde(default)]
@@ -155,7 +146,7 @@ pub struct GeminiCfg {
     pub output_transcription: bool,
 }
 
-/// Audio I/O settings (SPEC §7.1/7.2).
+/// Audio I/O settings (PLAN §7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AudioCfg {
     /// Sample rate sent to the provider (Hz). Gemini expects 16 kHz mono.
@@ -175,66 +166,63 @@ pub struct AudioCfg {
     /// hear itself (and interrupt itself) on speakers. Turn off when using headphones, or when an
     /// OS/server APM (e.g. PipeWire's echo-cancel source) already does it.
     pub echo_cancellation: bool,
-    /// Noise suppression on the mic. Disable when an OS/server APM already conditions the input, to
-    /// avoid double-processing.
+    /// Noise suppression on the mic (high-pass filter + NS). Disable when an OS/server APM already
+    /// conditions the input, to avoid double-processing.
     pub noise_suppression: bool,
-    /// Automatic gain control on the mic. Disable when an OS APM does the conditioning: an AGC stage
-    /// *without* a co-located echo canceller is echo-blind and will amplify residual echo during
-    /// playback into false barge-ins.
+    /// Automatic gain control on the mic (AGC2). Disable when an OS APM does the conditioning: an AGC
+    /// stage *without* a co-located echo canceller is echo-blind and will amplify residual echo
+    /// during playback into false barge-ins.
     pub auto_gain: bool,
 }
 
-/// Screen-capture settings (SPEC §7.3, FR-11).
+/// Screen-capture settings (PLAN §7.2, FR-8..10). Native capture is the only path.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ScreenCfg {
     /// Whether screen sharing is enabled at all.
     pub enabled: bool,
-    /// Capture pipeline selection.
-    pub capture_path: CapturePath,
     /// Frames per second sent to the model.
     pub fps: f32,
     /// Resolution ceiling (longest edge, pixels).
     pub max_width: u32,
-    /// JPEG/WebP encode quality, 1–100.
+    /// JPEG encode quality, 1–100.
     pub quality: u8,
 }
 
-/// History persistence settings (SPEC §6).
+/// History persistence settings (SPEC §3.6, FR-21).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HistoryCfg {
     /// Directory holding per-session logs + the session index. `None` → resolved to
     /// `~/.joi/sessions` at load time.
     pub dir: Option<PathBuf>,
-    /// Approximate token budget bounding persisted history (SPEC §6.2).
+    /// Approximate token budget bounding re-seeded history (FR-21).
     ///
     /// This is the **Live session input limit**, much smaller than the underlying text model's
-    /// 1M-class context window — do not copy that number. Confirm against the model card in M2/M3.
+    /// 1M-class context window — do not copy that number.
     pub token_budget: u32,
 }
 
-/// Terminal UI settings (SPEC §8, §13).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
-#[ts(export)]
+/// Terminal UI settings (read by `joi-tui`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TerminalCfg {
     /// ANSI theme name.
     pub theme: String,
-    /// Monospace font family.
+    /// Monospace font family (informational).
     pub font: String,
     /// Scrollback line count.
     pub scrollback: u32,
     /// Background color — a hex string (`#rrggbb`) or `transparent` to inherit the terminal's own
-    /// background. Honored by the TUI host (the web frontend keeps its CSS theme).
+    /// background.
     pub background: String,
-    /// Accent color as a hex string (`#rrggbb`).
+    /// Accent color as a hex string (`#rrggbb`) or a named color.
     pub accent: String,
 }
 
-/// Logging settings (SPEC §15).
+/// Logging settings (SPEC §5).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LoggingCfg {
     /// Filter level. `RUST_LOG` overrides this.
     pub level: LogLevel,
-    /// Log file path. `None` → resolved to the XDG state dir at load time.
+    /// Log file path. `None` → resolved to `~/.joi/logs/joi.log` at load time.
     pub file: Option<PathBuf>,
 }
 
@@ -247,9 +235,8 @@ pub struct MediaCfg {
     pub screen: ScreenCfg,
 }
 
-/// Web-frontend settings — delivered to the UI by the host; not used by the engine itself.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
-#[ts(export)]
+/// Frontend appearance settings — read by the frontend (`joi-tui`); the engine does not use them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct UiCfg {
     /// Terminal appearance.
     pub terminal: TerminalCfg,
@@ -266,7 +253,7 @@ pub struct Config {
     pub logging: LoggingCfg,
     /// Native media I/O (`joi-media`): audio + screen.
     pub media: MediaCfg,
-    /// Web-frontend settings.
+    /// Frontend appearance.
     pub ui: UiCfg,
 }
 
@@ -276,7 +263,9 @@ impl Default for Config {
             live_api: LiveApiCfg {
                 provider: ProviderName::Gemini,
                 gemini: GeminiCfg {
-                    model: "gemini-live-2.5-flash-native-audio".to_string(),
+                    // No default model: the user must choose one their key can access. An empty
+                    // model is rejected by `validate`, so the app fails fast with guidance.
+                    model: String::new(),
                     api_key: ApiKey::default(),
                     voice: Some("Aoede".to_string()),
                     system_instruction: "You are Joi, a concise local voice companion.".to_string(),
@@ -306,7 +295,6 @@ impl Default for Config {
                 },
                 screen: ScreenCfg {
                     enabled: false,
-                    capture_path: CapturePath::Auto,
                     fps: 1.0,
                     // Sized to the provider's per-frame video resolution. Gemini Live tiles each
                     // frame to ~768 px (one 768x768 tile / ~258 tokens); more is downsampled away.
@@ -328,8 +316,8 @@ impl Default for Config {
 }
 
 /// Filesystem locations Joi uses, all rooted at `~/.joi`. The binary passes these in rather than
-/// re-deriving them (m-1). This deliberately departs from XDG: everything Joi owns lives under one
-/// `~/.joi` directory (config + per-session logs + logs), so it's easy to find, back up, or wipe.
+/// re-deriving them (PLAN §6.3). This deliberately departs from XDG: everything Joi owns lives under
+/// one `~/.joi` directory (config + per-session logs + logs), so it's easy to find, back up, or wipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
     /// Config file (`~/.joi/config`) — YAML, despite the extensionless name.
@@ -366,7 +354,7 @@ impl Config {
     ///
     /// `cli_path` overrides the default config-file location. If no file exists there yet, a
     /// defaults file is written first (best-effort) so the user has something to edit. Unset
-    /// path-typed fields (`history.dir`, `logging.file`) are resolved against XDG locations.
+    /// path-typed fields (`history.dir`, `logging.file`) are resolved against `~/.joi` locations.
     pub fn load(cli_path: Option<&Path>) -> Result<Self, ConfigError> {
         let paths = ProjectPaths::resolve()?;
         let file = cli_path.map_or_else(|| paths.config_file.clone(), Path::to_path_buf);
@@ -462,8 +450,20 @@ impl Config {
             reason: reason.to_string(),
         };
 
-        if self.live_api.gemini.model.trim().is_empty() {
-            return Err(invalid("live_api.gemini.model", "must not be empty"));
+        let model = self.live_api.gemini.model.trim();
+        if model.is_empty() {
+            return Err(invalid(
+                "live_api.gemini.model",
+                "no model configured — set GEMINI_MODEL or live_api.gemini.model to a Live model \
+                 your key can access (Joi ships no default), e.g. gemini-3.1-flash-live-preview",
+            ));
+        }
+        if model.contains('/') {
+            return Err(invalid(
+                "live_api.gemini.model",
+                "use the bare model name (e.g. gemini-3.1-flash-live-preview) — drop the 'models/' \
+                 prefix; the Gemini adapter qualifies it for the wire",
+            ));
         }
         let audio = &self.media.audio;
         let screen = &self.media.screen;
@@ -508,30 +508,56 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_valid() {
-        Config::default().validate().unwrap();
+    fn default_has_no_model_and_must_be_set() {
+        // Joi ships no default model — the default config is invalid until one is set explicitly.
+        let mut cfg = Config::default();
+        assert!(cfg.live_api.gemini.model.is_empty(), "no default model");
+        assert!(
+            cfg.validate().is_err(),
+            "an empty model is rejected at load"
+        );
+        cfg.live_api.gemini.model = "gemini-3.1-flash-live-preview".to_string();
+        cfg.validate().unwrap(); // valid once a bare model name is chosen
+    }
+
+    #[test]
+    fn model_with_models_prefix_is_rejected() {
+        // The model must be the bare name; the adapter adds the `models/` wire prefix itself.
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.model = "models/gemini-3.1-flash-live-preview".to_string();
+        assert!(matches!(cfg.validate(), Err(ConfigError::Invalid { .. })));
     }
 
     #[test]
     fn example_config_loads_and_validates() {
-        // Guards config/joi.example.yaml against drift from the Config schema.
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.yaml");
-        let cfg = Config::load_from(&path, &test_paths()).unwrap();
-        // Assert only fields the parallel Jail tests never set via env (they mutate real process
-        // env, which figment reads), to avoid cross-test races.
-        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
-        assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
-        // The template leaves the key empty — it comes from the environment.
-        assert!(!cfg.live_api.gemini.api_key.is_set());
+        // Guards config/joi.example.yaml against drift from the Config schema. Run inside a `Jail`
+        // so it shares figment's global env lock with the other env-mutating tests below — otherwise
+        // a concurrent test that sets `JOI_LIVE_API__GEMINI__API_KEY` leaks into this `load_from`
+        // (which always merges the `JOI_` env layer) and trips the empty-key assertion.
+        figment::Jail::expect_with(|_jail| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.yaml");
+            let cfg = Config::load_from(&path, &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+            assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
+            // The template leaves the key empty — it comes from the environment.
+            assert!(!cfg.live_api.gemini.api_key.is_set());
+            Ok(())
+        });
     }
 
     #[test]
     fn missing_file_yields_defaults_with_resolved_paths() {
-        let paths = test_paths();
-        let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
-        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
-        assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/sessions")));
-        assert_eq!(cfg.logging.file, Some(PathBuf::from("/state/joi.log")));
+        // A model is required, so supply one via env (the only layer present with no file). Run in a
+        // Jail so that env mutation is isolated/serialized with the other env-reading tests.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "test-model");
+            let paths = test_paths();
+            let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
+            assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+            assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/sessions")));
+            assert_eq!(cfg.logging.file, Some(PathBuf::from("/state/joi.log")));
+            Ok(())
+        });
     }
 
     #[test]
@@ -542,9 +568,14 @@ mod tests {
         assert!(!path.exists());
         Config::write_default_if_missing(&path).unwrap();
         assert!(path.exists());
-        // The written file round-trips back to the defaults.
-        let cfg = Config::load_from(&path, &test_paths()).unwrap();
-        assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+        // The written file round-trips back to the defaults; a model is supplied via env since none
+        // is shipped by default.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("JOI_LIVE_API__GEMINI__MODEL", "m");
+            let cfg = Config::load_from(&path, &test_paths()).unwrap();
+            assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
+            Ok(())
+        });
         // A second call must not overwrite or error.
         Config::write_default_if_missing(&path).unwrap();
     }
@@ -585,6 +616,7 @@ media:
                 r"
 live_api:
   gemini:
+    model: m
     api_key: file-key
 ",
             )?;
@@ -599,6 +631,7 @@ live_api:
                 r"
 live_api:
   gemini:
+    model: m
     api_key: file-key
 ",
             )?;
@@ -661,6 +694,9 @@ live_api:
             jail.create_file(
                 "joi.yaml",
                 r"
+live_api:
+  gemini:
+    model: m
 media:
   audio:
     frame_ms: 500

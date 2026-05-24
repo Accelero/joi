@@ -159,7 +159,11 @@ pub struct RunnerConfig {
 
 impl Default for RunnerConfig {
     fn default() -> Self {
-        Self { auto_execute_tools: true, auto_respond_tools: true, max_concurrent_tools: 4 }
+        Self {
+            auto_execute_tools: true,
+            auto_respond_tools: true,
+            max_concurrent_tools: 4,
+        }
     }
 }
 
@@ -243,7 +247,9 @@ impl RealtimeRunnerBuilder {
 
     /// Build the runner (does not connect yet).
     pub fn build(self) -> Result<RealtimeRunner> {
-        let model = self.model.ok_or_else(|| RealtimeError::config("Model is required"))?;
+        let model = self
+            .model
+            .ok_or_else(|| RealtimeError::config("Model is required"))?;
 
         // Add tool definitions to config
         let mut config = self.config;
@@ -258,7 +264,9 @@ impl RealtimeRunnerBuilder {
             config: Arc::new(RwLock::new(config)),
             runner_config: self.runner_config,
             tools: self.tools,
-            event_handler: self.event_handler.unwrap_or_else(|| Arc::new(NoOpEventHandler)),
+            event_handler: self
+                .event_handler
+                .unwrap_or_else(|| Arc::new(NoOpEventHandler)),
             session: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(RunnerState::Idle)),
         })
@@ -316,7 +324,10 @@ impl RealtimeRunner {
     /// Helper to safely acquire a cloned Arc of the current session, dropping the lock.
     async fn session_handle(&self) -> Result<Arc<dyn crate::session::RealtimeSession>> {
         let guard = self.session.read().await;
-        guard.as_ref().cloned().ok_or_else(|| RealtimeError::connection("Not connected"))
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| RealtimeError::connection("Not connected"))
     }
 
     /// Create a new builder.
@@ -354,7 +365,10 @@ impl RealtimeRunner {
     /// the Cognitive Handoff mechanics transparently.
     pub async fn send_client_event(&self, event: crate::events::ClientEvent) -> Result<()> {
         match event {
-            crate::events::ClientEvent::UpdateSession { instructions, tools } => {
+            crate::events::ClientEvent::UpdateSession {
+                instructions,
+                tools,
+            } => {
                 let update_config = SessionUpdateConfig(crate::config::RealtimeConfig {
                     instruction: instructions,
                     tools,
@@ -480,8 +494,9 @@ impl RealtimeRunner {
                     drop(state_guard); // Free state lock before the heavy async network operation.
                     tracing::info!("Runner is idle. Executing resumption immediately.");
 
-                    if let Err(e) =
-                        self.execute_resumption((*new_config).clone(), bridge_message.clone()).await
+                    if let Err(e) = self
+                        .execute_resumption((*new_config).clone(), bridge_message.clone())
+                        .await
                     {
                         tracing::error!("Immediate resumption failed: {}. Queueing for retry.", e);
                         // If the reconnect fails (e.g., transient network issue), we must not lose the mutation intent.
@@ -535,7 +550,10 @@ impl RealtimeRunner {
         // Do this WITHOUT holding the lock across `.await`.
         if let Some(session) = old_session {
             if let Err(e) = session.close().await {
-                tracing::warn!("Failed to cleanly close old session during resumption: {}", e);
+                tracing::warn!(
+                    "Failed to cleanly close old session during resumption: {}",
+                    e
+                );
             }
         }
 
@@ -729,7 +747,12 @@ impl RealtimeRunner {
                 self.event_handler.on_response_done().await?;
                 self.check_resumption_queue().await?;
             }
-            ServerEvent::FunctionCallDone { call_id, name, arguments, .. } => {
+            ServerEvent::FunctionCallDone {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
                 if self.runner_config.auto_execute_tools {
                     self.execute_tool_call(&call_id, &name, &arguments).await?;
                 }
@@ -741,7 +764,10 @@ impl RealtimeRunner {
                         "Received Gemini sessionResumption token, saving for future reconnects."
                     );
                     let mut config = self.config.write().await;
-                    let mut extra = config.extra.clone().unwrap_or_else(|| serde_json::json!({}));
+                    let mut extra = config
+                        .extra
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({}));
                     extra["resumeToken"] = serde_json::Value::String(token.to_string());
                     config.extra = Some(extra);
                 }
@@ -763,12 +789,16 @@ impl RealtimeRunner {
         let mut state = self.state.write().await;
 
         // 2. Extract the pending configuration and attempt count if one exists.
-        let pending =
-            if let RunnerState::PendingResumption { config, bridge_message, attempts } = &*state {
-                Some((config.clone(), bridge_message.clone(), *attempts))
-            } else {
-                None
-            };
+        let pending = if let RunnerState::PendingResumption {
+            config,
+            bridge_message,
+            attempts,
+        } = &*state
+        {
+            Some((config.clone(), bridge_message.clone(), *attempts))
+        } else {
+            None
+        };
 
         if let Some((config, bridge_message, attempts)) = pending {
             tracing::info!(
@@ -783,7 +813,9 @@ impl RealtimeRunner {
             drop(state);
 
             // 5. Attempt the actual transport teardown/rebuild.
-            if let Err(e) = self.execute_resumption((*config).clone(), bridge_message.clone()).await
+            if let Err(e) = self
+                .execute_resumption((*config).clone(), bridge_message.clone())
+                .await
             {
                 tracing::error!("Resumption failed: {}.", e);
 
@@ -825,8 +857,11 @@ impl RealtimeRunner {
             let args: serde_json::Value = serde_json::from_str(arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
 
-            let call =
-                ToolCall { call_id: call_id.to_string(), name: name.to_string(), arguments: args };
+            let call = ToolCall {
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                arguments: args,
+            };
 
             match handler.execute(&call).await {
                 Ok(value) => value,
@@ -841,7 +876,10 @@ impl RealtimeRunner {
         };
 
         if self.runner_config.auto_respond_tools {
-            let response = ToolResponse { call_id: call_id.to_string(), output: result };
+            let response = ToolResponse {
+                call_id: call_id.to_string(),
+                output: result,
+            };
 
             if let Ok(session) = self.session_handle().await {
                 session.send_tool_response(response).await?;
