@@ -102,9 +102,10 @@ async fn no_api_key_falls_back_without_panicking() {
 
 #[tokio::test]
 async fn update_setting_persists_resyncs_and_rebroadcasts() {
-    // The runtime settings loop end-to-end over Seam A: change Voice → it's validated, persisted to
-    // config.json atomically (key blanked), the schema reflects it, and the manager re-broadcasts a
-    // UiEvent::Settings the frontend would fold.
+    // The runtime settings loop end-to-end over Seam A: change a setting → it's validated, persisted
+    // to config.json atomically (key blanked), the schema reflects it, and `JoiApp` broadcasts a
+    // UiEvent::Settings the frontend would fold. Uses Accent (provider-independent) for the mechanics;
+    // voice-catalog specifics are covered by the joi-providers/joi-core unit tests.
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     let mut config = mock_config();
@@ -113,49 +114,51 @@ async fn update_setting_persists_resyncs_and_rebroadcasts() {
     let app = JoiApp::build_with_config_path(config, MediaMode::None, Some(config_path.clone()));
     let mut events = app.subscribe_events().expect("events");
 
-    // The curated surface is present, Voice starts at the default (Aoede).
-    let voice_value = |app: &JoiApp| {
+    let accent_value = |app: &JoiApp| {
         app.settings_schema()
             .into_iter()
-            .find(|d| d.id == SettingId::Voice)
+            .find(|d| d.id == SettingId::Accent)
             .map(|d| d.value)
     };
     assert_eq!(
-        voice_value(&app),
-        Some(SettingValue::Text("Aoede".to_string()))
+        accent_value(&app),
+        Some(SettingValue::Text("#9aede4".to_string()))
     );
 
-    app.update_setting(SettingId::Voice, SettingValue::Text("Charon".to_string()))
+    app.update_setting(SettingId::Accent, SettingValue::Text("#ff0066".to_string()))
         .await
-        .expect("voice is editable");
+        .expect("accent is editable");
 
     // The in-memory schema reflects the change…
     assert_eq!(
-        voice_value(&app),
-        Some(SettingValue::Text("Charon".to_string()))
+        accent_value(&app),
+        Some(SettingValue::Text("#ff0066".to_string()))
     );
 
-    // …it was persisted to config.json (valid JSON, new voice, no secret on disk)…
+    // …it was persisted to config.json (valid JSON, new accent, no secret on disk)…
     let written = std::fs::read_to_string(&config_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&written).unwrap();
-    assert_eq!(json["live_api"]["gemini"]["voice"], "Charon");
+    assert_eq!(json["ui"]["terminal"]["accent"], "#ff0066");
     assert_eq!(json["live_api"]["gemini"]["api_key"], "");
 
-    // …and the manager re-broadcast the snapshot for the frontend to fold.
-    let mut rebroadcast = None;
+    // …and `JoiApp` broadcast the fresh snapshot for the frontend to fold. The snapshot carries the
+    // new accent AND a Voice descriptor whose options come from the provider catalog (Mock → empty),
+    // proving the app threads `voice_catalog` into the schema.
+    let mut snapshot = None;
     for _ in 0..20 {
         if let UiEvent::Settings { settings } = next_ui(&mut events).await {
-            rebroadcast = settings
-                .into_iter()
-                .find(|d| d.id == SettingId::Voice)
-                .map(|d| d.value);
+            snapshot = Some(settings);
             break;
         }
     }
+    let snapshot = snapshot.expect("a UiEvent::Settings broadcast");
+    let accent = snapshot.iter().find(|d| d.id == SettingId::Accent).unwrap();
+    assert_eq!(accent.value, SettingValue::Text("#ff0066".to_string()));
+    let voice = snapshot.iter().find(|d| d.id == SettingId::Voice).unwrap();
     assert_eq!(
-        rebroadcast,
-        Some(SettingValue::Text("Charon".to_string())),
-        "manager should re-broadcast the updated settings snapshot"
+        voice.kind,
+        joi_core::settings::SettingKind::Choice { options: vec![] },
+        "Mock provider offers no voices → empty Choice options"
     );
 
     // A bad value type is rejected, leaves the config untouched, and writes nothing new.

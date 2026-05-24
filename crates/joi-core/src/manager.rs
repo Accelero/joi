@@ -99,8 +99,9 @@ pub enum Command {
         reply: oneshot::Sender<AppState>,
     },
     /// Replace the actor's [`Config`] after a runtime settings change (boxed — it's large relative
-    /// to the other variants). `NextSession` fields take effect on the next [`Command::Start`];
-    /// the actor re-broadcasts the editable-settings snapshot so subscribers re-render.
+    /// to the other variants). `NextSession` fields take effect on the next [`Command::Start`]. The
+    /// editable-settings snapshot is broadcast separately by `JoiApp` via
+    /// [`SessionManagerHandle::broadcast_settings`] (it needs provider data the actor can't compute).
     UpdateConfig {
         /// The new configuration.
         config: Box<Config>,
@@ -137,6 +138,14 @@ impl SessionManagerHandle {
     #[must_use]
     pub fn subscribe_audio(&self) -> broadcast::Receiver<Vec<i16>> {
         self.audio_tx.subscribe()
+    }
+
+    /// Broadcast a settings snapshot on the UI event stream as [`UiEvent::Settings`]. Used by
+    /// `JoiApp` after a settings change: the snapshot needs provider-supplied data (e.g. the voice
+    /// catalog) the actor can't compute, so the composition root builds it and publishes it through
+    /// this method — the actor still owns the channel, it just relays what it's handed.
+    pub fn broadcast_settings(&self, settings: crate::settings::SettingsSnapshot) {
+        let _ = self.ui_tx.send(UiEvent::Settings { settings });
     }
 
     /// Start or resume a session.
@@ -198,9 +207,9 @@ impl SessionManagerHandle {
             .map_err(|_| Self::dead())
     }
 
-    /// Replace the actor's config after a runtime settings change. The actor re-broadcasts the
-    /// editable-settings snapshot on the event stream once applied. `NextSession` fields take effect
-    /// on the next [`start`](Self::start).
+    /// Replace the actor's config after a runtime settings change so the next connect uses it
+    /// (`NextSession` fields take effect on the next [`start`](Self::start)). The editable-settings
+    /// snapshot is published separately via [`broadcast_settings`](Self::broadcast_settings).
     pub async fn update_config(&self, config: Config) -> Result<(), SessionError> {
         self.cmd_tx
             .send(Command::UpdateConfig {
@@ -437,12 +446,10 @@ impl SessionManager {
             Command::UpdateConfig { config } => {
                 // Swap in the new config. `NextSession` fields (voice, model, transcription, budget,
                 // compression) are read fresh by `do_start`, so they apply on the next connect; the
-                // live session is untouched. Re-broadcast the editable snapshot so the frontend
-                // re-renders (and picks up `Immediate` UI fields).
+                // live session is untouched. The editable-settings snapshot is built and broadcast by
+                // `JoiApp` (it needs provider-supplied data the manager can't compute — see
+                // `broadcast_settings`), not here.
                 self.config = *config;
-                self.emit(UiEvent::Settings {
-                    settings: crate::settings::settings_schema(&self.config),
-                });
             }
             Command::Shutdown => {
                 self.do_stop(session).await;
@@ -1339,29 +1346,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_config_rebroadcasts_settings_snapshot() {
-        use crate::settings::{SettingId, SettingValue};
+    async fn broadcast_settings_publishes_on_the_ui_stream() {
+        use crate::settings::{settings_schema, SettingId, SettingsContext};
         let (handle, _history) = spawn_manager();
         let mut ui = handle.subscribe();
 
-        // Change the voice and push the new config in.
-        let mut cfg = Config::default();
-        cfg.live_api.gemini.model = "m".to_string();
-        cfg.live_api.gemini.voice = Some("Charon".to_string());
-        handle.update_config(cfg).await.unwrap();
+        // The composition root builds the snapshot (here with a provider-supplied voice list) and
+        // hands it to the actor to publish.
+        let cfg = Config::default();
+        let snapshot = settings_schema(
+            &cfg,
+            &SettingsContext {
+                voices: vec!["Aoede".to_string(), "Charon".to_string()],
+            },
+        );
+        handle.broadcast_settings(snapshot);
 
-        // The actor re-broadcasts the editable snapshot reflecting the change.
-        let mut voice = None;
+        let mut saw_voice_options = false;
         for _ in 0..20 {
             if let UiEvent::Settings { settings } = next_ui(&mut ui).await {
-                voice = settings
-                    .into_iter()
+                saw_voice_options = settings
+                    .iter()
                     .find(|d| d.id == SettingId::Voice)
-                    .map(|d| d.value);
+                    .is_some_and(|d| {
+                        matches!(&d.kind, crate::settings::SettingKind::Choice { options }
+                            if options == &vec!["Aoede".to_string(), "Charon".to_string()])
+                    });
                 break;
             }
         }
-        assert_eq!(voice, Some(SettingValue::Text("Charon".to_string())));
+        assert!(
+            saw_voice_options,
+            "broadcast_settings should emit the snapshot verbatim"
+        );
     }
 
     #[tokio::test]

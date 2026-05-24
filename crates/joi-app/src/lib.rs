@@ -24,6 +24,7 @@ use joi_core::media::AudioFormat;
 use joi_core::session::event::UiEvent;
 use joi_core::settings::{
     apply_setting, settings_schema as build_schema, SettingDescriptor, SettingId, SettingValue,
+    SettingsContext,
 };
 use joi_media::{MediaConfig, MediaEngine};
 use tokio::sync::broadcast;
@@ -32,6 +33,17 @@ use tokio::sync::broadcast;
 /// or the in-memory fallback is active).
 fn sessions_unavailable() -> SessionError {
     SessionError::Provider("session history is not available".to_string())
+}
+
+/// Build the editable-settings schema for the **current** config, resolving the provider-dependent
+/// option lists here (the only layer that knows both settings and provider). The voice catalog is
+/// derived from `cfg` on every call — cheap, and what makes a provider/model change reflect in the
+/// schema automatically (no caching to invalidate).
+fn build_current_schema(cfg: &Config) -> Vec<SettingDescriptor> {
+    let ctx = SettingsContext {
+        voices: joi_providers::voice_catalog(cfg),
+    };
+    build_schema(cfg, &ctx)
 }
 
 /// Whether the engine drives local audio/screen devices itself.
@@ -309,13 +321,13 @@ impl JoiApp {
             .config
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        build_schema(&cfg)
+        build_current_schema(&cfg)
     }
 
     /// Change one runtime setting (Seam A). Validates the new value, persists the whole config to
-    /// `config.json` **atomically** (with the API key blanked — Joi never writes the secret), then
-    /// resyncs the running manager, which re-broadcasts the settings snapshot as
-    /// [`UiEvent::Settings`] for the frontend to fold.
+    /// `config.json` **atomically** (with the API key blanked — Joi never writes the secret), resyncs
+    /// the running manager (so the next connect uses it), then broadcasts the fresh settings snapshot
+    /// as [`UiEvent::Settings`] for the frontend to fold.
     ///
     /// On a validation error the config is left untouched and nothing is written, so the host can
     /// surface the message and keep its current state. Errors with [`SettingsError::Io`] if no
@@ -344,20 +356,23 @@ impl JoiApp {
         next.write_json(path)
             .map_err(|e| SettingsError::Io(e.to_string()))?;
 
-        // Adopt it locally…
-        {
+        // Adopt it locally, and build the snapshot for the frontend from the *new* config (this is
+        // where provider voices are resolved — only the app can, so the manager doesn't emit it).
+        let snapshot = {
             let mut cfg = self
                 .config
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *cfg = next.clone();
-        }
-        // …and resync the manager (it emits UiEvent::Settings). No manager (no key) → the on-disk
-        // change still stands; there are simply no event subscribers to notify.
+            build_current_schema(&cfg)
+        };
+        // Resync the manager (so the next connect uses the change) and broadcast the snapshot. No
+        // manager (no key) → the on-disk change still stands; there are simply no subscribers.
         if let Some(h) = &self.handle {
             h.update_config(next)
                 .await
                 .map_err(|e| SettingsError::Io(e.to_string()))?;
+            h.broadcast_settings(snapshot);
         }
         Ok(())
     }

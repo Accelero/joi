@@ -65,6 +65,28 @@ pub fn build_session_factory(config: &Config) -> Result<Box<dyn SessionFactory>,
     }
 }
 
+/// The hardcoded prebuilt-voice catalog for the active provider/model (provider-sealed; **not**
+/// queryable from any provider API). A *pure function of `config`* — no live session needed — so the
+/// settings surface can list voices while stopped, and the list follows a provider/model change for
+/// free (recompute it on each schema build). `joi-core` takes this as injected data so it never
+/// names a provider. Empty for providers without prebuilt voices (Mock) or a disabled feature.
+#[must_use]
+pub fn voice_catalog(config: &Config) -> Vec<String> {
+    match config.live_api.provider {
+        ProviderName::Gemini => {
+            #[cfg(feature = "gemini")]
+            {
+                crate::gemini::voices(&config.live_api.gemini.model)
+            }
+            #[cfg(not(feature = "gemini"))]
+            {
+                Vec::new()
+            }
+        }
+        ProviderName::Mock => Vec::new(),
+    }
+}
+
 /// Build the token-free reachability probe for `config.live_api.provider`, or `None` when the
 /// provider has no probe or isn't usable (e.g. Gemini without a key). Like [`build_session_factory`]
 /// this is the composition root's job, so the engine never names a provider. The returned probe is
@@ -133,5 +155,18 @@ mod tests {
         let mut config = config_with(ProviderName::Gemini);
         config.live_api.gemini.api_key = joi_core::config::ApiKey::new("k");
         assert!(build_session_factory(&config).is_ok());
+    }
+
+    #[test]
+    fn voice_catalog_dispatches_by_provider() {
+        // Mock has no prebuilt voices.
+        assert!(voice_catalog(&config_with(ProviderName::Mock)).is_empty());
+        // Gemini resolves from the model (full set for the current/native-audio family).
+        #[cfg(feature = "gemini")]
+        {
+            let mut g = config_with(ProviderName::Gemini);
+            g.live_api.gemini.model = "gemini-3.1-flash-live-preview".to_string();
+            assert_eq!(voice_catalog(&g).len(), 30);
+        }
     }
 }

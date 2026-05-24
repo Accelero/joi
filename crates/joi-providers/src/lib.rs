@@ -13,6 +13,6 @@ pub mod gemini;
 #[cfg(feature = "mock")]
 pub mod mock;
 
-pub use factory::{build_connectivity_probe, build_session_factory, FactoryError};
+pub use factory::{build_connectivity_probe, build_session_factory, voice_catalog, FactoryError};
 #[cfg(feature = "mock")]
 pub use mock::MockSession;

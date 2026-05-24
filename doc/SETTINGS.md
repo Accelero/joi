@@ -12,6 +12,13 @@
 > `JoiApp::settings_schema()` + `JoiApp::update_setting(id, value)`. Backend crates build green with
 > tests + `clippy -D warnings`.
 >
+> **Done (engine, Phase 8):** the `Voice` choices are **provider-owned** — the voice list is
+> hardcoded per provider/model in `joi-providers` (`voice_catalog`), resolved from the active config,
+> with non-destructive fallback when the stored voice isn't applicable. `UiEvent::Settings` *emission*
+> moved from the `SessionManager` to `JoiApp` (only the app can resolve provider voices), so live
+> provider/model switching works by construction. See §8. Backend crates green; frontend (Phase 6)
+> still pending.
+>
 > **Pending (frontend, Phase 6):** `joi-tui` must fold `UiEvent::Settings` and offer a settings
 > panel — see §4 Phase 6. Until it handles the new variant, the `joi-tui` build (and thus the full
 > `scripts/check.sh`) does not compile.
@@ -32,6 +39,16 @@
 - **Atomic persistence.** Every write (bootstrap and every change) goes through one `atomic_write`
   (temp in same dir → `sync_all` → `rename`). A crash or concurrent read can never see a
   half-written `config.json`. Secrets are blanked before serialization on every save.
+- **Provider-dependent option lists are provider-sealed.** Where a setting's valid choices depend on
+  the provider (today: `Voice`), the list is hardcoded *in the provider* (`joi-providers`), keyed by
+  the active provider/model in config. `joi-core` never names a provider or its voices (ARCH §5); it
+  takes the resolved list as injected data. The app is the only layer that knows both settings and
+  provider, so it does the plumbing. See §8.
+- **Config is the durable record of user intent; fallback is non-destructive.** Config is written
+  **only** when the user explicitly sets a value through the settings interface. The engine never
+  rewrites a stored value just because it isn't valid for the *current* provider — it resolves an
+  effective value at the point of use/display instead, so switching provider/model and back restores
+  the original choice. See §8.
 
 ## 2. Apply-timing taxonomy
 
@@ -54,6 +71,14 @@ fields are **not** exposed yet (add later as subsystems gain hot-reconfigure pat
   moves to `doc/CONFIG.md` (rustdoc on `Config` already documents each field).
 - **Authoritative config:** `JoiApp` holds it behind a `RwLock<Config>`; the `SessionManager` keeps
   its own copy, resynced via a new `Command::UpdateConfig`. No shared lock into the actor.
+- **Who emits `UiEvent::Settings`:** **`JoiApp`**, not the `SessionManager`. The settings *snapshot*
+  needs provider voices (§8), and the manager (in `joi-core`) can't call `joi-providers`. So the
+  manager's `UpdateConfig` only swaps its config (for the next connect); the app builds the full
+  snapshot and broadcasts it. *(Phase 4/5 originally had the manager emit; §8 corrects this.)*
+- **Provider voice catalog:** hardcoded per provider/model in `joi-providers`
+  (`voice_catalog(&Config) -> Vec<String>`), resolved from the active config — **not** queryable from
+  the Gemini API (there is no voices-list endpoint; the set is also model-dependent: ~8 half-cascade
+  vs ~30 native-audio). Core takes the list as injected `SettingsContext`. See §8.
 
 ## 4. Phases (each ends green: build + tests + `clippy -D warnings`)
 
@@ -93,6 +118,9 @@ fields are **not** exposed yet (add later as subsystems gain hot-reconfigure pat
 ### Phase 4 — Manager resync (`joi-core/src/manager.rs`)
 - `Command::UpdateConfig(Box<Config>)` replaces `self.config`. NextSession fields take effect on the
   next `do_start`; Immediate UI fields aren't read by the manager (handed to the frontend).
+- **Revised by §8:** the manager originally *also* emitted `UiEvent::Settings` here. §8 removes that
+  (the manager can't resolve provider voices) and adds a `broadcast_settings` handle method the app
+  uses instead.
 
 ### Phase 5 — Seam A (`joi-app/src/lib.rs`)
 1. `JoiApp` gains `config: RwLock<Config>` (authoritative copy).
@@ -101,10 +129,10 @@ fields are **not** exposed yet (add later as subsystems gain hot-reconfigure pat
    - lock → clone → `apply_setting` (validate); on error return it (UI shows it), state unchanged;
    - persist: serialize new config with **`api_key` blanked** → `atomic_write(config.json)`;
    - store back into the `RwLock`; send `Command::UpdateConfig` to the manager;
-   - emit `UiEvent::Settings(schema)`.
+   - emit `UiEvent::Settings(schema)`. *(§8 moves this build+emit to the app and feeds it provider
+     voices; the manager stops emitting.)*
 - **Done:** `cargo test -p joi-app` green incl. a headless test: set `Voice` → persists to
-  `config.json`, manager picks it up on next start, schema reflects it; invalid value rejected;
-  non-editable id rejected.
+  `config.json`, manager picks it up on next start, schema reflects it; invalid value rejected.
 
 ### Phase 6 — Frontend contract (hand to the frontend dev)
 - Read `settings_schema()` at open; render controls from `SettingKind`.
@@ -116,6 +144,64 @@ fields are **not** exposed yet (add later as subsystems gain hot-reconfigure pat
 ### Phase 7 — Migration, verify, land
 - Convert `~/.joi/config` (YAML) → `~/.joi/config.json`.
 - `scripts/check.sh` green; commit/push when asked.
+
+### Phase 8 — Provider-owned voice catalog + live provider/model switching
+
+> Implement **before** Phase 6. Revises Phases 2/4/5: the voice list becomes provider-sourced,
+> `settings_schema` takes injected option data, and `UiEvent::Settings` emission moves to `JoiApp`.
+
+**Why.** The valid `Voice` choices depend on the provider/model and are **not queryable** from the
+Gemini API (no voices-list endpoint; ~8 voices on half-cascade models, ~30 on native-audio). So the
+list must be hardcoded, and it belongs in `joi-providers` (provider-sealed wire knowledge — ARCH §5),
+not in `joi-core`. The current `joi-core::settings::KNOWN_VOICES` is a layering smell to remove.
+
+**Model of the data (two different things, kept apart):**
+- **Available voices = capability.** A *pure function of the active config*: `voice_catalog(&Config)`
+  in `joi-providers` reads `cfg.live_api.provider` (+ Gemini model family) and returns the hardcoded
+  list. No live session/connection needed — the panel must show voices while `Stopped`. Config is the
+  *key* that selects which hardcoded table applies; the table's *contents* live in the provider.
+- **Active voice = state.** Stored in config under the provider's block (`live_api.gemini.voice`),
+  persisted. Written **only** when the user picks a voice via `update_setting`.
+
+**Non-destructive resolution.** When the stored active voice isn't in the applicable list (e.g. after
+a provider/model switch), the engine does **not** rewrite config. It resolves an *effective* voice for
+display/use: `active ∈ list ? Some(active) : None` (`None` = model default; the Gemini adapter already
+falls back server-side at connect, so no client-side default lookup is needed). The schema's
+descriptor `value` shows the resolved voice. Because config is untouched, switching the provider/model
+back restores the user's original choice.
+
+**Why emission moves to `JoiApp`.** The schema now needs `voice_catalog` (in `joi-providers`). The
+`SessionManager` lives in `joi-core` and can't call it, so it can't build the snapshot. Only `JoiApp`
+knows both settings and provider — so it builds and emits `UiEvent::Settings`. Computing the catalog
+from *current* config on every schema build (cheap — a `match` returning a `Vec`) is what makes live
+provider/model switching automatic: switch → new key → new catalog → new `Choice.options` + resolved
+`value` in the next emitted snapshot → the frontend re-renders on the same event it already folds.
+Nothing to invalidate; correct by construction.
+
+**Steps:**
+1. **`joi-providers`** — `pub fn voice_catalog(cfg: &Config) -> Vec<String>`: matches on
+   `cfg.live_api.provider`; for Gemini, branches on model family (native-audio → the documented 30;
+   else → the safe 8); Mock → `[]`. Voice constants live in the `gemini` module. Unit-test both
+   branches. *(No live instance; pure over config.)*
+2. **`joi-core::settings`** — add `struct SettingsContext { voices: Vec<String> }` (extensible for
+   future provider-dependent option lists). Change `settings_schema(cfg: &Config, ctx: &SettingsContext)
+   -> Vec<SettingDescriptor>`. The `Voice` descriptor uses `ctx.voices` for `Choice.options` and the
+   **resolved** value (stored voice if in `ctx.voices`, else empty = model default). **Remove
+   `KNOWN_VOICES`.** Tests: resolution shows default when stored ∉ list; stored value shown when ∈
+   list; config not mutated by schema building.
+3. **`joi-core::manager`** — `Command::UpdateConfig` no longer emits `UiEvent::Settings` (just swaps
+   config). Add `SessionManagerHandle::broadcast_settings(snapshot: SettingsSnapshot)` that sends
+   `UiEvent::Settings { settings }` on the existing `ui_tx`. Move the old rebroadcast unit test out
+   (it becomes an app-level test).
+4. **`joi-app`** — add a private `current_schema()` that reads the `RwLock<Config>`, builds
+   `SettingsContext { voices: joi_providers::voice_catalog(&cfg) }`, and calls core `settings_schema`.
+   `settings_schema()` (query) returns it. `update_setting` persists/resyncs as before, then calls
+   `handle.broadcast_settings(current_schema())` (instead of the manager emitting). Headless test:
+   change `Voice` → persisted + `UiEvent::Settings` carries new value/options; assert resolution +
+   non-destructive fallback (set an out-of-list voice directly in config → schema shows default,
+   config unchanged).
+- **Done:** `cargo test -p joi-core -p joi-providers -p joi-app` green; `joi-core` still names no
+  provider (dep assertion holds).
 
 ## 5. Atomicity guarantee
 
@@ -129,3 +215,7 @@ serialization on every save.
 - Exposing `RestartRequired` fields in the runtime UI (add when subsystems gain hot-reconfigure).
 - Editing `api_key` / `model` from the UI (env/config-only).
 - A `reconnect()` convenience command to apply `NextSession` changes immediately (optional follow-up).
+- **Runtime provider/model switching itself.** It's a *maybe* later; provider/model stay file+env
+  today. But the §8 design supports it for free — the voice catalog is derived from current config on
+  every schema build, so when provider/model become editable, the list and resolution follow with no
+  new machinery (only the `SettingId` set and apply-timing would need the new entries).

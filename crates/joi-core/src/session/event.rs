@@ -241,7 +241,10 @@ mod tests {
     fn settings_event_roundtrips_as_tagged_json() {
         // The settings snapshot must survive the JSON boundary a future frontend deserializes.
         let ev = UiEvent::Settings {
-            settings: crate::settings::settings_schema(&crate::config::Config::default()),
+            settings: crate::settings::settings_schema(
+                &crate::config::Config::default(),
+                &crate::settings::SettingsContext::default(),
+            ),
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["type"], "settings");

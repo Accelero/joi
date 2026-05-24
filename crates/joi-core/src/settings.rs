@@ -13,12 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::error::SettingsError;
 
-/// Prebuilt voice names offered in the [`SettingKind::Choice`] for [`SettingId::Voice`]. The model
-/// may accept more (native-audio models expose extra voices) and unknown names fall back to the
-/// model default, so this list is a convenience for the UI, not a hard constraint.
-pub const KNOWN_VOICES: &[&str] = &[
-    "Aoede", "Charon", "Fenrir", "Kore", "Puck", "Leda", "Orus", "Zephyr",
-];
+/// Provider-supplied data the schema needs but `joi-core` must not compute itself (it can't name a
+/// provider — ARCH §5). Built by the composition root (`joi-app`) from the **active** config via
+/// `joi_providers::voice_catalog`, and passed into [`settings_schema`]. Recomputed on every schema
+/// build, so the options follow a provider/model change for free. Extensible as more settings gain
+/// provider-dependent option lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettingsContext {
+    /// Prebuilt voices the active provider/model offers — the `Choice.options` for [`SettingId::Voice`].
+    pub voices: Vec<String>,
+}
 
 /// When a settings change takes effect — the frontend renders this so the user knows whether a
 /// change is live, applies on the next connect, or needs a restart.
@@ -133,25 +137,29 @@ pub struct SettingDescriptor {
     pub apply: ApplyTiming,
 }
 
-/// The current editable surface, read from `cfg`. One descriptor per [`SettingId::ALL`]; the
-/// frontend renders these and sends a [`SettingId`] + new [`SettingValue`] back to apply one.
+/// The current editable surface, read from `cfg` plus provider-supplied `ctx`. One descriptor per
+/// [`SettingId::ALL`]; the frontend renders these and sends a [`SettingId`] + new [`SettingValue`]
+/// back to apply one.
 #[must_use]
-pub fn settings_schema(cfg: &Config) -> Vec<SettingDescriptor> {
+pub fn settings_schema(cfg: &Config, ctx: &SettingsContext) -> Vec<SettingDescriptor> {
     SettingId::ALL
         .iter()
-        .map(|&id| descriptor(id, cfg))
+        .map(|&id| descriptor(id, cfg, ctx))
         .collect()
 }
 
-fn descriptor(id: SettingId, cfg: &Config) -> SettingDescriptor {
+fn descriptor(id: SettingId, cfg: &Config, ctx: &SettingsContext) -> SettingDescriptor {
     match id {
         SettingId::Voice => SettingDescriptor {
             id,
             label: "Voice".to_string(),
-            // `None` (model default) surfaces as an empty string.
-            value: SettingValue::Text(cfg.live_api.gemini.voice.clone().unwrap_or_default()),
+            // Non-destructive resolution: if the stored voice isn't offered by the active
+            // provider/model, surface the model default (empty) rather than a phantom selection.
+            // Config is left untouched, so switching provider/model back restores the user's choice;
+            // the adapter falls back server-side for the live session in the meantime.
+            value: SettingValue::Text(resolved_voice(cfg, ctx)),
             kind: SettingKind::Choice {
-                options: KNOWN_VOICES.iter().map(|s| (*s).to_string()).collect(),
+                options: ctx.voices.clone(),
             },
             apply: ApplyTiming::NextSession,
         },
@@ -169,6 +177,17 @@ fn descriptor(id: SettingId, cfg: &Config) -> SettingDescriptor {
             kind: SettingKind::Color,
             apply: ApplyTiming::Immediate,
         },
+    }
+}
+
+/// The effective voice to display: the stored voice if the active provider/model offers it,
+/// otherwise empty (= model default). Pure; never mutates config.
+fn resolved_voice(cfg: &Config, ctx: &SettingsContext) -> String {
+    let active = cfg.live_api.gemini.voice.as_deref().unwrap_or_default();
+    if !active.is_empty() && ctx.voices.iter().any(|v| v == active) {
+        active.to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -220,12 +239,26 @@ fn invalid(id: SettingId, reason: &str) -> SettingsError {
 mod tests {
     use super::*;
 
+    /// A context whose voice list includes the default voice (Aoede), as the active provider would
+    /// supply.
+    fn ctx() -> SettingsContext {
+        SettingsContext {
+            voices: ["Aoede", "Charon", "Fenrir", "Kore"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+
     #[test]
     fn schema_covers_every_setting_id_exactly_once() {
         // Drift guard: the rendered schema must match the curated id set 1:1 — no missing arm in
         // `descriptor`, no stray duplicate. Adding a `SettingId` without a schema entry fails here.
         let cfg = Config::default();
-        let ids: Vec<SettingId> = settings_schema(&cfg).into_iter().map(|d| d.id).collect();
+        let ids: Vec<SettingId> = settings_schema(&cfg, &ctx())
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
         assert_eq!(ids, SettingId::ALL.to_vec());
     }
 
@@ -235,7 +268,7 @@ mod tests {
         // "applies on reconnect" / "restart to apply" off this).
         let cfg = Config::default();
         let by_id = |want: SettingId| {
-            settings_schema(&cfg)
+            settings_schema(&cfg, &ctx())
                 .into_iter()
                 .find(|d| d.id == want)
                 .unwrap()
@@ -247,14 +280,55 @@ mod tests {
     }
 
     #[test]
+    fn voice_options_come_from_the_context() {
+        // The Voice choices are the provider-supplied list, not anything hardcoded in core.
+        let cfg = Config::default();
+        let voice = settings_schema(&cfg, &ctx())
+            .into_iter()
+            .find(|d| d.id == SettingId::Voice)
+            .unwrap();
+        assert_eq!(
+            voice.kind,
+            SettingKind::Choice {
+                options: ctx().voices
+            }
+        );
+    }
+
+    #[test]
+    fn voice_resolves_non_destructively_against_the_context() {
+        let mut cfg = Config::default();
+        cfg.live_api.gemini.model = "m".to_string();
+        // In the list → shown.
+        cfg.live_api.gemini.voice = Some("Charon".to_string());
+        let value = |cfg: &Config| {
+            settings_schema(cfg, &ctx())
+                .into_iter()
+                .find(|d| d.id == SettingId::Voice)
+                .unwrap()
+                .value
+        };
+        assert_eq!(value(&cfg), SettingValue::Text("Charon".to_string()));
+
+        // Not in the active list → resolves to empty (model default), and config is NOT mutated.
+        cfg.live_api.gemini.voice = Some("Callirrhoe".to_string());
+        assert_eq!(value(&cfg), SettingValue::Text(String::new()));
+        assert_eq!(
+            cfg.live_api.gemini.voice.as_deref(),
+            Some("Callirrhoe"),
+            "schema building must not rewrite the stored voice"
+        );
+    }
+
+    #[test]
     fn every_setting_round_trips_through_schema_and_apply() {
         // Each descriptor's own current value re-applies cleanly (idempotent) and is observable in
         // the next schema read — proving the schema/apply field mapping agrees for every id.
         let mut cfg = Config::default();
         cfg.live_api.gemini.model = "m".to_string(); // make the base config valid
-        for desc in settings_schema(&cfg) {
+        for desc in settings_schema(&cfg, &ctx()) {
             apply_setting(&mut cfg, desc.id, &desc.value).unwrap();
-            let after = settings_schema(&cfg)
+            let after = settings_schema(&cfg, &ctx())
                 .into_iter()
                 .find(|d| d.id == desc.id)
                 .unwrap();

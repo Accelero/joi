@@ -34,6 +34,73 @@ use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
 /// Buffer for the pump→manager event channel. Matches the manager's internal media channel.
 const EVENT_CHANNEL: usize = 512;
 
+/// Prebuilt voices on the **legacy half-cascade** Live models (Gemini 2.0 / non-native-audio 2.5) —
+/// the 8-voice subset.
+const HALF_CASCADE_VOICES: &[&str] = &[
+    "Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr",
+];
+
+/// Prebuilt voices on **native-audio** / current Live models (gemini-3.x flash-live, *native-audio*)
+/// — the full documented set of 30. (Not queryable from the API; sourced from Google's docs.)
+const NATIVE_AUDIO_VOICES: &[&str] = &[
+    "Zephyr",
+    "Puck",
+    "Charon",
+    "Kore",
+    "Fenrir",
+    "Leda",
+    "Orus",
+    "Aoede",
+    "Callirrhoe",
+    "Autonoe",
+    "Enceladus",
+    "Iapetus",
+    "Umbriel",
+    "Algieba",
+    "Despina",
+    "Erinome",
+    "Algenib",
+    "Rasalgethi",
+    "Laomedeia",
+    "Achernar",
+    "Alnilam",
+    "Schedar",
+    "Gacrux",
+    "Pulcherrima",
+    "Achird",
+    "Zubenelgenubi",
+    "Vindemiatrix",
+    "Sadachbia",
+    "Sadaltager",
+    "Sulafat",
+];
+
+/// The prebuilt voices a Gemini `model` accepts (provider-sealed; **not** queryable from the API).
+///
+/// Native-audio and current models (gemini-3.x) expose the full 30; the legacy half-cascade Live
+/// models (2.0 / non-native-audio 2.5) expose only the 8-voice subset. Unknown/newer model ids
+/// default to the full set — the adapter falls back to the model default server-side for any voice a
+/// model doesn't accept, so erring toward the larger set is safe.
+#[must_use]
+pub fn voices(model: &str) -> Vec<String> {
+    let list = if is_legacy_half_cascade(model) {
+        HALF_CASCADE_VOICES
+    } else {
+        NATIVE_AUDIO_VOICES
+    };
+    list.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Whether `model` is a legacy half-cascade Live model (8 voices). Native-audio models — including
+/// everything with `native-audio` in the id and the gemini-3.x flash-live family — are not.
+fn is_legacy_half_cascade(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    !m.contains("native-audio")
+        && (m.contains("2.0-flash-live")
+            || m.contains("2.5-flash-live")
+            || m.contains("live-2.5-flash"))
+}
+
 /// Install the rustls crypto provider that `adk-realtime` requires. Idempotent; safe to call from
 /// the composition root at startup and again here (the first install wins).
 pub fn init_crypto() {
@@ -519,6 +586,32 @@ mod tests {
 
     fn adapter() -> GeminiAdapter {
         GeminiAdapter::new(SecretString::from("test-key"))
+    }
+
+    #[test]
+    fn native_audio_and_current_models_get_the_full_voice_set() {
+        // The user's model and any native-audio model expose all 30.
+        assert_eq!(voices("gemini-3.1-flash-live-preview").len(), 30);
+        assert_eq!(
+            voices("gemini-2.5-flash-preview-native-audio-dialog").len(),
+            30
+        );
+        // Unknown/newer ids default to the full set.
+        assert_eq!(voices("some-future-live-model").len(), 30);
+        assert!(voices("gemini-3.1-flash-live-preview").contains(&"Aoede".to_string()));
+    }
+
+    #[test]
+    fn legacy_half_cascade_models_get_the_eight_voice_subset() {
+        assert_eq!(voices("gemini-2.0-flash-live-001").len(), 8);
+        assert_eq!(voices("gemini-live-2.5-flash-preview").len(), 8);
+        // The subset is contained in the full set.
+        for v in voices("gemini-2.0-flash-live-001") {
+            assert!(
+                NATIVE_AUDIO_VOICES.contains(&v.as_str()),
+                "{v} not in full set"
+            );
+        }
     }
 
     #[tokio::test]

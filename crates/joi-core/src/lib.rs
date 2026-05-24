@@ -41,5 +41,5 @@ pub use session::event::{SessionEvent, Speaker, TurnEvent, UiEvent};
 pub use session::{Capabilities, RealtimeSession, SessionConfig};
 pub use settings::{
     apply_setting, settings_schema, ApplyTiming, SettingDescriptor, SettingId, SettingKind,
-    SettingValue,
+    SettingValue, SettingsContext,
 };
