@@ -8,6 +8,7 @@ use std::time::Instant;
 use joi_core::metrics::MetricsSnapshot;
 use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker, UiEvent};
 
+use crate::commands::{self, SlashCommand};
 use crate::input::Input;
 use crate::picker::Picker;
 use crate::theme::Theme;
@@ -39,9 +40,9 @@ pub enum Action {
     ScrollTop,
     /// Jump to the newest transcript line and resume autoscroll (End).
     ScrollBottom,
-    /// Move the picker highlight up (↑) — ignored when no picker is open.
+    /// Move the highlight up (↑): the picker when open, else the slash suggester; inert otherwise.
     Up,
-    /// Move the picker highlight down (↓) — ignored when no picker is open.
+    /// Move the highlight down (↓): the picker when open, else the slash suggester; inert otherwise.
     Down,
     /// Type a character into the prompt.
     Insert(char),
@@ -52,8 +53,10 @@ pub enum Action {
     /// Move the caret one char left / right.
     Left,
     Right,
-    /// Submit the prompt (Enter), or confirm the picker selection.
+    /// Submit the prompt (Enter), or confirm the picker / highlighted slash suggestion.
     Submit,
+    /// Complete the prompt to the highlighted slash-command suggestion (Tab); inert otherwise.
+    Complete,
     /// Toggle the keybinding help overlay (F1).
     ToggleHelp,
     /// Close an open overlay (help / picker) if any, else clear the prompt.
@@ -120,6 +123,10 @@ pub struct AppModel {
     pub sharing: bool,
     /// The `/resume` session picker overlay, when open.
     pub picker: Option<Picker>,
+    /// Highlighted row in the slash-command suggester. The suggester itself is derived from the
+    /// prompt text (see [`slash_suggestions`](Self::slash_suggestions)); only the cursor persists.
+    /// Reset to the top on every edit and clamped against the live match list when used.
+    suggest_selected: usize,
     /// Latest throughput sample while a session is live (cleared on stop).
     pub metrics: Option<MetricsSnapshot>,
     /// When the session last entered a running state, for the uptime readout.
@@ -149,6 +156,7 @@ impl AppModel {
             mic_muted: false,
             sharing: false,
             picker: None,
+            suggest_selected: 0,
             metrics: None,
             started_at: None,
             tick: 0,
@@ -180,6 +188,41 @@ impl AppModel {
         self.transcript = Transcript::default();
         self.follow = true;
         self.transcript_top = 0;
+    }
+
+    /// The slash-command suggestions for the current prompt, in display order (empty unless the
+    /// prompt starts with `/` and at least one command matches). Derived, not stored — see
+    /// [`commands::matching`].
+    #[must_use]
+    pub fn slash_suggestions(&self) -> Vec<&'static SlashCommand> {
+        commands::matching(self.input.value())
+    }
+
+    /// The highlighted suggestion's index, clamped to the live match list (for rendering).
+    #[must_use]
+    pub fn suggestion_cursor(&self) -> usize {
+        let n = self.slash_suggestions().len();
+        self.suggest_selected.min(n.saturating_sub(1))
+    }
+
+    /// The currently-highlighted suggestion, if the suggester is open.
+    fn active_suggestion(&self) -> Option<&'static SlashCommand> {
+        let matches = self.slash_suggestions();
+        matches
+            .get(self.suggest_selected.min(matches.len().saturating_sub(1)))
+            .copied()
+    }
+
+    /// Move the suggester highlight; no-ops when the suggester is closed (no matches).
+    fn suggest_up(&mut self) {
+        self.suggest_selected = self.suggestion_cursor().saturating_sub(1);
+    }
+
+    fn suggest_down(&mut self) {
+        let n = self.slash_suggestions().len();
+        if n > 0 {
+            self.suggest_selected = (self.suggestion_cursor() + 1).min(n - 1);
+        }
     }
 
     /// Fold a decoded key intent into the model, returning any side effect for the loop to run.
@@ -227,21 +270,42 @@ impl AppModel {
             }
             Action::ScrollTop => self.scroll_up(u16::MAX),
             Action::ScrollBottom => self.follow = true,
-            Action::Insert(c) => self.input.insert(c),
-            Action::Backspace => self.input.backspace(),
-            Action::Delete => self.input.delete(),
+            // Editing the prompt re-derives the suggester, so reset its highlight to the top match.
+            Action::Insert(c) => {
+                self.input.insert(c);
+                self.suggest_selected = 0;
+            }
+            Action::Backspace => {
+                self.input.backspace();
+                self.suggest_selected = 0;
+            }
+            Action::Delete => {
+                self.input.delete();
+                self.suggest_selected = 0;
+            }
             Action::Left => self.input.left(),
             Action::Right => self.input.right(),
             Action::Submit => return self.submit(),
+            // ↑/↓ move the suggester highlight; both no-op when the suggester is closed (no matches).
+            Action::Up => self.suggest_up(),
+            Action::Down => self.suggest_down(),
+            // Tab fills the prompt with the highlighted command, letting the user review then Enter.
+            Action::Complete => {
+                if let Some(cmd) = self.active_suggestion() {
+                    self.input.set(cmd.name);
+                    self.suggest_selected = 0;
+                }
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Escape => {
                 if self.show_help {
                     self.show_help = false;
                 } else {
+                    // Clearing the prompt also closes the suggester (it's derived from the text).
                     self.input.clear();
                 }
             }
-            Action::Up | Action::Down | Action::Ignore => {}
+            Action::Ignore => {}
         }
         None
     }
@@ -275,11 +339,15 @@ impl AppModel {
 
     /// Submit the prompt. A leading `/` is a local command, never sent to the model:
     /// `/exit`|`/quit`|`/q` quits; `/resume` opens the session picker; `/new` starts a fresh session.
-    /// Otherwise echo the typed line into the transcript (the engine doesn't round-trip typed text,
-    /// unlike spoken audio) and emit a [`Command::SendText`]; that path is a no-op unless a session
-    /// is live and the line is non-empty.
+    /// When the slash suggester is open, Enter accepts the highlighted command (so `/re`↵ runs
+    /// `/resume`) rather than the partial text. Otherwise echo the typed line into the transcript
+    /// (the engine doesn't round-trip typed text, unlike spoken audio) and emit a
+    /// [`Command::SendText`]; that path is a no-op unless a session is live and the line is non-empty.
     fn submit(&mut self) -> Option<Command> {
-        let text = self.input.value().trim().to_string();
+        let text = match self.active_suggestion() {
+            Some(cmd) => cmd.name.to_string(),
+            None => self.input.value().trim().to_string(),
+        };
         match text.to_ascii_lowercase().as_str() {
             "/exit" | "/quit" | "/q" => {
                 self.input.clear();
@@ -438,6 +506,71 @@ mod tests {
             0,
             "view reset for new session"
         );
+    }
+
+    #[test]
+    fn suggester_opens_on_slash_and_substring_matches() {
+        let mut m = AppModel::new(true);
+        let names =
+            |m: &AppModel| -> Vec<&str> { m.slash_suggestions().iter().map(|c| c.name).collect() };
+        // Closed for ordinary text.
+        "hi".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert!(m.slash_suggestions().is_empty());
+        m.input.clear();
+        // "/su" substring-matches the body of /resume.
+        "/su".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert_eq!(names(&m), vec!["/resume"]);
+    }
+
+    #[test]
+    fn enter_runs_the_highlighted_suggestion() {
+        // A partial slash command: Enter accepts the highlighted match rather than the typed text.
+        let mut m = AppModel::new(true);
+        "/re".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        assert_eq!(m.on_action(Action::Submit), Some(Command::OpenPicker));
+        assert!(m.input.value().is_empty(), "prompt cleared after accept");
+    }
+
+    #[test]
+    fn arrows_navigate_the_suggester_and_enter_runs_the_selection() {
+        let mut m = AppModel::new(true);
+        m.on_action(Action::Insert('/')); // bare slash → [/resume, /new, /exit]
+        m.on_action(Action::Down); // → /new
+        m.on_action(Action::Down); // → /exit
+        assert_eq!(m.suggestion_cursor(), 2);
+        assert_eq!(
+            m.on_action(Action::Submit),
+            None,
+            "/exit returns no command"
+        );
+        assert!(m.should_quit, "highlighted /exit ran");
+    }
+
+    #[test]
+    fn tab_completes_to_the_highlighted_command() {
+        let mut m = AppModel::new(true);
+        "/ne".chars().for_each(|c| {
+            m.on_action(Action::Insert(c));
+        });
+        m.on_action(Action::Complete);
+        assert_eq!(m.input.value(), "/new", "Tab filled the full command");
+        assert_eq!(m.on_action(Action::Submit), Some(Command::NewSession));
+    }
+
+    #[test]
+    fn editing_resets_the_suggester_cursor() {
+        let mut m = AppModel::new(true);
+        m.on_action(Action::Insert('/'));
+        m.on_action(Action::Down);
+        assert_eq!(m.suggestion_cursor(), 1);
+        m.on_action(Action::Insert('n')); // "/n" → re-derived list, cursor back to top
+        assert_eq!(m.suggestion_cursor(), 0);
     }
 
     #[test]

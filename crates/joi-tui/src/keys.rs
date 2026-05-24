@@ -32,6 +32,8 @@ fn map_key(key: &KeyEvent) -> Action {
         KeyCode::F(3) => Action::ToggleMute,
         KeyCode::F(4) => Action::ToggleShare,
         KeyCode::Esc => Action::Escape,
+        // Tab completes the highlighted slash-command suggestion (inert otherwise).
+        KeyCode::Tab => Action::Complete,
         // Printable input: anything else without Ctrl/Alt (Shift is allowed, for capitals).
         KeyCode::Char(c) if !ctrl && !alt => Action::Insert(c),
         KeyCode::Backspace => Action::Backspace,

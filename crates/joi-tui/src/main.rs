@@ -6,6 +6,7 @@
 //! stream and dispatches commands.
 
 mod app;
+mod commands;
 mod input;
 mod keys;
 mod picker;

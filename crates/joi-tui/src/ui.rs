@@ -11,6 +11,7 @@ use ratatui::Frame;
 use joi_core::session::event::{AppState, ConnectionStatus, Reachability};
 
 use crate::app::AppModel;
+use crate::commands;
 use crate::theme;
 use crate::transcript::LineKind;
 
@@ -64,6 +65,11 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     // HUD corner brackets over the deck's rounded corners.
     draw_corners(frame, area, model.theme.accent);
 
+    // The slash-command suggester floats just above the prompt while typing a `/` command — but not
+    // behind another overlay.
+    if model.picker.is_none() && !model.show_help {
+        render_suggester(frame, rows[6], model);
+    }
     if model.show_help {
         render_help(frame, area, model.theme);
     }
@@ -73,6 +79,66 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     }
 }
 
+/// The slash-command autosuggest popup: a small list floating just above the prompt, listing the
+/// commands whose body substring-matches the text typed after `/`. The highlighted row is in the
+/// accent color (↑/↓ move, Tab completes, Enter runs it). Renders nothing unless the prompt is a
+/// `/` command with at least one match.
+fn render_suggester(frame: &mut Frame, prompt: Rect, model: &AppModel) {
+    let matches = model.slash_suggestions();
+    if matches.is_empty() {
+        return;
+    }
+    let theme = model.theme;
+    let selected = model.suggestion_cursor();
+
+    let body: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let on = i == selected;
+            let marker = if on { "❯ " } else { "  " };
+            let style = if on {
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme::FG_DIM)
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker}{}", cmd.name), style),
+                Span::styled(format!("  {}", cmd.help), Style::new().fg(theme::FG_FAINT)),
+            ])
+        })
+        .collect();
+
+    // Size to the content and float so the box's bottom sits just above the prompt row, left-aligned
+    // with it. Clamp height so it never spills past the top of the deck.
+    let content_w = matches
+        .iter()
+        .map(|c| c.name.len() + c.help.len() + 4)
+        .max()
+        .unwrap_or(20) as u16;
+    let width = (content_w + 4).min(prompt.width.max(8));
+    let height = (body.len() as u16 + 2).min(prompt.y.max(1));
+    let rect = Rect {
+        x: prompt.x,
+        y: prompt.y.saturating_sub(height),
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.background))
+        .title_top(Line::from(" commands ").style(Style::new().fg(theme::FG_FAINT)));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .style(Style::new().bg(theme.background)),
+        rect,
+    );
+}
+
 /// A centered keybinding overlay (F1). Clears its area first so it floats over the deck.
 fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
     let keys = [
@@ -80,15 +146,15 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
         ("F3", "mute / unmute mic"),
         ("F4", "share / stop screen"),
         ("Enter", "send message"),
+        ("Tab", "complete a / command"),
         ("PgUp / PgDn", "scroll (or mouse wheel)"),
         ("Home / End", "oldest / newest"),
         ("F1 / Esc", "toggle help / clear"),
         ("Ctrl+C / Ctrl+Q", "quit"),
-        ("/resume", "list & resume a session"),
-        ("/new", "start a fresh session"),
-        ("/exit", "quit (or /quit, /q)"),
     ];
-    let body: Vec<Line> = keys
+    // Keys first, then the slash commands from the shared catalog (one source of truth with the
+    // prompt suggester).
+    let mut body: Vec<Line> = keys
         .iter()
         .map(|(k, d)| {
             Line::from(vec![
@@ -97,6 +163,12 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
             ])
         })
         .collect();
+    for cmd in commands::SLASH_COMMANDS {
+        body.push(Line::from(vec![
+            Span::styled(format!(" {:<17}", cmd.name), Style::new().fg(theme.accent)),
+            Span::styled(cmd.help.to_string(), Style::new().fg(theme::FG_DIM)),
+        ]));
+    }
 
     let width = 46;
     let height = body.len() as u16 + 2;
@@ -682,6 +754,27 @@ mod tests {
         assert!(
             text.contains("current"),
             "active session not marked: {text}"
+        );
+    }
+
+    #[test]
+    fn suggester_popup_lists_matching_commands() {
+        // Typing a `/` floats the suggester above the prompt, listing matches from the catalog.
+        let mut model = AppModel::new(true);
+        "/".chars().for_each(|c| model.input.insert(c));
+        let text = render_to_string(model);
+        assert!(text.contains("commands"), "suggester title missing: {text}");
+        assert!(text.contains("/resume"), "command missing: {text}");
+    }
+
+    #[test]
+    fn suggester_hidden_without_a_slash_prompt() {
+        let mut model = AppModel::new(true);
+        "hi".chars().for_each(|c| model.input.insert(c));
+        let text = render_to_string(model);
+        assert!(
+            !text.contains("commands"),
+            "suggester should be closed: {text}"
         );
     }
 

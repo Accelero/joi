@@ -21,6 +21,14 @@ impl Input {
         self.caret = 0;
     }
 
+    /// Replace the whole line, placing the caret at the end. Used by slash-command completion (Tab)
+    /// to fill in the highlighted command.
+    pub fn set(&mut self, value: &str) {
+        self.value.clear();
+        self.value.push_str(value);
+        self.caret = self.value.len();
+    }
+
     /// Display columns from the line start to the caret (for positioning the terminal cursor).
     pub fn caret_display_col(&self) -> usize {
         UnicodeWidthStr::width(&self.value[..self.caret])
