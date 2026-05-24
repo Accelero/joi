@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::error::SessionError;
 use crate::history::HistoryTurn;
 use crate::media::{AudioFormat, VideoFrame};
-use crate::metrics::TransportBytes;
+use crate::metrics::{TokenUsage, TransportBytes};
 use crate::tools::{ToolCallId, ToolResult, ToolSchema};
 
 pub use event::{
@@ -131,6 +131,14 @@ pub trait RealtimeSession: Send {
     /// `None` (the default) means it doesn't — the [`crate::manager::SessionManager`] then reports
     /// a payload-level estimate instead. Counts are monotonic for one connection's lifetime.
     fn transport_bytes(&self) -> Option<TransportBytes> {
+        None
+    }
+
+    /// Cumulative provider-reported [`TokenUsage`] for this session (input/prompt and output
+    /// tokens), if the provider surfaces it. `None` (the default) means it doesn't — the
+    /// [`crate::manager::SessionManager`] then falls back to a chars/4 estimate. Counts are
+    /// monotonic for one connection; the manager differences them into a per-second token rate.
+    fn token_usage(&self) -> Option<TokenUsage> {
         None
     }
 }

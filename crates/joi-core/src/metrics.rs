@@ -20,9 +20,9 @@ const CHARS_PER_TOKEN: f64 = 4.0;
 
 /// A point-in-time throughput sample surfaced to the UI as [`crate::session::UiEvent::Metrics`].
 ///
-/// All three figures are instantaneous rates over the most recent [`SAMPLE_INTERVAL`] window, so
-/// the frontend can render a live up/down bandwidth + generation-speed indicator without doing any
-/// math of its own (the architecture rule: logic in Rust, the UI only renders).
+/// All four figures are instantaneous rates over the most recent [`SAMPLE_INTERVAL`] window, so
+/// the frontend can render a live up/down bandwidth + up/down token-rate indicator without doing
+/// any math of its own (the architecture rule: logic in Rust, the UI only renders).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct MetricsSnapshot {
@@ -32,8 +32,14 @@ pub struct MetricsSnapshot {
     /// Downstream rate from the provider in kbit/s — actual WebSocket frame bytes when reported,
     /// otherwise a payload-level estimate (synthesized audio + transcripts).
     pub down_kbps: f64,
-    /// Agent output generation rate in tokens per second (chars/4 — see `history::estimate_tokens`).
-    pub tokens_per_sec: f64,
+    /// Upstream token rate in tokens/s — **input** tokens the provider is consuming (audio + video +
+    /// text, all modalities). From Gemini's real `usageMetadata.promptTokenCount` differenced over
+    /// the window when available; otherwise a chars/4 estimate of sent text only.
+    pub up_tokens_per_sec: f64,
+    /// Downstream token rate in tokens/s — **output** tokens the model is generating. From Gemini's
+    /// real `usageMetadata.responseTokenCount` differenced over the window when available; otherwise
+    /// a chars/4 estimate of the output transcript.
+    pub down_tokens_per_sec: f64,
 }
 
 impl MetricsSnapshot {
@@ -41,21 +47,41 @@ impl MetricsSnapshot {
     pub const ZERO: Self = Self {
         up_kbps: 0.0,
         down_kbps: 0.0,
-        tokens_per_sec: 0.0,
+        up_tokens_per_sec: 0.0,
+        down_tokens_per_sec: 0.0,
     };
+}
+
+/// Cumulative provider-reported token counts for a live session, by direction. Like
+/// [`TransportBytes`], these are **monotonic** for the session's lifetime; the manager differences
+/// successive reads into a per-window token rate. `up` is input/prompt tokens (Gemini's
+/// `promptTokenCount`, which grows with the context window); `down` is output tokens (a running sum
+/// reconstructed from the per-turn `responseTokenCount`). `None` from a provider means it doesn't
+/// report usage, so the manager falls back to the [`ThroughputMeter`]'s chars/4 estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    /// Cumulative input/prompt tokens the provider has counted this session.
+    pub up: u64,
+    /// Cumulative output/response tokens the provider has counted this session.
+    pub down: u64,
 }
 
 /// Accumulates payload byte/token counts and converts a window of them into a [`MetricsSnapshot`].
 ///
 /// The manager calls [`add_up`](Self::add_up)/[`add_down`](Self::add_down)/
-/// [`add_output_text`](Self::add_output_text) as data flows, then [`sample`](Self::sample) on each
-/// tick to drain the window into a rate. Byte tallies are `u64` and saturate rather than overflow;
-/// output tokens are derived from accumulated characters at sample time, so streams of tiny
-/// transcript deltas don't each round up to a whole token.
+/// [`add_input_text`](Self::add_input_text)/[`add_output_text`](Self::add_output_text) as data flows,
+/// then [`sample`](Self::sample) on each tick to drain the window into a rate. Byte tallies are `u64`
+/// and saturate rather than overflow; the token estimate is derived from accumulated characters at
+/// sample time, so streams of tiny transcript deltas don't each round up to a whole token.
+///
+/// The char-based token figures are only a **fallback** — when the provider reports real
+/// [`TokenUsage`] the manager overrides them. They keep the meter meaningful for providers/test
+/// doubles that don't report usage.
 #[derive(Debug, Default)]
 pub struct ThroughputMeter {
     up_bytes: u64,
     down_bytes: u64,
+    in_chars: u64,
     out_chars: u64,
 }
 
@@ -70,7 +96,13 @@ impl ThroughputMeter {
         self.down_bytes = self.down_bytes.saturating_add(bytes);
     }
 
-    /// Record a chunk of agent **output** text; its characters feed the token-rate estimate.
+    /// Record a chunk of **sent** text; its characters feed the upstream token-rate fallback.
+    pub fn add_input_text(&mut self, text: &str) {
+        self.in_chars = self.in_chars.saturating_add(text.chars().count() as u64);
+    }
+
+    /// Record a chunk of agent **output** text; its characters feed the downstream token-rate
+    /// fallback.
     pub fn add_output_text(&mut self, text: &str) {
         self.out_chars = self.out_chars.saturating_add(text.chars().count() as u64);
     }
@@ -93,7 +125,8 @@ impl ThroughputMeter {
         let snap = MetricsSnapshot {
             up_kbps: bytes_to_kbps(self.up_bytes, secs),
             down_kbps: bytes_to_kbps(self.down_bytes, secs),
-            tokens_per_sec: (self.out_chars as f64 / CHARS_PER_TOKEN) / secs,
+            up_tokens_per_sec: (self.in_chars as f64 / CHARS_PER_TOKEN) / secs,
+            down_tokens_per_sec: (self.out_chars as f64 / CHARS_PER_TOKEN) / secs,
         };
         self.reset();
         Some(snap)
@@ -153,8 +186,10 @@ mod tests {
         let mut m = ThroughputMeter::default();
         m.add_output_text("abcd"); // 4 chars -> 1 token
         m.add_output_text("efgh"); // 4 chars -> 1 token (8 chars total -> 2 tokens)
-        let snap = m.sample(Duration::from_secs(2)).unwrap(); // 2 tokens / 2 s
-        assert_eq!(snap.tokens_per_sec, 1.0);
+        m.add_input_text("wxyz"); // 4 sent chars -> 1 up token
+        let snap = m.sample(Duration::from_secs(2)).unwrap(); // over 2 s
+        assert_eq!(snap.down_tokens_per_sec, 1.0); // 2 output tokens / 2 s
+        assert_eq!(snap.up_tokens_per_sec, 0.5); // 1 input token / 2 s
     }
 
     #[test]

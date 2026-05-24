@@ -60,6 +60,14 @@ pub trait RealtimeSession: Send + Sync {
         None
     }
 
+    /// PATCH(joi): Cumulative provider-reported token usage `(prompt, response)` for this session,
+    /// if the provider surfaces it. `prompt` is the input/context token count (monotonic; grows with
+    /// the context window) and `response` is a running sum of output tokens. `None` = not reported.
+    /// Joi differences successive reads to report a per-second token rate in each direction.
+    fn token_usage(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     /// Send raw audio data to the server.
     ///
     /// The audio should be in the format specified in the session configuration.

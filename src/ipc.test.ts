@@ -11,7 +11,8 @@ const SAMPLES: Record<string, string> = {
   connection: '{"type":"connection","status":"connected","detail":null}',
   reachability: '{"type":"reachability","state":"online","detail":null}',
   history: '{"type":"history","turns":2,"token_estimate":12,"budget":32000}',
-  metrics: '{"type":"metrics","up_kbps":256,"down_kbps":384,"tokens_per_sec":12.5}',
+  metrics:
+    '{"type":"metrics","up_kbps":256,"down_kbps":384,"up_tokens_per_sec":3,"down_tokens_per_sec":12.5}',
   error: '{"type":"error","kind":"auth","message":"invalid key"}',
 };
 
@@ -42,7 +43,8 @@ describe("UiEvent parity", () => {
         case "metrics":
           expect(ev.up_kbps).toBe(256);
           expect(ev.down_kbps).toBe(384);
-          expect(ev.tokens_per_sec).toBe(12.5);
+          expect(ev.up_tokens_per_sec).toBe(3);
+          expect(ev.down_tokens_per_sec).toBe(12.5);
           break;
         case "error":
           expect(ev.kind).toBe("auth");

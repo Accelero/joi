@@ -221,6 +221,14 @@ pub struct GeminiRealtimeSession {
     // the connection's lifetime — surfaced via `transport_bytes` for Joi's throughput meter.
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
+    // PATCH(joi): provider-reported token usage from `usageMetadata` — surfaced via `token_usage`.
+    // `prompt_tokens` is the latest cumulative `promptTokenCount` (grows with the context window).
+    // `output_tokens` is a monotonic running sum reconstructed from the per-turn `responseTokenCount`
+    // (which resets each turn); `last_response_tokens` holds the previous turn-local value so we can
+    // tell within-turn growth from a new turn. All written only from the single reader task.
+    prompt_tokens: Arc<AtomicU64>,
+    output_tokens: Arc<AtomicU64>,
+    last_response_tokens: Arc<AtomicU64>,
 }
 
 impl GeminiRealtimeSession {
@@ -352,6 +360,10 @@ impl GeminiRealtimeSession {
             event_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             bytes_sent,
             bytes_received,
+            // PATCH(joi): per-connection token-usage counters (see struct fields).
+            prompt_tokens: Arc::new(AtomicU64::new(0)),
+            output_tokens: Arc::new(AtomicU64::new(0)),
+            last_response_tokens: Arc::new(AtomicU64::new(0)),
         };
 
         session.send_setup(model, config).await?;
@@ -532,11 +544,34 @@ impl GeminiRealtimeSession {
         }
     }
 
+    /// PATCH(joi): fold a server message's `usageMetadata` into the token counters. `promptTokenCount`
+    /// is cumulative for the session, so we store the latest. `responseTokenCount` is per-turn (it
+    /// resets each turn), so we reconstruct a monotonic output total: a value `>=` the last seen is
+    /// within-turn growth (add the delta); a smaller value means a new turn began (add it whole).
+    fn record_usage(&self, value: &Value) {
+        let Some(usage) = value.get("usageMetadata") else {
+            return;
+        };
+        let count = |key: &str| usage.get(key).and_then(serde_json::Value::as_u64);
+        if let Some(prompt) = count("promptTokenCount") {
+            self.prompt_tokens.store(prompt, Ordering::Relaxed);
+        }
+        if let Some(response) = count("responseTokenCount") {
+            let last = self.last_response_tokens.swap(response, Ordering::Relaxed);
+            let delta = if response >= last { response - last } else { response };
+            self.output_tokens.fetch_add(delta, Ordering::Relaxed);
+        }
+    }
+
     /// Translate Gemini-specific events to unified format.
     fn translate_gemini_event(&self, raw: &str) -> Result<Vec<ServerEvent>> {
         tracing::debug!(%raw, "Translating Gemini event");
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| RealtimeError::protocol(format!("Parse error: {}, raw: {}", e, raw)))?;
+
+        // PATCH(joi): fold any token usage into the counters before dispatching. `usageMetadata`
+        // rides along with serverContent (or arrives standalone), so check it on every message.
+        self.record_usage(&value);
 
         // Check for setup completion
         if let Some(_setup_complete) = value.get("setupComplete") {
@@ -686,6 +721,14 @@ impl RealtimeSession for GeminiRealtimeSession {
         Some((
             self.bytes_sent.load(Ordering::Relaxed),
             self.bytes_received.load(Ordering::Relaxed),
+        ))
+    }
+
+    // PATCH(joi): report cumulative `(prompt, output)` token usage folded from `usageMetadata`.
+    fn token_usage(&self) -> Option<(u64, u64)> {
+        Some((
+            self.prompt_tokens.load(Ordering::Relaxed),
+            self.output_tokens.load(Ordering::Relaxed),
         ))
     }
 

@@ -24,7 +24,7 @@ use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
 use joi_core::connectivity::{ConnectivityProbe, ProbeOutcome};
 use joi_core::error::SessionError;
 use joi_core::media::{self, VideoFrame};
-use joi_core::metrics::TransportBytes;
+use joi_core::metrics::{TokenUsage, TransportBytes};
 use joi_core::session::event::{
     CloseReason, EventReceiver, EventSender, Reachability, SessionEvent, Speaker, TurnEvent,
 };
@@ -180,6 +180,11 @@ impl RealtimeSession for GeminiAdapter {
     fn transport_bytes(&self) -> Option<TransportBytes> {
         let (sent, received) = self.session.as_ref()?.transport_bytes()?;
         Some(TransportBytes { sent, received })
+    }
+
+    fn token_usage(&self) -> Option<TokenUsage> {
+        let (up, down) = self.session.as_ref()?.token_usage()?;
+        Some(TokenUsage { up, down })
     }
 }
 

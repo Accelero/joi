@@ -23,7 +23,7 @@ use crate::error::SessionError;
 use crate::history::{HistoryStore, HistoryTurn, Role, TokenBudget};
 use crate::media::VideoFrame;
 use crate::metrics::{
-    bytes_to_kbps, MetricsSnapshot, ThroughputMeter, TransportBytes, SAMPLE_INTERVAL,
+    bytes_to_kbps, MetricsSnapshot, ThroughputMeter, TokenUsage, TransportBytes, SAMPLE_INTERVAL,
 };
 use crate::session::event::{AppState, CloseReason, ConnectionStatus, SessionEvent, Speaker};
 use crate::session::{RealtimeSession, SessionConfig, UiEvent};
@@ -234,6 +234,10 @@ pub struct SessionManager {
     /// Provider wire-byte totals at the previous sample, differenced to get the per-window rate.
     /// `None` until the first sample of a connection (and after stop) so we don't report a spike.
     last_transport: Option<TransportBytes>,
+    /// Provider token-usage totals at the previous sample, differenced to get the per-window token
+    /// rate. `None` until the first sample of a connection (and after stop) — same spike-guard as
+    /// `last_transport`.
+    last_token_usage: Option<TokenUsage>,
     /// Pokes the reachability monitor to re-probe (e.g. right after a connect failure, so the dot
     /// updates without waiting for the next poll). `None` when no probe is wired.
     probe_trigger: Option<Arc<Notify>>,
@@ -287,6 +291,7 @@ impl SessionManager {
             meter: ThroughputMeter::default(),
             last_sample_ms,
             last_transport: None,
+            last_token_usage: None,
             probe_trigger: probe_trigger.clone(),
         };
         tokio::spawn(actor.run(cmd_rx, ev_rx));
@@ -354,6 +359,7 @@ impl SessionManager {
                 let res = match session.as_mut() {
                     Some(s) => {
                         self.meter.add_up(text.len() as u64);
+                        self.meter.add_input_text(&text);
                         s.send_text(&text).await
                     }
                     None => Err(SessionError::NotConnected),
@@ -464,6 +470,7 @@ impl SessionManager {
         self.meter.reset();
         self.last_sample_ms = self.clock.now_ms();
         self.last_transport = None;
+        self.last_token_usage = None;
         self.set_state(AppState::Listening);
         self.emit_connection(ConnectionStatus::Connected, None);
         Ok(())
@@ -479,6 +486,7 @@ impl SessionManager {
             // Clear the live indicator: drop any partial window and emit one zero sample.
             self.meter.reset();
             self.last_transport = None;
+            self.last_token_usage = None;
             self.emit(UiEvent::Metrics(MetricsSnapshot::ZERO));
         }
     }
@@ -591,6 +599,7 @@ impl SessionManager {
         if self.state == AppState::Stopped {
             self.meter.reset();
             self.last_transport = None;
+            self.last_token_usage = None;
             self.last_sample_ms = self.clock.now_ms();
             return;
         }
@@ -600,9 +609,10 @@ impl SessionManager {
             return; // no time elapsed (e.g. a frozen test clock); keep counters for the next tick
         };
 
+        let secs = elapsed.as_secs_f64();
+
         // Prefer the provider's wire-byte counters, differencing successive totals over the window.
         if let Some(current) = session.and_then(RealtimeSession::transport_bytes) {
-            let secs = elapsed.as_secs_f64();
             // The first sample of a connection has no baseline; treat `prev == current` so it
             // reports zero rather than a spike from the connect/setup handshake.
             let prev = self.last_transport.unwrap_or(current);
@@ -610,6 +620,18 @@ impl SessionManager {
             snapshot.down_kbps =
                 bytes_to_kbps(current.received.saturating_sub(prev.received), secs);
             self.last_transport = Some(current);
+        }
+
+        // Prefer the provider's real token usage over the chars/4 estimate, differencing the
+        // cumulative totals over the window (same first-sample spike-guard as the wire bytes).
+        if let Some(current) = session.and_then(RealtimeSession::token_usage) {
+            let prev = self.last_token_usage.unwrap_or(current);
+            #[allow(clippy::cast_precision_loss)] // token counts stay well within f64's exact range
+            {
+                snapshot.up_tokens_per_sec = current.up.saturating_sub(prev.up) as f64 / secs;
+                snapshot.down_tokens_per_sec = current.down.saturating_sub(prev.down) as f64 / secs;
+            }
+            self.last_token_usage = Some(current);
         }
 
         self.last_sample_ms = now;
@@ -670,6 +692,8 @@ mod tests {
         audio_ended: Arc<std::sync::atomic::AtomicUsize>,
         /// When set, the session reports these as `transport_bytes` (the wire-metering path).
         transport: Option<Arc<WireCounters>>,
+        /// When set, the session reports these as `token_usage` `(up, down)` cumulative totals.
+        tokens: Option<Arc<WireCounters>>,
     }
 
     impl ScriptedSession {
@@ -684,6 +708,7 @@ mod tests {
                 closed,
                 audio_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 transport: None,
+                tokens: None,
             }
         }
 
@@ -697,6 +722,13 @@ mod tests {
         fn with_transport(transport: Arc<WireCounters>) -> Self {
             Self {
                 transport: Some(transport),
+                ..Self::new()
+            }
+        }
+
+        fn with_token_usage(tokens: Arc<WireCounters>) -> Self {
+            Self {
+                tokens: Some(tokens),
                 ..Self::new()
             }
         }
@@ -791,6 +823,14 @@ mod tests {
             self.transport.as_ref().map(|c| TransportBytes {
                 sent: c.0.load(Ordering::SeqCst),
                 received: c.1.load(Ordering::SeqCst),
+            })
+        }
+
+        fn token_usage(&self) -> Option<TokenUsage> {
+            use std::sync::atomic::Ordering;
+            self.tokens.as_ref().map(|c| TokenUsage {
+                up: c.0.load(Ordering::SeqCst),
+                down: c.1.load(Ordering::SeqCst),
             })
         }
     }
@@ -1029,6 +1069,61 @@ mod tests {
         }
         // 2000 bytes over ~1 s = 16 kbit/s.
         assert!(down > 0.0, "wire down rate should be positive, got {down}");
+        handle.stop(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_report_provider_token_usage_as_a_rate() {
+        // The provider reports growing cumulative token totals; the manager differences them into a
+        // per-second up/down token rate, with the first sample as a zero baseline (no spike).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let tokens = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+        let clock = TestClock::new(1_000);
+        let factory_tokens = Arc::clone(&tokens);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_token_usage(Arc::clone(
+                    &factory_tokens,
+                ))) as Box<dyn RealtimeSession>
+            }),
+            None,
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+
+        // Phase 1: baseline window — totals still zero, so the first sample reports no rate.
+        clock.advance(1_000);
+        let baseline = next_metrics(&mut ui).await;
+        assert_eq!(
+            baseline.up_tokens_per_sec, 0.0,
+            "first sample is the baseline"
+        );
+
+        // Phase 2: grow both cumulative totals; the next sample differences them over the window
+        // (90 prompt + 40 response tokens over ~1 s -> 90 up tok/s, 40 down tok/s).
+        tokens.0.store(90, Ordering::SeqCst);
+        tokens.1.store(40, Ordering::SeqCst);
+        clock.advance(1_000);
+        let mut sample = None;
+        for _ in 0..50 {
+            let m = next_metrics(&mut ui).await;
+            if m.up_tokens_per_sec > 0.0 {
+                sample = Some(m);
+                break;
+            }
+        }
+        let m = sample.expect("a non-zero up-token-rate sample");
+        assert!(
+            m.up_tokens_per_sec > 0.0,
+            "up token rate should be positive: {m:?}"
+        );
+        assert!(
+            m.down_tokens_per_sec > 0.0,
+            "down token rate should be positive: {m:?}"
+        );
         handle.stop(false).await.unwrap();
     }
 

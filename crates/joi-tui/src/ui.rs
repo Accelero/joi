@@ -351,10 +351,10 @@ fn footer_line(model: &AppModel) -> Line<'static> {
 fn metrics_text(model: &AppModel) -> String {
     match model.metrics {
         Some(m) => format!(
-            "↑{:.1} ↓{:.1} kb/s · {:.0} tok/s",
-            m.up_kbps, m.down_kbps, m.tokens_per_sec
+            "↑{:.1} ↓{:.1} kb/s · ↑{:.0} ↓{:.0} tok/s",
+            m.up_kbps, m.down_kbps, m.up_tokens_per_sec, m.down_tokens_per_sec
         ),
-        None => "↑--.- ↓--.- kb/s · -- tok/s".to_string(),
+        None => "↑--.- ↓--.- kb/s · ↑-- ↓-- tok/s".to_string(),
     }
 }
 

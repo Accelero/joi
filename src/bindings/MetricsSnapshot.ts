@@ -3,9 +3,9 @@
 /**
  * A point-in-time throughput sample surfaced to the UI as [`crate::session::UiEvent::Metrics`].
  *
- * All three figures are instantaneous rates over the most recent [`SAMPLE_INTERVAL`] window, so
- * the frontend can render a live up/down bandwidth + generation-speed indicator without doing any
- * math of its own (the architecture rule: logic in Rust, the UI only renders).
+ * All four figures are instantaneous rates over the most recent [`SAMPLE_INTERVAL`] window, so
+ * the frontend can render a live up/down bandwidth + up/down token-rate indicator without doing
+ * any math of its own (the architecture rule: logic in Rust, the UI only renders).
  */
 export type MetricsSnapshot = { 
 /**
@@ -19,6 +19,14 @@ up_kbps: number,
  */
 down_kbps: number, 
 /**
- * Agent output generation rate in tokens per second (chars/4 — see `history::estimate_tokens`).
+ * Upstream token rate in tokens/s — **input** tokens the provider is consuming (audio + video +
+ * text, all modalities). From Gemini's real `usageMetadata.promptTokenCount` differenced over
+ * the window when available; otherwise a chars/4 estimate of sent text only.
  */
-tokens_per_sec: number, };
+up_tokens_per_sec: number, 
+/**
+ * Downstream token rate in tokens/s — **output** tokens the model is generating. From Gemini's
+ * real `usageMetadata.responseTokenCount` differenced over the window when available; otherwise
+ * a chars/4 estimate of the output transcript.
+ */
+down_tokens_per_sec: number, };
