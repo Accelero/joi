@@ -95,6 +95,14 @@ pub trait RealtimeSession: Send + Sync {
         Ok(())
     }
 
+    /// PATCH(joi): Seed the session with prior conversation `turns` as context, **without**
+    /// triggering a response (Gemini `clientContent` with `turnComplete: false`). Each turn is
+    /// `(role, text)` where `role` is `"user"` or `"model"`, in chronological order. Lets a fresh
+    /// connection continue an earlier conversation. Default: no-op (the provider starts fresh).
+    async fn send_history(&self, _turns: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+
     /// Send a tool/function response.
     async fn send_tool_response(&self, response: ToolResponse) -> Result<()>;
 

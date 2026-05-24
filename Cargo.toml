@@ -22,6 +22,8 @@ tracing = "0.1"
 # `env` only: YAML parsing is done with serde_norway so the deprecated serde_yaml stays out of tree.
 figment = { version = "0.10", features = ["env"] }
 directories = "6"
+# Session ids (v4 UUIDs) for the per-session JSONL logs under ~/.joi/sessions.
+uuid = { version = "1", features = ["v4"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # HTTP client for the (token-free) provider reachability probe. rustls so no system OpenSSL is
 # needed and the cert roots ship with the binary (cross-platform). Already in-tree via adk-gemini.

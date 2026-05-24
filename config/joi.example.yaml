@@ -18,6 +18,9 @@ live_api:
     # API key. Prefer leaving this empty and exporting GEMINI_API_KEY in your shell instead —
     # a key written here sits in plaintext on disk. (Equivalent: JOI_LIVE_API__GEMINI__API_KEY.)
     api_key: ""
+    # Prebuilt voice name. Widely available: Aoede, Charon, Fenrir, Kore, Puck, Leda, Orus, Zephyr.
+    # Native-audio models expose more — see Google's Live API voice list. Unknown names fall back to
+    # the model default. (Env: JOI_LIVE_API__GEMINI__VOICE.)
     voice: Aoede
     system_instruction: You are Joi, a concise local voice companion.
     input_transcription: true       # FR-3: render the user transcript
@@ -28,7 +31,7 @@ live_api:
   reachability_probe_secs: 20
 
 history:
-  dir: null                         # null → XDG data dir (~/.local/share/joi/history)
+  dir: null                         # null → ~/.joi/sessions (per-session <uuid>.jsonl + index.json)
   token_budget: 32000               # approx tokens; Live session input budget (SPEC §6.2)
 
 logging:

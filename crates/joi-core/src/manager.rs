@@ -433,11 +433,15 @@ impl SessionManager {
         self.set_state(AppState::Connecting);
         self.emit_connection(ConnectionStatus::Connecting, None);
 
-        let initial_context = if resume {
-            self.restore_context().await
-        } else {
-            Vec::new()
-        };
+        // Always seed from the persisted log so a session continues the prior conversation; the
+        // first start finds an empty log and seeds nothing. (`resume` is retained for the future
+        // native resumption-handle path — context seeding no longer depends on it.)
+        let initial_context = self.restore_context().await;
+        tracing::debug!(
+            resume,
+            seed_turns = initial_context.len(),
+            "starting session"
+        );
         let cfg = SessionConfig::from_config(
             &self.config,
             initial_context,
@@ -714,6 +718,9 @@ mod tests {
         /// When set, `send_audio` emits a streamed user (input-transcription) line instead of audio,
         /// to exercise the manager's per-speaker transcript accumulation.
         user_stream: bool,
+        /// When set, `connect` records how many `initial_context` turns the manager seeded, so a
+        /// test can prove start replays the persisted log.
+        seeded: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     impl ScriptedSession {
@@ -730,6 +737,7 @@ mod tests {
                 transport: None,
                 tokens: None,
                 user_stream: false,
+                seeded: None,
             }
         }
 
@@ -760,11 +768,21 @@ mod tests {
                 ..Self::new()
             }
         }
+
+        fn with_seed_recorder(seeded: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self {
+                seeded: Some(seeded),
+                ..Self::new()
+            }
+        }
     }
 
     #[async_trait]
     impl RealtimeSession for ScriptedSession {
-        async fn connect(&mut self, _cfg: SessionConfig) -> Result<(), SessionError> {
+        async fn connect(&mut self, cfg: SessionConfig) -> Result<(), SessionError> {
+            if let Some(seeded) = &self.seeded {
+                seeded.store(cfg.initial_context.len(), std::sync::atomic::Ordering::SeqCst);
+            }
             let (tx, rx) = mpsc::channel(64);
             self.tx = Some(tx);
             self.rx = Some(rx);
@@ -1023,6 +1041,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn start_seeds_context_from_the_persisted_log() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A prior conversation already sits in the log.
+        let history = Arc::new(InMemoryHistory::new());
+        history
+            .append(HistoryTurn::new(Role::User, "earlier question", 1))
+            .await
+            .unwrap();
+        history
+            .append(HistoryTurn::new(Role::Assistant, "earlier answer", 2))
+            .await
+            .unwrap();
+
+        let seeded = Arc::new(AtomicUsize::new(0));
+        let factory_seeded = Arc::clone(&seeded);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(TestClock::new(1_000)),
+            history.clone(),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_seed_recorder(Arc::clone(&factory_seeded)))
+                    as Box<dyn RealtimeSession>
+            }),
+            None,
+        );
+
+        // Even with resume=false, start replays the persisted log into the new session.
+        handle.start(false).await.unwrap();
+        assert_eq!(
+            seeded.load(Ordering::SeqCst),
+            2,
+            "start should seed the two persisted turns"
+        );
+        handle.stop(false).await.unwrap();
     }
 
     #[tokio::test]

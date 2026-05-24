@@ -844,6 +844,34 @@ impl RealtimeSession for GeminiRealtimeSession {
         self.send_raw(&msg).await
     }
 
+    // PATCH(joi): seed prior conversation turns as context without triggering a response
+    // (turnComplete = false), so a fresh connection continues an earlier chat.
+    async fn send_history(&self, turns: &[(String, String)]) -> Result<()> {
+        if turns.is_empty() {
+            return Ok(());
+        }
+        let turns = turns
+            .iter()
+            .map(|(role, text)| GeminiTurn {
+                role: role.clone(),
+                parts: vec![GeminiPart {
+                    text: Some(text.clone()),
+                    inline_data: None,
+                }],
+            })
+            .collect();
+        let msg = GeminiClientMessage {
+            setup: None,
+            realtime_input: None,
+            tool_response: None,
+            client_content: Some(GeminiClientContent {
+                turns,
+                turn_complete: false,
+            }),
+        };
+        self.send_raw(&msg).await
+    }
+
     async fn send_tool_response(&self, response: ToolResponse) -> Result<()> {
         let output = match &response.output {
             Value::String(s) => json!({ "result": s }),

@@ -23,6 +23,7 @@ use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
 
 use joi_core::connectivity::{ConnectivityProbe, ProbeOutcome};
 use joi_core::error::SessionError;
+use joi_core::history::{HistoryTurn, Role};
 use joi_core::media::{self, VideoFrame};
 use joi_core::metrics::{TokenUsage, TransportBytes};
 use joi_core::session::event::{
@@ -100,6 +101,17 @@ impl RealtimeSession for GeminiAdapter {
         // adk hands back a `Box<dyn RealtimeSession>`; share it as an `Arc` so the pump task and the
         // `send_*` calls (all `&self`) can hold it concurrently without aliasing `&mut`.
         let session: Arc<dyn AdkSession> = Arc::from(boxed);
+
+        // Seed the prior conversation as context (turnComplete=false) so this fresh connection
+        // continues the same chat without replaying old turns as new prompts. An empty log (first
+        // run) seeds nothing. A seed failure is non-fatal — the session works, just without memory.
+        let seed = history_to_seed_turns(&cfg.initial_context);
+        if !seed.is_empty() {
+            match session.send_history(&seed).await {
+                Ok(()) => tracing::info!(turns = seed.len(), "seeded prior conversation"),
+                Err(e) => tracing::warn!(error = %e, turns = seed.len(), "failed to seed history"),
+            }
+        }
 
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL);
         let pump = tokio::spawn(pump_events(Arc::clone(&session), tx));
@@ -331,6 +343,24 @@ fn user_delta(text: String, final_: bool) -> SessionEvent {
         text,
         final_,
     }
+}
+
+/// Map persisted [`HistoryTurn`]s to adk seed turns `(role, text)`, in chronological order, using
+/// Gemini's role names. Whitespace-only turns are skipped (no degenerate seed), and `System` turns
+/// are dropped — system context belongs in the setup's `systemInstruction`, not a dialogue turn.
+fn history_to_seed_turns(turns: &[HistoryTurn]) -> Vec<(String, String)> {
+    turns
+        .iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .filter_map(|t| {
+            let role = match t.role {
+                Role::User => "user",
+                Role::Assistant => "model",
+                Role::System => return None,
+            };
+            Some((role.to_string(), t.text.clone()))
+        })
+        .collect()
 }
 
 /// Classify a connect-time error so the UI can tell "bad key" from "network down".
@@ -635,6 +665,25 @@ mod tests {
             }, SessionEvent::AudioOutput { .. }] => {}
             other => panic!("expected user-final then audio, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn history_maps_to_gemini_seed_turns_in_order() {
+        let turns = vec![
+            HistoryTurn::new(Role::User, "hello", 1),
+            HistoryTurn::new(Role::Assistant, "hi there", 2),
+            HistoryTurn::new(Role::User, "   ", 3), // whitespace-only → skipped
+            HistoryTurn::new(Role::System, "be nice", 4), // system → dropped (goes in setup)
+        ];
+        assert_eq!(
+            history_to_seed_turns(&turns),
+            vec![
+                ("user".to_string(), "hello".to_string()),
+                ("model".to_string(), "hi there".to_string()),
+            ]
+        );
+        // An empty log seeds nothing.
+        assert!(history_to_seed_turns(&[]).is_empty());
     }
 
     #[test]

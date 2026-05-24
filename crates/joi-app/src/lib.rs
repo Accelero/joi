@@ -15,7 +15,7 @@ use std::sync::Arc;
 use joi_core::clock::SystemClock;
 use joi_core::config::{Config, UiCfg};
 use joi_core::error::SessionError;
-use joi_core::history::InMemoryHistory;
+use joi_core::history::{HistoryStore, InMemoryHistory, SessionStore};
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
 use joi_core::media::AudioFormat;
 use joi_core::session::event::UiEvent;
@@ -54,7 +54,19 @@ impl JoiApp {
             Ok(factory) => {
                 let factory: Arc<dyn SessionFactory> = Arc::from(factory);
                 let clock = Arc::new(SystemClock);
-                let history = Arc::new(InMemoryHistory::new());
+                // Persist this run's conversation as a new session under ~/.joi/sessions. Falls back
+                // to in-memory history if the dir is unset (headless/tests) or can't be created, so
+                // the app still runs. `config.history.dir` was resolved by `Config::load`.
+                let history: Arc<dyn HistoryStore> = match config.history.dir.clone() {
+                    Some(dir) => match SessionStore::create_new(dir, clock.clone()) {
+                        Ok(store) => Arc::new(store),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "session store unavailable; using in-memory history");
+                            Arc::new(InMemoryHistory::new())
+                        }
+                    },
+                    None => Arc::new(InMemoryHistory::new()),
+                };
                 // Read what local media needs from `config` before moving it into the manager.
                 let media_config = MediaConfig {
                     input_device: config.media.audio.input_device.clone(),

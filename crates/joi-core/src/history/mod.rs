@@ -8,6 +8,7 @@
 
 pub mod file;
 pub mod memory;
+pub mod session;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use crate::error::HistoryError;
 
 pub use file::JsonlHistory;
 pub use memory::InMemoryHistory;
+pub use session::{Session, SessionMeta, SessionStore, SessionSummary};
 
 /// Who produced a turn (SPEC §6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

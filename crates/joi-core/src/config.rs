@@ -202,7 +202,8 @@ pub struct ScreenCfg {
 /// History persistence settings (SPEC §6).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HistoryCfg {
-    /// Directory for the history file. `None` → resolved to the XDG data dir at load time.
+    /// Directory holding per-session logs + the session index. `None` → resolved to
+    /// `~/.joi/sessions` at load time.
     pub dir: Option<PathBuf>,
     /// Approximate token budget bounding persisted history (SPEC §6.2).
     ///
@@ -326,38 +327,36 @@ impl Default for Config {
     }
 }
 
-/// XDG-resolved paths Joi uses. The binary passes these in rather than re-deriving them (m-1).
+/// Filesystem locations Joi uses, all rooted at `~/.joi`. The binary passes these in rather than
+/// re-deriving them (m-1). This deliberately departs from XDG: everything Joi owns lives under one
+/// `~/.joi` directory (config + per-session logs + logs), so it's easy to find, back up, or wipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
-    /// Default config file (`~/.config/joi/joi.yaml`).
+    /// Config file (`~/.joi/config`) — YAML, despite the extensionless name.
     pub config_file: PathBuf,
-    /// Data directory (`~/.local/share/joi/`).
+    /// Joi root data directory (`~/.joi`).
     pub data_dir: PathBuf,
-    /// History directory (`<data_dir>/history`).
-    pub history_dir: PathBuf,
-    /// Log/state directory (`~/.local/state/joi/`).
+    /// Per-session conversation logs + the session index (`~/.joi/sessions`).
+    pub sessions_dir: PathBuf,
+    /// Log directory (`~/.joi/logs`).
     pub log_dir: PathBuf,
 }
 
 impl ProjectPaths {
-    /// Resolve the standard XDG locations for Joi.
+    /// Resolve Joi's locations under `~/.joi`.
     pub fn resolve() -> Result<Self, ConfigError> {
-        let dirs =
-            directories::ProjectDirs::from("", "", "joi").ok_or_else(|| ConfigError::Path {
+        let home = directories::BaseDirs::new()
+            .map(|d| d.home_dir().to_path_buf())
+            .ok_or_else(|| ConfigError::Path {
                 path: PathBuf::from("$HOME"),
-                reason: "no valid home directory for XDG path resolution".to_string(),
+                reason: "no valid home directory".to_string(),
             })?;
-        let data_dir = dirs.data_dir().to_path_buf();
-        // state_dir is Some on Linux; fall back to data_dir elsewhere.
-        let log_dir = dirs
-            .state_dir()
-            .unwrap_or_else(|| dirs.data_dir())
-            .to_path_buf();
+        let root = home.join(".joi");
         Ok(Self {
-            config_file: dirs.config_dir().join("joi.yaml"),
-            history_dir: data_dir.join("history"),
-            data_dir,
-            log_dir,
+            config_file: root.join("config"),
+            sessions_dir: root.join("sessions"),
+            log_dir: root.join("logs"),
+            data_dir: root,
         })
     }
 }
@@ -446,7 +445,7 @@ impl Config {
             .map_err(|e| ConfigError::Load(e.to_string()))?;
 
         if cfg.history.dir.is_none() {
-            cfg.history.dir = Some(paths.history_dir.clone());
+            cfg.history.dir = Some(paths.sessions_dir.clone());
         }
         if cfg.logging.file.is_none() {
             cfg.logging.file = Some(paths.log_dir.join("joi.log"));
@@ -501,9 +500,9 @@ mod tests {
 
     fn test_paths() -> ProjectPaths {
         ProjectPaths {
-            config_file: PathBuf::from("/nonexistent/joi.yaml"),
+            config_file: PathBuf::from("/nonexistent/config"),
             data_dir: PathBuf::from("/data"),
-            history_dir: PathBuf::from("/data/history"),
+            sessions_dir: PathBuf::from("/data/sessions"),
             log_dir: PathBuf::from("/state"),
         }
     }
@@ -531,7 +530,7 @@ mod tests {
         let paths = test_paths();
         let cfg = Config::load_from(Path::new("/nonexistent/joi.yaml"), &paths).unwrap();
         assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
-        assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/history")));
+        assert_eq!(cfg.history.dir, Some(PathBuf::from("/data/sessions")));
         assert_eq!(cfg.logging.file, Some(PathBuf::from("/state/joi.log")));
     }
 
