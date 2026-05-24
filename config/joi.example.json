@@ -1,0 +1,42 @@
+{
+  "live_api": {
+    "provider": "gemini",
+    "gemini": {
+      "model": "gemini-3.1-flash-live-preview",
+      "api_key": "",
+      "input_transcription": true,
+      "output_transcription": true,
+      "context_window_compression": true,
+      "token_budget": 117964
+    },
+    "reachability_probe_secs": 20
+  },
+  "history": {
+    "dir": null
+  },
+  "logging": {
+    "level": "info",
+    "file": null
+  },
+  "media": {
+    "audio": {
+      "frame_ms": 20,
+      "input_device": "default",
+      "output_device": "default",
+      "echo_cancellation": true,
+      "noise_suppression": true,
+      "auto_gain": true
+    },
+    "screen": {
+      "fps": 1.0,
+      "max_width": 768,
+      "quality": 80
+    }
+  },
+  "ui": {
+    "terminal": {
+      "background": "transparent",
+      "accent": "#9aede4"
+    }
+  }
+}

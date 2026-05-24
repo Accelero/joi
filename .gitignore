@@ -17,10 +17,10 @@ dist
 .env
 .env.local
 
-# Real app config lives at ~/.config/joi/joi.yaml (outside the repo). If one is ever placed in the
+# Real app config lives at ~/.joi/config.json (outside the repo). If one is ever placed in the
 # repo's config/ dir, keep it out of source control — only the example is tracked.
 /config/*
-!/config/joi.example.yaml
+!/config/joi.example.json
 
 # Claude Code transient worktrees
 /.claude/worktrees/
