@@ -22,5 +22,5 @@ dist
 /config/*
 !/config/joi.example.yaml
 
-# Tauri build-generated schemas
-/src-tauri/gen/
+# Claude Code transient worktrees
+/.claude/worktrees/
