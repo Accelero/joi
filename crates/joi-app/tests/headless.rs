@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use joi_app::{JoiApp, MediaMode};
 use joi_core::config::{Config, ProviderName};
+use joi_core::history::Role;
 use joi_core::session::event::{Speaker, UiEvent};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -144,4 +145,20 @@ async fn sessions_persist_list_and_switch() {
     let resumed = app.resume_session(&current.id).await.unwrap();
     assert_eq!(resumed.id, current.id);
     assert_eq!(app.current_session().await.unwrap().id, current.id);
+
+    // A frontend repopulating its feed on resume can read the persisted turns over Seam A. The
+    // first conversation recorded a user turn (the typed text) and the mock's echoed agent reply.
+    let turns = app.session_turns(&current.id).await.unwrap();
+    assert!(
+        turns.len() >= 2,
+        "expected user + agent turns, got {turns:?}"
+    );
+    assert_eq!(turns[0].role, Role::User);
+    assert_eq!(turns[0].text, "first conversation topic");
+    assert_eq!(turns[1].role, Role::Assistant);
+    assert!(
+        turns[1].text.contains("echo: first conversation topic"),
+        "agent turn should be the mock's echoed reply, got {:?}",
+        turns[1].text
+    );
 }

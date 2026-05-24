@@ -216,6 +216,16 @@ impl SessionStore {
         Ok(Session { id, meta, turns })
     }
 
+    /// Read the full, chronological turn log of **any** session by id, without changing the current
+    /// binding. This is the read a host uses to **repopulate a transcript view** when it loads or
+    /// resumes a session — the whole conversation as persisted. It is distinct from
+    /// [`load_within_budget`](HistoryStore::load_within_budget), which returns the newest-first,
+    /// budget-bounded slice used to *re-seed the model*. A missing log reads as empty; corrupt lines
+    /// are skipped (FR-22).
+    pub async fn load_turns(&self, id: &str) -> Result<Vec<HistoryTurn>, HistoryError> {
+        read_turns(&log_path(&self.dir, id)).await
+    }
+
     /// Set (or clear) the current session's name, persisting it to the index.
     pub async fn rename(&self, name: Option<String>) -> Result<(), HistoryError> {
         let mut c = self.current.lock().await;
@@ -510,6 +520,38 @@ mod tests {
         assert_eq!(session.id, cur.id);
         assert_eq!(session.turns.len(), 2);
         assert_eq!(session.turns[0].text, "hello"); // chronological order
+    }
+
+    #[tokio::test]
+    async fn load_turns_reads_any_session_without_switching_current() {
+        // A host repopulating a transcript view loads the full chronological log for a given id,
+        // and doing so must not retarget the store's current session.
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _tc) = clock(1_000);
+
+        // Session A gets two turns; remember its id, then switch away to a fresh session B.
+        let store = SessionStore::create_new(dir.path(), c).unwrap();
+        let id_a = store.current_summary().await.id;
+        store
+            .append(HistoryTurn::new(Role::User, "hello", 1))
+            .await
+            .unwrap();
+        store
+            .append(HistoryTurn::new(Role::Assistant, "hi there", 2))
+            .await
+            .unwrap();
+        let id_b = store.start_new().await.unwrap().id;
+
+        // Reading A's turns returns the whole conversation, oldest-first…
+        let turns = store.load_turns(&id_a).await.unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].text, "hello");
+        assert_eq!(turns[1].text, "hi there");
+        // …and the current binding is untouched (still B).
+        assert_eq!(store.current_summary().await.id, id_b);
+
+        // An unknown / empty session reads as no turns rather than erroring.
+        assert!(store.load_turns("does-not-exist").await.unwrap().is_empty());
     }
 
     #[tokio::test]

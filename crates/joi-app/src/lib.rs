@@ -17,7 +17,7 @@ use std::sync::Arc;
 use joi_core::clock::SystemClock;
 use joi_core::config::{Config, UiCfg};
 use joi_core::error::SessionError;
-use joi_core::history::{HistoryStore, InMemoryHistory, SessionStore, SessionSummary};
+use joi_core::history::{HistoryStore, HistoryTurn, InMemoryHistory, SessionStore, SessionSummary};
 use joi_core::manager::{SessionFactory, SessionManager, SessionManagerHandle};
 use joi_core::media::AudioFormat;
 use joi_core::session::event::UiEvent;
@@ -241,6 +241,20 @@ impl JoiApp {
         let store = self.sessions.as_ref().ok_or_else(sessions_unavailable)?;
         store
             .switch_to(id)
+            .await
+            .map_err(|e| SessionError::Provider(e.to_string()))
+    }
+
+    /// The full persisted transcript of a session, **chronological order** — the data a frontend
+    /// renders to repopulate its message feed when it loads or resumes a session. This is the whole
+    /// conversation as stored (user + assistant turns), not the budget-bounded slice that re-seeds
+    /// the model. Errors when sessions aren't persisted (headless / no key), mirroring
+    /// [`resume_session`](Self::resume_session), so a host can tell "no turns yet" (an empty vec)
+    /// from "sessions unavailable" (an error).
+    pub async fn session_turns(&self, id: &str) -> Result<Vec<HistoryTurn>, SessionError> {
+        let store = self.sessions.as_ref().ok_or_else(sessions_unavailable)?;
+        store
+            .load_turns(id)
             .await
             .map_err(|e| SessionError::Provider(e.to_string()))
     }
