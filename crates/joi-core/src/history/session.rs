@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use super::{newest_first_within, HistoryMeta, HistoryStore, HistoryTurn, TokenBudget};
+use super::{newest_first_within, HistoryMeta, HistoryStore, HistoryTurn, Role, TokenBudget};
 use crate::clock::{Clock, UnixMillis};
 use crate::error::HistoryError;
 
@@ -191,6 +191,11 @@ impl HistoryStore for SessionStore {
         let now = self.clock.now_ms();
         let mut c = self.current.lock().await;
         c.meta.last_updated = now;
+        // Auto-label an unnamed session from the first user turn (Claude-Code-style); an explicit
+        // `rename` is preserved because we only fill a `None` name. Rides this same index write.
+        if c.meta.name.is_none() && turn.role == Role::User {
+            c.meta.name = derive_name(&turn.text);
+        }
         upsert_meta(&self.dir, &id, &c.meta).await
     }
 
@@ -224,6 +229,23 @@ impl HistoryStore for SessionStore {
 }
 
 // ── File helpers ────────────────────────────────────────────────────────────
+
+/// Derive a short display label from a user turn: the first few words, capped in length. `None`
+/// for blank/whitespace-only text (leaves the session unnamed until a real first message).
+fn derive_name(text: &str) -> Option<String> {
+    /// Word and character caps for an auto-derived session label.
+    const MAX_WORDS: usize = 6;
+    const MAX_CHARS: usize = 50;
+    let mut name = text.split_whitespace().take(MAX_WORDS).collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return None;
+    }
+    if name.chars().count() > MAX_CHARS {
+        name = name.chars().take(MAX_CHARS).collect::<String>();
+        name.push('…');
+    }
+    Some(name)
+}
 
 fn index_path(dir: &Path) -> PathBuf {
     dir.join(INDEX_FILE)
@@ -405,6 +427,64 @@ mod tests {
         let loaded = store.load_within_budget(TokenBudget(1_000)).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].text, "remember me");
+    }
+
+    #[tokio::test]
+    async fn first_user_turn_auto_names_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _tc) = clock(1_000);
+        let store = SessionStore::create_new(dir.path(), c).unwrap();
+        assert_eq!(store.current_summary().await.meta.name, None);
+
+        store
+            .append(HistoryTurn::new(Role::User, "what's the weather like today", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current_summary().await.meta.name.as_deref(),
+            Some("what's the weather like today")
+        );
+
+        // A later user turn must not overwrite the established name.
+        store
+            .append(HistoryTurn::new(Role::User, "and tomorrow", 2))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current_summary().await.meta.name.as_deref(),
+            Some("what's the weather like today")
+        );
+        // Durable in the index.
+        assert_eq!(
+            SessionStore::list(dir.path()).await[0].meta.name.as_deref(),
+            Some("what's the weather like today")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_first_turn_does_not_name_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _tc) = clock(1_000);
+        let store = SessionStore::create_new(dir.path(), c).unwrap();
+        // Only a *user* turn names the session.
+        store
+            .append(HistoryTurn::new(Role::Assistant, "Hello! How can I help?", 1))
+            .await
+            .unwrap();
+        assert_eq!(store.current_summary().await.meta.name, None);
+    }
+
+    #[test]
+    fn derive_name_caps_words_and_length() {
+        assert_eq!(derive_name("   "), None);
+        assert_eq!(
+            derive_name("one two three four five six seven eight").as_deref(),
+            Some("one two three four five six")
+        );
+        let long = "x".repeat(80);
+        let got = derive_name(&long).unwrap();
+        assert!(got.chars().count() <= 51, "capped + ellipsis: {got}");
+        assert!(got.ends_with('…'));
     }
 
     #[tokio::test]
