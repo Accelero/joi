@@ -170,6 +170,14 @@ fn run_capture(
 
     let mut pipeline = CapturePipeline::new(device_rate, render.rate, frame_samples, apm);
     loop {
+        // Check for stop on *every* iteration, not only on the recv timeout below. While the mic is
+        // unmuted cpal delivers a buffer every frame, so `recv_timeout` keeps returning `Ok` and the
+        // timeout branch almost never fires — if that were the only stop check, dropping the
+        // `CaptureHandle` wouldn't end the loop and the thread (and its cpal stream) would leak on
+        // every stop, with leaked threads stacking mic frames into the session on each reconnect.
+        if matches!(stop_rx.try_recv(), Err(TryRecvError::Disconnected)) {
+            break;
+        }
         // Buffer the far-end reference (what we're playing); `process` consumes it 1:1 with capture
         // frames so the AEC sees both at the same cadence. Drains all that's queued; ends quietly
         // once the render sink is dropped on stop.
@@ -181,12 +189,8 @@ fn run_capture(
                 pipeline.diag.on_input(&mono, device_rate);
                 pipeline.process(&mono, frames);
             }
-            // No samples for a while: stop if the handle was dropped, else keep waiting.
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if matches!(stop_rx.try_recv(), Err(TryRecvError::Disconnected)) {
-                    break;
-                }
-            }
+            // Idle gap (e.g. muted): loop back and re-check the stop signal at the top.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
