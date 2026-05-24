@@ -6,7 +6,6 @@ use joi_core::session::event::{AppState, ConnectionStatus};
 use ratatui::style::Color;
 
 pub const BASE: Color = Color::Rgb(0x07, 0x09, 0x0c);
-pub const PANEL: Color = Color::Rgb(0x09, 0x0c, 0x11);
 pub const LINE: Color = Color::Rgb(0x44, 0x50, 0x5f);
 pub const LINE_SOFT: Color = Color::Rgb(0x2c, 0x35, 0x42);
 

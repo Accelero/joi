@@ -94,7 +94,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::ACCENT))
-        .style(Style::new().bg(theme::PANEL))
+        .style(Style::new().bg(theme::BASE))
         .title_top(Line::from(" keys ").style(Style::new().fg(theme::FG_FAINT)));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(body).block(block), rect);
@@ -177,8 +177,8 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
         return;
     }
     let avail = (area.width - CHEVRON_COLS) as usize;
-    let base = Style::new().bg(theme::PANEL);
-    let chevron = Span::styled("❯ ", Style::new().fg(theme::ACCENT).bg(theme::PANEL));
+    let base = Style::new().bg(theme::BASE);
+    let chevron = Span::styled("❯ ", Style::new().fg(theme::ACCENT).bg(theme::BASE));
 
     // Scroll horizontally just enough to keep the caret in view at the right edge. An empty prompt
     // is just the chevron + the block cursor — no placeholder text.
@@ -262,7 +262,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
 
     let window: Vec<Line> = lines.into_iter().skip(top).take(height).collect();
     frame.render_widget(
-        Paragraph::new(window).style(Style::new().bg(theme::PANEL)),
+        Paragraph::new(window).style(Style::new().bg(theme::BASE)),
         area,
     );
 }
