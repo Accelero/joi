@@ -163,7 +163,11 @@ pub struct GeminiCfg {
     /// API key. Empty = unset; prefer providing it via the environment.
     #[serde(default)]
     pub api_key: ApiKey,
-    /// Optional named voice.
+    /// Named voice, or `None` (the default) to use the model's own default voice. **Not pinned in
+    /// the shipped/bootstrapped config** — it is written only when the user explicitly chooses one
+    /// through the settings interface, and omitted from the file otherwise. The available names are
+    /// provider/model-dependent (see `joi_providers::voice_catalog`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
     /// System instruction / persona seeded into every session.
     pub system_instruction: String,
@@ -340,7 +344,9 @@ impl Default for Config {
                     // model is rejected by `validate`, so the app fails fast with guidance.
                     model: String::new(),
                     api_key: ApiKey::default(),
-                    voice: Some("Aoede".to_string()),
+                    // Unset by default → the model's own default voice. The user pins one via the
+                    // settings interface, which is the only thing that writes it to the config.
+                    voice: None,
                     system_instruction: DEFAULT_SYSTEM_PROMPT.to_string(),
                     input_transcription: true,
                     output_transcription: true,
@@ -772,7 +778,8 @@ mod tests {
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/joi.example.json");
             let cfg = Config::load_from(&path, &test_paths()).unwrap();
             assert_eq!(cfg.live_api.provider, ProviderName::Gemini);
-            assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
+            // The example pins no voice — it defaults to the model's own (set one via settings).
+            assert_eq!(cfg.live_api.gemini.voice, None);
             // The template leaves the key empty — it comes from the environment.
             assert!(!cfg.live_api.gemini.api_key.is_set());
             Ok(())
@@ -889,7 +896,7 @@ mod tests {
             assert_eq!(cfg.live_api.gemini.model, "test-model");
             assert_eq!(cfg.media.audio.frame_ms, 40);
             // unspecified nested fields keep their defaults (deep merge)
-            assert_eq!(cfg.live_api.gemini.voice.as_deref(), Some("Aoede"));
+            assert_eq!(cfg.live_api.gemini.voice, None); // unset → model default
             assert_eq!(cfg.media.audio.input_device, "default");
             Ok(())
         });

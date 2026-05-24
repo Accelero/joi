@@ -39,7 +39,7 @@ first time the new build starts (the old file is left as a backup).
 |---|---|---|---|
 | `model` | string | *(none — required)* | Bare Live model name, no `models/` prefix (e.g. `gemini-3.1-flash-live-preview`). Joi ships no default; set it here or via `GEMINI_MODEL`. |
 | `api_key` | string | `""` | Prefer `GEMINI_API_KEY` in the environment. Never persisted by Joi (see above). |
-| `voice` | string \| null | `Aoede` | Prebuilt voice. Widely available: Aoede, Charon, Fenrir, Kore, Puck, Leda, Orus, Zephyr. Unknown names fall back to the model default. |
+| `voice` | string \| null | `null` (model default) | Prebuilt voice. **Not pinned in the shipped config** — omitted unless you set one through the settings interface, which is the only thing that writes it. Available names are provider/model-dependent (8 on legacy half-cascade models, 30 on native-audio). Unknown names fall back to the model default. |
 | `system_instruction` | string | *(persona)* | Overridden by `~/.joi/prompt.md` when that file exists (the persona is bootstrapped into `prompt.md` on first run — edit the file, not this field). |
 | `input_transcription` | bool | `true` | Render the user transcript (FR-3). |
 | `output_transcription` | bool | `true` | Render the agent transcript (FR-3). |
