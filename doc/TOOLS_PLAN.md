@@ -274,7 +274,7 @@ self.active_epoch = self.active_epoch.wrapping_add(1); // invalidate queued outc
 4. request = tool.permission(&args, &self.tool_ctx()) — the resolved, auditable action
 5. match evaluate_permission(&self.permission_profile, &request):
      Allow                  ⇒ spawn_tool(epoch, id, name, tool, args)            // run immediately
-     Deny                   ⇒ tool_tx.send(epoch error "denied by policy: {request.summary}"); return
+     Deny                   ⇒ tool_tx.send(epoch error {denied_by:"system", error:"tool use denied by system: {request.summary}"}); return
      Ask                    ⇒ pending.insert((epoch, id.clone()), PendingTool{ epoch, .. });
                               emit UiEvent::ToolPermission{epoch,id,name,request.summary,request.detail};
                               waits for Command::ResolveToolPermission{epoch,id, approve}
@@ -319,7 +319,7 @@ match pending.remove(&(epoch, id.clone())) { // pending map is the single source
   Some(p) if p.epoch != active_epoch
                         ⇒ ignore       // stale UI action from a previous provider session
   Some(p) if approve    ⇒ spawn_tool(epoch, id, p.name, p.tool, p.args)
-  Some(p) /* deny */    ⇒ tool_tx.send(ToolOutcome{ epoch, id, p.name, ToolResult::error("denied by user") })
+  Some(p) /* deny */    ⇒ tool_tx.send(ToolOutcome{ epoch, id, p.name, error {denied_by:"user", error:"tool use denied by user: {p.summary}"} })
 }
 ```
 A late approval and the timeout deny race only on `pending.remove`; whoever wins removes the entry, the

@@ -123,7 +123,8 @@ These shape every capability below.
 - **SEC-3** `[NOW]` **Disabled by default.** No model-driven command or tool path is reachable unless
   `tools.enabled` is explicitly true.
 - **SEC-4** `[NOW]` **Non-voice consent.** Mutating or destructive tool actions require a deliberate,
-  non-spoken approval of the *resolved* action.
+  non-spoken approval of the *resolved* action. Denied tool calls return a structured result to the
+  model that identifies whether `denied_by` was `user` or `system`.
 - **SEC-5** `[NOW]` **Scoped execution.** Built-in tools run against configured readable/writable
   roots, with time/output caps. `bash` is non-interactive and obvious network commands are denied by
   default. Stronger kernel isolation is a future hardening layer behind the same tool context.

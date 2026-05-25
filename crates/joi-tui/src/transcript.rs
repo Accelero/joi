@@ -6,6 +6,7 @@
 //! `final` commits (closes) the open line. An error closes any open line and appends its own line.
 
 use joi_core::session::event::Speaker;
+use joi_core::tools::ToolCallId;
 
 /// Hard cap on retained entries (oldest dropped) — the TUI's scrollback bound.
 const MAX_ENTRIES: usize = 2000;
@@ -17,6 +18,8 @@ pub enum LineKind {
     User,
     /// The agent.
     Agent,
+    /// A tool invocation/result.
+    Tool,
     /// A surfaced error.
     Error,
 }
@@ -26,6 +29,7 @@ pub enum LineKind {
 pub struct Entry {
     pub kind: LineKind,
     pub text: String,
+    pub tool_id: Option<ToolCallId>,
 }
 
 /// The streaming transcript. `open` is `Some(kind)` while the last entry is still accumulating
@@ -49,7 +53,11 @@ impl Transcript {
             Some(last) if self.open == Some(kind) => last.text.push_str(&text),
             // Speaker changed (or first line / line was closed): open a new labeled line.
             _ => {
-                self.start(Entry { kind, text });
+                self.start(Entry {
+                    kind,
+                    text,
+                    tool_id: None,
+                });
                 self.open = Some(kind);
             }
         }
@@ -64,6 +72,39 @@ impl Transcript {
         self.start(Entry {
             kind: LineKind::Error,
             text: message,
+            tool_id: None,
+        });
+    }
+
+    /// Add a grey tool line for an in-flight call. The result later replaces this same entry.
+    pub fn push_tool_call(&mut self, id: ToolCallId, name: &str, summary: &str) {
+        self.open = None;
+        self.start(Entry {
+            kind: LineKind::Tool,
+            text: format!("using {name}: {summary}"),
+            tool_id: Some(id),
+        });
+    }
+
+    /// Replace the in-flight tool line with the final outcome, or append if the call line was
+    /// already outside the scrollback.
+    pub fn push_tool_result(&mut self, id: ToolCallId, name: &str, ok: bool, summary: &str) {
+        self.open = None;
+        let text = format!("{name}: {} - {summary}", tool_status(ok, summary));
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.tool_id.as_ref() == Some(&id))
+        {
+            entry.kind = LineKind::Tool;
+            entry.text = text;
+            return;
+        }
+        self.start(Entry {
+            kind: LineKind::Tool,
+            text,
+            tool_id: Some(id),
         });
     }
 
@@ -77,6 +118,16 @@ impl Transcript {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+}
+
+fn tool_status(ok: bool, summary: &str) -> &'static str {
+    if ok {
+        "success"
+    } else if summary.to_ascii_lowercase().contains("denied") {
+        "denied"
+    } else {
+        "failed"
     }
 }
 
@@ -135,5 +186,52 @@ mod tests {
         }
         assert_eq!(t.entries().len(), MAX_ENTRIES);
         assert_eq!(t.entries()[0].text, "e50"); // first 50 dropped
+    }
+
+    #[test]
+    fn tool_result_replaces_tool_call_line() {
+        let mut t = Transcript::default();
+        let id = ToolCallId("tool-1".to_string());
+        t.push_tool_call(id.clone(), "bash", "run `git status`");
+        assert_eq!(
+            texts(&t),
+            vec![(LineKind::Tool, "using bash: run `git status`")]
+        );
+
+        t.push_tool_result(id, "bash", true, "finished");
+        assert_eq!(
+            texts(&t),
+            vec![(LineKind::Tool, "bash: success - finished")]
+        );
+    }
+
+    #[test]
+    fn tool_result_marks_denied_and_failed() {
+        let mut t = Transcript::default();
+        t.push_tool_result(
+            ToolCallId("denied".to_string()),
+            "edit",
+            false,
+            "tool use denied by user: edit file",
+        );
+        t.push_tool_result(
+            ToolCallId("failed".to_string()),
+            "read",
+            false,
+            "path is outside readable roots",
+        );
+        assert_eq!(
+            texts(&t),
+            vec![
+                (
+                    LineKind::Tool,
+                    "edit: denied - tool use denied by user: edit file"
+                ),
+                (
+                    LineKind::Tool,
+                    "read: failed - path is outside readable roots"
+                ),
+            ]
+        );
     }
 }

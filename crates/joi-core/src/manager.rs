@@ -769,12 +769,11 @@ impl SessionManager {
                 );
             }
             PermissionAction::Deny => {
-                let summary = format!("denied {}", permission.summary);
                 self.send_tool_result_now(
                     self.active_epoch,
                     id,
                     name,
-                    ToolResult::error(summary),
+                    denied_tool_result("system", &permission.summary),
                     session,
                 )
                 .await;
@@ -802,7 +801,7 @@ impl SessionManager {
                 epoch,
                 id,
                 pending.name,
-                ToolResult::error(format!("denied {}", pending.permission.summary)),
+                denied_tool_result("user", &pending.permission.summary),
                 session,
             )
             .await;
@@ -1012,6 +1011,16 @@ fn tool_result_summary(result: &ToolResult) -> String {
     "tool completed".to_string()
 }
 
+fn denied_tool_result(origin: &str, summary: &str) -> ToolResult {
+    ToolResult {
+        ok: false,
+        content: serde_json::json!({
+            "error": format!("tool use denied by {origin}: {summary}"),
+            "denied_by": origin,
+        }),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1035,6 +1044,7 @@ mod tests {
     /// `closed` counts `close()` calls so tests can prove Stop tears the session down.
     /// Externally-controlled `(sent, received)` wire-byte totals a test can drive directly.
     type WireCounters = (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64);
+    type RecordedToolResults = Arc<std::sync::Mutex<Vec<(ToolCallId, ToolResult)>>>;
 
     struct ScriptedSession {
         tx: Option<EventSender>,
@@ -1054,6 +1064,8 @@ mod tests {
         seeded: Option<Arc<std::sync::atomic::AtomicUsize>>,
         /// When set, `send_text` emits this tool call instead of a transcript turn.
         tool_call: Option<(String, Value)>,
+        /// When set, `send_tool_result` records the provider-facing result.
+        tool_results: Option<RecordedToolResults>,
     }
 
     impl ScriptedSession {
@@ -1072,6 +1084,7 @@ mod tests {
                 user_stream: false,
                 seeded: None,
                 tool_call: None,
+                tool_results: None,
             }
         }
 
@@ -1113,6 +1126,18 @@ mod tests {
         fn with_tool_call(name: &str, args: Value) -> Self {
             Self {
                 tool_call: Some((name.to_string(), args)),
+                ..Self::new()
+            }
+        }
+
+        fn with_tool_call_and_result_recorder(
+            name: &str,
+            args: Value,
+            tool_results: RecordedToolResults,
+        ) -> Self {
+            Self {
+                tool_call: Some((name.to_string(), args)),
+                tool_results: Some(tool_results),
                 ..Self::new()
             }
         }
@@ -1220,9 +1245,12 @@ mod tests {
 
         async fn send_tool_result(
             &mut self,
-            _id: ToolCallId,
-            _result: ToolResult,
+            id: ToolCallId,
+            result: ToolResult,
         ) -> Result<(), SessionError> {
+            if let Some(tool_results) = &self.tool_results {
+                tool_results.lock().unwrap().push((id, result));
+            }
             Ok(())
         }
 
@@ -1553,6 +1581,112 @@ mod tests {
             }
         }
         assert!(saw_result, "approved tool did not run");
+    }
+
+    #[tokio::test]
+    async fn user_denied_tool_result_identifies_user_origin() {
+        let clock = TestClock::new(1_000);
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_for_session = recorded.clone();
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_tool_call_and_result_recorder(
+                    "echo_tool",
+                    serde_json::json!({"text": "approval"}),
+                    recorded_for_session.clone(),
+                )) as Box<dyn RealtimeSession>
+            }),
+            None,
+            runtime_with_echo(clock, PermissionAction::Ask),
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.send_text("call").await.unwrap();
+
+        let (epoch, id) = loop {
+            if let UiEvent::ToolPermission { epoch, id, .. } = next_ui(&mut ui).await {
+                break (epoch, id);
+            }
+        };
+        handle
+            .resolve_tool_permission(epoch, id, false)
+            .await
+            .unwrap();
+
+        let summary = loop {
+            if let UiEvent::ToolResult {
+                name,
+                ok: false,
+                summary,
+                ..
+            } = next_ui(&mut ui).await
+            {
+                if name == "echo_tool" {
+                    break summary;
+                }
+            }
+        };
+        assert_eq!(summary, "tool use denied by user: echo test");
+
+        let recorded = recorded.lock().unwrap();
+        let (_, result) = recorded.first().expect("tool result sent to provider");
+        assert!(!result.ok);
+        assert_eq!(result.content["denied_by"], "user");
+        assert_eq!(
+            result.content["error"],
+            "tool use denied by user: echo test"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_denied_tool_result_identifies_system_origin() {
+        let clock = TestClock::new(1_000);
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_for_session = recorded.clone();
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(move || {
+                Box::new(ScriptedSession::with_tool_call_and_result_recorder(
+                    "echo_tool",
+                    serde_json::json!({"text": "blocked"}),
+                    recorded_for_session.clone(),
+                )) as Box<dyn RealtimeSession>
+            }),
+            None,
+            runtime_with_echo(clock, PermissionAction::Deny),
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.send_text("call").await.unwrap();
+
+        let summary = loop {
+            if let UiEvent::ToolResult {
+                name,
+                ok: false,
+                summary,
+                ..
+            } = next_ui(&mut ui).await
+            {
+                if name == "echo_tool" {
+                    break summary;
+                }
+            }
+        };
+        assert_eq!(summary, "tool use denied by system: echo test");
+
+        let recorded = recorded.lock().unwrap();
+        let (_, result) = recorded.first().expect("tool result sent to provider");
+        assert!(!result.ok);
+        assert_eq!(result.content["denied_by"], "system");
+        assert_eq!(
+            result.content["error"],
+            "tool use denied by system: echo test"
+        );
     }
 
     #[tokio::test]

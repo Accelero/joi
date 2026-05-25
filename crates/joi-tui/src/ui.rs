@@ -571,6 +571,7 @@ fn kind_color(kind: LineKind, accent: Color) -> Color {
     match kind {
         LineKind::User => accent,
         LineKind::Agent => theme::FG,
+        LineKind::Tool => theme::FG_FAINT,
         LineKind::Error => theme::DANGER,
     }
 }
@@ -835,6 +836,13 @@ mod tests {
         assert!(text.contains("hello"));
         assert!(!text.contains("JOI:"), "labels should be gone: {text}");
         assert!(!text.contains("User:"), "labels should be gone: {text}");
+    }
+
+    #[test]
+    fn tool_lines_use_grey_not_error_red() {
+        let color = kind_color(LineKind::Tool, theme::DEFAULT_ACCENT);
+        assert_eq!(color, theme::FG_FAINT);
+        assert_ne!(color, theme::DANGER);
     }
 
     #[test]

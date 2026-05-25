@@ -530,15 +530,19 @@ impl AppModel {
             UiEvent::Error { kind, message } => {
                 self.transcript.push_error(format!("{kind}: {message}"));
             }
-            UiEvent::ToolCall { summary, .. } => {
-                self.transcript.push_error(format!("tool: {summary}"));
+            UiEvent::ToolCall { id, name, summary } => {
+                self.transcript.push_tool_call(id, &name, &summary);
             }
-            UiEvent::ToolResult { id, summary, .. } => {
+            UiEvent::ToolResult {
+                id,
+                name,
+                ok,
+                summary,
+            } => {
                 if self.tool_permission.as_ref().is_some_and(|p| p.id == id) {
                     self.tool_permission = None;
                 }
-                self.transcript
-                    .push_error(format!("tool result: {summary}"));
+                self.transcript.push_tool_result(id, &name, ok, &summary);
             }
             UiEvent::ToolPermission {
                 epoch,
@@ -554,8 +558,6 @@ impl AppModel {
                     summary: summary.clone(),
                     detail,
                 });
-                self.transcript
-                    .push_error(format!("tool permission: {summary}"));
             }
             UiEvent::History(_) => {}
             // A settings change was broadcast (e.g. the voice we just applied). Refresh the footer's
@@ -944,6 +946,50 @@ mod tests {
                 id,
                 approve: false,
             })
+        );
+    }
+
+    #[test]
+    fn tool_result_replaces_tool_call_transcript_line() {
+        use crate::transcript::LineKind;
+
+        let mut m = AppModel::new(true);
+        let id = ToolCallId("t1".to_string());
+        m.on_ui_event(UiEvent::ToolCall {
+            id: id.clone(),
+            name: "bash".to_string(),
+            summary: "run `git status`".to_string(),
+        });
+        assert_eq!(m.transcript.entries().len(), 1);
+        assert_eq!(m.transcript.entries()[0].kind, LineKind::Tool);
+        assert_eq!(
+            m.transcript.entries()[0].text,
+            "using bash: run `git status`"
+        );
+
+        m.on_ui_event(UiEvent::ToolPermission {
+            epoch: 7,
+            id: id.clone(),
+            name: "bash".to_string(),
+            summary: "run `git status`".to_string(),
+            detail: "git status".to_string(),
+        });
+        assert_eq!(
+            m.transcript.entries().len(),
+            1,
+            "permission prompt should not add a second transcript line"
+        );
+
+        m.on_ui_event(UiEvent::ToolResult {
+            id,
+            name: "bash".to_string(),
+            ok: false,
+            summary: "tool use denied by user: run `git status`".to_string(),
+        });
+        assert_eq!(m.transcript.entries().len(), 1);
+        assert_eq!(
+            m.transcript.entries()[0].text,
+            "bash: denied - tool use denied by user: run `git status`"
         );
     }
 
