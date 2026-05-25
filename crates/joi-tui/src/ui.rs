@@ -67,7 +67,11 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
 
     // The slash-command suggester floats just above the prompt while typing a `/` command — but not
     // behind another overlay.
-    if model.picker.is_none() && model.voice_picker.is_none() && !model.show_help {
+    if model.picker.is_none()
+        && model.voice_picker.is_none()
+        && model.tool_permission.is_none()
+        && !model.show_help
+    {
         render_suggester(frame, rows[6], model);
     }
     if model.show_help {
@@ -79,6 +83,9 @@ pub fn render(frame: &mut Frame, model: &mut AppModel) {
     }
     if model.voice_picker.is_some() {
         render_voice_picker(frame, area, model);
+    }
+    if model.tool_permission.is_some() {
+        render_tool_permission(frame, area, model);
     }
 }
 
@@ -184,6 +191,50 @@ fn render_help(frame: &mut Frame, area: Rect, theme: theme::Theme) {
         .title_top(Line::from(" keys ").style(Style::new().fg(theme::FG_FAINT)));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(body).block(block), rect);
+}
+
+/// Tool approval overlay. Enter approves; Esc denies.
+fn render_tool_permission(frame: &mut Frame, area: Rect, model: &AppModel) {
+    let Some(prompt) = model.tool_permission.as_ref() else {
+        return;
+    };
+    let theme = model.theme;
+    let body = vec![
+        Line::from(vec![
+            Span::styled(" tool ", Style::new().fg(theme::FG_FAINT)),
+            Span::styled(prompt.name.clone(), Style::new().fg(theme.accent)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            prompt.summary.clone(),
+            Style::new().fg(theme::FG_DIM),
+        )),
+        Line::from(Span::styled(
+            prompt.detail.clone(),
+            Style::new().fg(theme::FG_FAINT),
+        )),
+    ];
+    let width = 72.min(area.width);
+    let height = 8.min(area.height);
+    let rect = centered_rect(area, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.background))
+        .title_top(Line::from(" approve tool ").style(Style::new().fg(theme::FG_FAINT)))
+        .title_bottom(
+            Line::from(" enter approve · esc deny ")
+                .centered()
+                .style(Style::new().fg(theme::FG_FAINT)),
+        );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            .style(Style::new().bg(theme.background)),
+        rect,
+    );
 }
 
 /// The `/resume` session picker overlay: a centered list of sessions, newest-activity first. The
@@ -437,8 +488,8 @@ fn render_prompt(frame: &mut Frame, area: Rect, model: &AppModel) {
     ]);
     frame.render_widget(Paragraph::new(line).style(base), area);
 
-    // While an overlay picker is open the prompt is inert — don't steal the cursor into it.
-    if model.picker.is_none() && model.voice_picker.is_none() {
+    // While an overlay is open the prompt is inert — don't steal the cursor into it.
+    if model.picker.is_none() && model.voice_picker.is_none() && model.tool_permission.is_none() {
         let cursor_x = area.x + CHEVRON_COLS + (caret_col - h_scroll) as u16;
         frame.set_cursor_position((cursor_x.min(area.x + area.width - 1), area.y));
     }
@@ -879,6 +930,22 @@ mod tests {
             "voices missing: {text}"
         );
         assert!(text.contains("current"), "active voice not marked: {text}");
+    }
+
+    #[test]
+    fn tool_permission_overlay_shows_action_and_keys() {
+        let mut model = AppModel::new(true);
+        model.on_ui_event(joi_core::session::event::UiEvent::ToolPermission {
+            epoch: 1,
+            id: joi_core::tools::ToolCallId("tool-1".to_string()),
+            name: "bash".to_string(),
+            summary: "run bash command".to_string(),
+            detail: "git status".to_string(),
+        });
+        let text = render_to_string(model);
+        assert!(text.contains("approve tool"), "title missing: {text}");
+        assert!(text.contains("git status"), "detail missing: {text}");
+        assert!(text.contains("enter approve"), "hint missing: {text}");
     }
 
     #[test]

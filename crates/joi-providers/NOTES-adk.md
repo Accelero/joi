@@ -1,7 +1,7 @@
 # NOTES-adk.md — M2 precondition spike (adk-rust realtime API)
 
 > **Status: spike complete (go).** This records the real `adk-realtime` API as read from
-> source on 2026-05-21, per PLAN §M2 (the go/no-go gate). Any adk-rust churn is adapted in
+> source on 2026-05-21, per the adapter spike (the go/no-go gate). Any adk-rust churn is adapted in
 > `gemini.rs` **only** so it never leaks past `joi_core::RealtimeSession`.
 
 ## Crate & feature
@@ -11,7 +11,7 @@
   backend). We enable **only** `gemini` — not `openai` (async-openai), `livekit`, or `vertex` —
   to keep the dependency tree minimal.
 - Realtime path is `adk-realtime/src/gemini/{model,session}.rs`. The `adk-rust` `examples/gemini_audio`
-  the PLAN pointed at is **NOT** realtime (it's agentic TTS/STT); the realtime example is
+  the original spike pointed at is **NOT** realtime (it's agentic TTS/STT); the realtime example is
   `adk-realtime/examples/debug_gemini.rs`.
 
 ```toml
@@ -84,7 +84,7 @@ receive task share it concurrently with **no borrow conflict**. This is the key 
 | `ResponseDone { .. }`                     | `TurnEvent` complete                              |
 | `Error { error, .. }`                     | `SessionError::Provider` / `::Auth`               |
 
-## Loop ownership decision (PLAN_REVIEW B3 / M-1) — **GO, no fallback**
+## Loop ownership decision (adapter loop ownership review) — **GO, no fallback**
 
 adk-realtime offers two layers:
 1. **High-level `RealtimeRunner`** + `EventHandler` callbacks (`on_text`, …) — owns its own loop.

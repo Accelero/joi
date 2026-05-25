@@ -1,4 +1,4 @@
-//! Pure media value types, framing helpers, and the screen-capture contract (PLAN §7, §8).
+//! Pure media value types, framing helpers, and the screen-capture contract.
 //!
 //! No device I/O here — `joi-media` owns the microphone, speaker, and screen. This module is the
 //! shared, testable vocabulary: audio formats, the framed [`VideoFrame`], the [`ScreenSource`]
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CaptureError;
 
-/// A linear-PCM audio format. Joi only uses signed 16-bit mono (PLAN §7.1).
+/// A linear-PCM audio format. Joi only uses signed 16-bit mono.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AudioFormat {
     /// Samples per second (Hz).
@@ -33,14 +33,14 @@ impl AudioFormat {
 
     /// Number of samples in a `frame_ms`-millisecond frame at this rate.
     ///
-    /// e.g. 16 kHz × 20 ms = 320 samples (PLAN §7.1).
+    /// e.g. 16 kHz × 20 ms = 320 samples.
     #[must_use]
     pub const fn samples_per_frame(&self, frame_ms: u32) -> usize {
         (self.sample_rate as usize * frame_ms as usize) / 1000
     }
 }
 
-/// How a [`VideoFrame`]'s bytes are encoded for the model (PLAN §7.2).
+/// How a [`VideoFrame`]'s bytes are encoded for the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrameEncoding {
@@ -68,7 +68,7 @@ pub struct VideoFrame {
 /// Stream of captured frames from a running [`ScreenSource`].
 pub type FrameStream = tokio::sync::mpsc::Receiver<VideoFrame>;
 
-/// What to capture (PLAN §7.2). `Window` is a `[LATER]` variant kept off the MVP path (FR-11).
+/// What to capture. `Window` is a `[LATER]` variant kept off the MVP path (FR-11).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureSource {
@@ -188,7 +188,7 @@ pub fn pcm16_from_f32(input: &[f32]) -> Vec<i16> {
 
 /// Peak level of a PCM16 block in dBFS (decibels relative to full scale). `-inf`-style silence is
 /// reported as a large negative number (`-120.0`). Used by `joi-media`'s per-second debug meters to
-/// confirm the APM/AEC is healthy (PLAN §7, M4).
+/// confirm the APM/AEC is healthy.
 #[must_use]
 pub fn peak_dbfs(pcm: &[i16]) -> f32 {
     let peak = pcm.iter().map(|&s| (i32::from(s)).unsigned_abs()).max();
@@ -222,7 +222,7 @@ pub fn resample_linear(input: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
 }
 
 /// Accumulates PCM16 samples and emits fixed-size frames, buffering the remainder across pushes —
-/// native audio callbacks rarely align to `frame_size` boundaries (PLAN §7.1).
+/// native audio callbacks rarely align to `frame_size` boundaries.
 #[derive(Debug)]
 pub struct FrameAccumulator {
     frame_size: usize,
@@ -256,7 +256,7 @@ impl FrameAccumulator {
     }
 }
 
-/// Playback jitter buffer (PLAN §7.2): enqueue provider PCM, pull fixed blocks (silence on
+/// Playback jitter buffer: enqueue provider PCM, pull fixed blocks (silence on
 /// underrun), and [`flush`](Self::flush) instantly for barge-in (FR-2/FR-7). Pure and free of I/O —
 /// the native output callback pulls; session events enqueue.
 #[derive(Debug, Default)]

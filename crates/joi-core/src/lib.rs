@@ -2,7 +2,7 @@
 //!
 //! This crate defines the **ports** (traits) the rest of the system depends on and the pure
 //! logic that sits behind them. It has **zero** device I/O and **zero** provider-SDK dependencies,
-//! so the whole conversational loop is unit-testable without a network or a GUI (PLAN §1).
+//! so the whole conversational loop is unit-testable without a network or a GUI.
 //!
 //! The ports are:
 //! - [`session::RealtimeSession`] — a provider-agnostic realtime voice session (SPEC §2).
@@ -12,11 +12,11 @@
 //! - [`connectivity::ConnectivityProbe`] — token-free provider reachability.
 //!
 //! The provider API key is part of [`config::Config`] (`live_api.gemini.api_key`, settable in the
-//! YAML file or via the environment), held as a redacting [`config::ApiKey`].
+//! JSON config file or via the environment), held as a redacting [`config::ApiKey`].
 //!
 //! The [`manager::SessionManager`] is an **actor** that owns a [`session::RealtimeSession`], a
-//! [`history::HistoryStore`], and the [`config::Config`], and serves commands over a channel
-//! (PLAN §8). Concrete adapters for these ports live in outer crates (`joi-providers`,
+//! [`history::HistoryStore`], and the [`config::Config`], and serves commands over a channel.
+//! Concrete adapters for these ports live in outer crates (`joi-providers`,
 //! `joi-media`); only the composition root (`joi-app`) wires them together.
 
 pub mod clock;

@@ -1,4 +1,4 @@
-//! [`GeminiAdapter`] — Gemini Live native audio over the vendored `adk-realtime` (PLAN §7.4, M2).
+//! [`GeminiAdapter`] — Gemini Live native audio over the vendored `adk-realtime`.
 //!
 //! The realtime SDK is an implementation detail confined to this module (see `NOTES-adk.md` for the
 //! spike that pinned its API). We use `adk-realtime`'s **low-level** `RealtimeSession` (not the
@@ -17,9 +17,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use adk_realtime::audio::AudioChunk;
+use adk_realtime::config::ToolDefinition;
 use adk_realtime::gemini::{GeminiLiveBackend, GeminiRealtimeModel};
 use adk_realtime::session::RealtimeSession as AdkSession;
-use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent};
+use adk_realtime::{RealtimeConfig, RealtimeError, RealtimeModel, ServerEvent, ToolResponse};
 
 use joi_core::connectivity::{ConnectivityProbe, ProbeOutcome};
 use joi_core::error::SessionError;
@@ -30,6 +31,7 @@ use joi_core::session::event::{
     CloseReason, EventReceiver, EventSender, Reachability, SessionEvent, Speaker, TurnEvent,
 };
 use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
+use joi_core::tools::{ToolCallId, ToolResult, ToolSchema};
 
 /// Buffer for the pump→manager event channel. Matches the manager's internal media channel.
 const EVENT_CHANNEL: usize = 512;
@@ -173,6 +175,9 @@ impl RealtimeSession for GeminiAdapter {
                 "contextWindowCompression": { "slidingWindow": {} }
             }));
         }
+        if !cfg.tools.is_empty() {
+            rc = rc.with_tools(cfg.tools.iter().map(tool_definition).collect());
+        }
 
         let boxed = model.connect(rc).await.map_err(|e| map_connect_err(&e))?;
         // adk hands back a `Box<dyn RealtimeSession>`; share it as an `Arc` so the pump task and the
@@ -240,6 +245,22 @@ impl RealtimeSession for GeminiAdapter {
         // With server VAD the model auto-responds to audio, but typed text needs an explicit trigger.
         session
             .create_response()
+            .await
+            .map_err(|e| SessionError::Send(e.to_string()))
+    }
+
+    async fn send_tool_result(
+        &mut self,
+        id: ToolCallId,
+        result: ToolResult,
+    ) -> Result<(), SessionError> {
+        let session = self.session.as_ref().ok_or(SessionError::NotConnected)?;
+        let output = serde_json::json!({
+            "ok": result.ok,
+            "content": result.content
+        });
+        session
+            .send_tool_response(ToolResponse::new(id.0, output))
             .await
             .map_err(|e| SessionError::Send(e.to_string()))
     }
@@ -394,8 +415,25 @@ impl EventMapper {
                     error.message
                 )))]
             }
-            // SessionCreated, AudioDone, item/buffer bookkeeping, tool calls (LATER), rate limits,
-            // and unknown forward-compat variants carry nothing the MVP UI needs.
+            ServerEvent::FunctionCallDone {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                let args = serde_json::from_str(&arguments).unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "raw": arguments
+                    })
+                });
+                vec![SessionEvent::ToolCall {
+                    id: ToolCallId(call_id),
+                    name,
+                    args,
+                }]
+            }
+            // SessionCreated, AudioDone, item/buffer bookkeeping, rate limits, and unknown
+            // forward-compat variants carry nothing the MVP UI needs.
             _ => vec![],
         }
     }
@@ -433,6 +471,12 @@ fn agent_delta(text: String, final_: bool) -> SessionEvent {
         text,
         final_,
     }
+}
+
+fn tool_definition(schema: &ToolSchema) -> ToolDefinition {
+    ToolDefinition::new(schema.name.clone())
+        .with_description(schema.description.clone())
+        .with_parameters(schema.parameters.clone())
 }
 
 /// One incremental user transcript event (the user's own audio, transcribed by the provider).

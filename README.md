@@ -14,19 +14,21 @@ terminal UI is the only frontend built today.
 
 ```sh
 export GEMINI_API_KEY=...        # your Gemini Live API key
+export GEMINI_MODEL=gemini-3.1-flash-live-preview
 cargo run -p joi-tui             # launch the terminal UI
 ```
 
 On first run Joi writes a config to `~/.joi/config.json` (see
 [`config/joi.example.json`](config/joi.example.json) for every field, and
-[`doc/CONFIG.md`](doc/CONFIG.md) for the annotated reference). Sessions are stored under
-`~/.joi/sessions`, logs under `~/.joi/logs`.
+[`doc/SPEC.md`](doc/SPEC.md#5-configuration) for the annotated reference). Sessions are stored under
+`~/.joi/sessions`. The TUI writes logs to `$JOI_TUI_LOG` when set, otherwise to the platform state
+directory (for example `~/.local/state/joi/joi-tui.log` on Linux).
 
 ### Keys
 
 - **F2** start / stop · **F3** mute · **F4** screen-share · **F1** help
 - **Enter** send a typed message · **PgUp/PgDn** or mouse wheel scroll · **Home/End** oldest/newest
-- **/resume** list & resume a past session · **/new** start a fresh one · **/exit** quit
+- **/resume** list & resume a past session · **/new** start a fresh one · **/voice** pick voice · **/exit** quit
   (also **Ctrl+C** / **Ctrl+Q**)
 
 ## Layout
@@ -35,6 +37,7 @@ On first run Joi writes a config to `~/.joi/config.json` (see
 crates/
   joi-core       domain: config, history/sessions, realtime-session + UiEvent contracts,
                  the SessionManager actor, media contracts + pure DSP, metrics, connectivity
+  joi-tools      built-in agent-harness tools: read/list/glob/grep/write/edit/bash
   joi-providers  RealtimeSession adapters: Gemini (vendored adk-realtime) + Mock
   joi-media      native cpal audio capture/playback + sonora APM (AEC/NS/AGC) + xcap screen
   joi-app        composition root + the Seam-A `JoiApp` API
@@ -43,8 +46,9 @@ crates/
 vendor/          two required patched deps (adk-realtime, sonora-aec3)
 ```
 
-See [`doc/SPEC.md`](doc/SPEC.md) for what Joi must do (`FR-*`), [`doc/ARCH.md`](doc/ARCH.md) for how
-it's layered, and [`doc/PLAN.md`](doc/PLAN.md) for the rewrite plan.
+See [`doc/SPEC.md`](doc/SPEC.md) for what Joi must do (`FR-*`) and [`doc/ARCH.md`](doc/ARCH.md) for
+how it's layered. The built-in tool harness is implemented behind disabled-by-default config; the
+remaining tool roadmap is in [`doc/TOOLS_PLAN.md`](doc/TOOLS_PLAN.md).
 
 ## Development
 

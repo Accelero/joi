@@ -3,7 +3,7 @@
 //! App logic (lifecycle, history, terminal UI) talks **only** to [`RealtimeSession`], never to a
 //! provider SDK. Adapters absorb every provider divergence (audio formats, VAD/interruption
 //! semantics, resumption, tool-call schema). App code must compile and behave identically against
-//! any adapter that honors this trait — that is how provider-agnosticism is *proven* (PLAN §8, M3).
+//! any adapter that honors this trait — that is how provider-agnosticism is *proven*.
 
 pub mod event;
 
@@ -45,7 +45,8 @@ pub struct SessionConfig {
     pub initial_context: Vec<HistoryTurn>,
     /// Provider session-resumption handle for a transient reconnect (FR-16).
     pub resumption_handle: Option<String>,
-    /// `[LATER]` Tool schemas. Always empty in the MVP (FR-24).
+    /// Tool schemas declared to the provider for this session (FR-24). Empty when tools are
+    /// disabled.
     pub tools: Vec<ToolSchema>,
 }
 
@@ -80,7 +81,8 @@ pub struct Capabilities {
     pub session_resumption: bool,
     /// Provider accepts native screen/video input (FR-8).
     pub native_screen_input: bool,
-    /// `[LATER]` Provider supports non-blocking tool calls. Plumbed but ignored in MVP (FR-24).
+    /// Provider supports non-blocking tool calls. Joi currently runs request/response tools inside a
+    /// turn, so this remains false for the built-in pipeline.
     pub async_tool_calls: bool,
 }
 
@@ -112,8 +114,8 @@ pub trait RealtimeSession: Send {
         Ok(())
     }
 
-    /// `[LATER]` Return a tool result to the provider. Unused in the MVP; the default rejects
-    /// (FR-24).
+    /// Return a tool result to the provider. Adapters that support native function calling override
+    /// this; the default rejects.
     async fn send_tool_result(
         &mut self,
         _id: ToolCallId,

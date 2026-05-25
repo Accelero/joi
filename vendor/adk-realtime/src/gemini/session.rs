@@ -747,12 +747,14 @@ impl GeminiRealtimeSession {
         // Check for tool calls
         if let Some(tool_call) = value.get("toolCall") {
             if let Some(calls) = tool_call.get("functionCalls").and_then(|c| c.as_array()) {
-                if let Some(call) = calls.first() {
+                let events = calls
+                    .iter()
+                    .map(|call| {
                     let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let id = call.get("id").and_then(|i| i.as_str()).unwrap_or("");
                     let args = call.get("args").cloned().unwrap_or(json!({}));
 
-                    return Ok(vec![ServerEvent::FunctionCallDone {
+                        ServerEvent::FunctionCallDone {
                         event_id: uuid::Uuid::new_v4().to_string(),
                         response_id: String::new(),
                         item_id: String::new(),
@@ -760,7 +762,11 @@ impl GeminiRealtimeSession {
                         call_id: id.to_string(),
                         name: name.to_string(),
                         arguments: serde_json::to_string(&args).unwrap_or_default(),
-                    }]);
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !events.is_empty() {
+                    return Ok(events);
                 }
             }
         }

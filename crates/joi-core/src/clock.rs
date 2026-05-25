@@ -1,7 +1,7 @@
 //! Injectable time source.
 //!
 //! Core logic that needs "now" takes a [`Clock`] so tests are deterministic and never sleep on
-//! the wall clock (PLAN §1, §8). Production wires [`SystemClock`]; tests wire [`TestClock`].
+//! the wall clock. Production wires [`SystemClock`]; tests wire [`TestClock`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

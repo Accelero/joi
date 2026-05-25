@@ -1,4 +1,4 @@
-//! Native media I/O for Joi (PLAN §7). All audio/screen capture and playback happen in Rust via
+//! Native media I/O for Joi. All audio/screen capture and playback happen in Rust via
 //! [`cpal`] (mic/speaker), `sonora` (the APM chain), and `xcap` (screen) — devices live only here,
 //! never in `joi-core`.
 //!

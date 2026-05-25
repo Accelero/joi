@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/joi-core",
+    "crates/joi-tools",
     "crates/joi-providers",
     "crates/joi-testkit",
     "crates/joi-media",
@@ -24,7 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Maintained fork of the (now archived) serde_yaml; used for both parsing and writing config YAML.
 serde_norway = "0.9"
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "fs", "process"] }
+tokio-util = "0.7"
 tracing = "0.1"
 # `env` only: YAML parsing is done with serde_norway so the deprecated serde_yaml stays out of tree.
 figment = { version = "0.10", features = ["env"] }
@@ -41,7 +43,7 @@ pretty_assertions = "1"
 proptest = "1"
 
 # Lints applied to every workspace crate. `unwrap`/`expect`/`panic` are denied in
-# library code (PLAN §5). `deny(warnings)` is intentionally NOT set here — it is
+# library code. `deny(warnings)` is intentionally NOT set here — it is
 # applied CI-only via RUSTFLAGS="-D warnings" so a future compiler lint bump cannot
 # break the build.
 [workspace.lints.clippy]
@@ -73,7 +75,7 @@ lto = "thin"
 
 # Vendored adk-realtime (crates/joi-providers depends on it) with a one-field fix: send the current
 # `realtimeInput.audio` blob instead of the deprecated `mediaChunks[]`, which current Gemini Live
-# models reject. Patched source in vendor/adk-realtime (PLAN §7.4).
+# models reject. Patched source in vendor/adk-realtime.
 [patch.crates-io]
 adk-realtime = { path = "vendor/adk-realtime" }
 # Patched sonora-aec3: upstream 0.1.0 panics (`slice index starts at N but ends at N-1`) when the

@@ -5,7 +5,7 @@
 //! **Live session's input limit**, *not* the underlying text model's 1M-class window (FR-21).
 //!
 //! Two implementations: [`memory::InMemoryHistory`] (fallback/tests) and the persistent
-//! [`session::SessionStore`] (the resumable-session unit the user manages — PLAN §5).
+//! [`session::SessionStore`] (the resumable-session unit the user manages).
 
 pub mod memory;
 pub mod session;
@@ -19,7 +19,7 @@ use crate::error::HistoryError;
 pub use memory::InMemoryHistory;
 pub use session::{Session, SessionMeta, SessionStore, SessionSummary};
 
-/// Who produced a turn (PLAN §5.1).
+/// Who produced a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {

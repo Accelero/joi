@@ -1,4 +1,4 @@
-//! Native screen capture (PLAN §7.2, FR-8): grab the primary monitor at `fps` via `xcap`, downscale
+//! Native screen capture: grab the primary monitor at `fps` via `xcap`, downscale
 //! to `max_width`, JPEG-encode, and push [`VideoFrame`]s to the session. Capture stays in Rust —
 //! the frame bytes only ever cross into the provider adapter, never a frontend.
 

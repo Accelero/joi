@@ -1,6 +1,6 @@
 //! [`MockSession`] — a scripted, deterministic [`RealtimeSession`] with no network.
 //!
-//! It drives the headless gate (PLAN §2, M5) and backs the conformance suite (PLAN §8, M3). Each
+//! It drives the headless gate and backs the conformance suite. Each
 //! `send_text` emits a fixed, ordered turn (transcript-before-turn-end); each `send_audio` emits
 //! one output chunk, so the full media + abstraction path is exercised without a provider.
 
@@ -9,6 +9,7 @@ use joi_core::error::SessionError;
 use joi_core::media::VideoFrame;
 use joi_core::session::event::{EventReceiver, EventSender, SessionEvent, Speaker, TurnEvent};
 use joi_core::session::{Capabilities, RealtimeSession, SessionConfig};
+use joi_core::tools::{ToolCallId, ToolResult};
 use tokio::sync::mpsc;
 
 /// Samples emitted per scripted audio chunk (10 ms at 24 kHz).
@@ -81,6 +82,16 @@ impl RealtimeSession for MockSession {
 
     async fn send_text(&mut self, text: &str) -> Result<(), SessionError> {
         let tx = self.sender()?;
+        if let Some((name, args)) = parse_tool_prompt(text) {
+            let _ = tx
+                .send(SessionEvent::ToolCall {
+                    id: ToolCallId("mock-tool-call-1".to_string()),
+                    name,
+                    args,
+                })
+                .await;
+            return Ok(());
+        }
         // Deterministic, ordered turn: start -> user echo -> agent partial -> agent final ->
         // audio -> complete. Ordering (transcript before turn-end) is what conformance checks.
         let _ = tx
@@ -118,6 +129,25 @@ impl RealtimeSession for MockSession {
         Ok(())
     }
 
+    async fn send_tool_result(
+        &mut self,
+        _id: ToolCallId,
+        result: ToolResult,
+    ) -> Result<(), SessionError> {
+        let tx = self.sender()?;
+        let _ = tx
+            .send(SessionEvent::Transcript {
+                speaker: Speaker::Agent,
+                text: format!("tool: {}", result.content),
+                final_: true,
+            })
+            .await;
+        let _ = tx
+            .send(SessionEvent::TurnEvent(TurnEvent::TurnComplete))
+            .await;
+        Ok(())
+    }
+
     fn take_events(&mut self) -> EventReceiver {
         self.rx.take().unwrap_or_else(|| {
             // Defensive: a receiver that is already closed rather than panicking on misuse.
@@ -134,6 +164,13 @@ impl RealtimeSession for MockSession {
     fn capabilities(&self) -> Capabilities {
         self.capabilities
     }
+}
+
+fn parse_tool_prompt(text: &str) -> Option<(String, serde_json::Value)> {
+    let rest = text.strip_prefix("/tool ")?;
+    let (name, json) = rest.split_once(' ')?;
+    let args = serde_json::from_str(json).ok()?;
+    Some((name.to_string(), args))
 }
 
 #[cfg(test)]

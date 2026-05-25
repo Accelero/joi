@@ -2,8 +2,8 @@
 
 > **Status:** the clean rewrite is implemented — the six crates in `crates/` (core, providers,
 > media, app, testkit, tui) follow the architecture below; `scripts/check.sh` is green. The
-> normative architecture lives in @doc/ARCH.md and the rewrite plan in @doc/PLAN.md — read them before
-> making structural decisions.
+> normative architecture lives in @doc/ARCH.md, and current requirements/config live in
+> @doc/SPEC.md. Read ARCH.md before making structural decisions.
 
 ## What Joi is
 
@@ -35,9 +35,9 @@ feature "for the TUI." Design it once in the engine; the frontends get it for fr
    drive — lives at the composition root. "No I/O in core" means no **device** I/O (mic, speaker,
    screen), not "never open a file"; the domain owns its own data files.
 
-5. **One event surface, generated boundary types.** State flows **command-in, event-out**. Types
-   that cross a frontend boundary are generated from Rust, never hand-written, so the boundary can't
-   drift.
+5. **One event surface, plain serde boundary types.** State flows **command-in, event-out**.
+   Frontend-facing types are ordinary Rust structs/enums with `serde` derives. There is no `ts-rs`,
+   generated bindings directory, or parity gate in this TUI-first tree.
 
 6. **Prove it headless.** A feature isn't done until it works with no GUI. Keep the seams honest with
    the kind of dependency/parity checks ARCH.md describes.

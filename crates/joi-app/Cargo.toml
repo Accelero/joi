@@ -11,9 +11,11 @@ workspace = true
 
 [dependencies]
 joi-core = { path = "../joi-core" }
+joi-tools = { path = "../joi-tools" }
 joi-providers = { path = "../joi-providers" }
 joi-media = { path = "../joi-media" }
 tokio = { workspace = true }
+tokio-util.workspace = true
 tracing = { workspace = true }
 
 [dev-dependencies]

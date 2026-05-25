@@ -2,7 +2,7 @@
 //!
 //! Each adapter absorbs all provider-specific divergence behind the trait (SPEC §2). The realtime
 //! SDK (vendored `adk-realtime`) is an implementation detail *inside* [`gemini`] — it never leaks
-//! past the trait, so the founding constraint stays ours, not a dependency's (PLAN §5).
+//! past the trait, so the founding constraint stays ours, not a dependency's.
 //!
 //! - [`mock`] — scripted, no network; drives the headless gate and the conformance suite.
 //! - [`gemini`] — Gemini Live via the vendored `adk-realtime` (feature `gemini`).

@@ -3,7 +3,7 @@
 //! Provider adapters bridge their wire messages into one **ordered** [`SessionEvent`] stream
 //! (transcript-before-turn-end), delivered over an owned [`EventReceiver`] taken once after
 //! `connect`. The [`crate::manager::SessionManager`] maps these to [`UiEvent`]s — the single,
-//! serializable event surface a frontend folds (PLAN §6).
+//! serializable event surface a frontend folds.
 
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +74,7 @@ pub enum SessionEvent {
     },
     /// A turn-taking boundary.
     TurnEvent(TurnEvent),
-    /// `[LATER]` A model-emitted tool call. Unused in the MVP (FR-24).
+    /// A model-emitted tool call (FR-24).
     ToolCall {
         /// Provider-assigned id.
         id: ToolCallId,
@@ -149,7 +149,7 @@ pub enum Reachability {
     Offline,
 }
 
-/// UI-facing event — the single event surface a frontend folds (PLAN §6). Audio is **not** here —
+/// UI-facing event — the single event surface a frontend folds. Audio is **not** here —
 /// it streams over the broadcast audio channel (`subscribe_audio`).
 ///
 /// Not `Eq`: the `Metrics` payload carries `f64` rates (`MetricsSnapshot`), which have no total
@@ -200,6 +200,39 @@ pub enum UiEvent {
     /// A throughput sample (up/down kbit/s + tokens/s), emitted roughly once a second while a
     /// session is live so the UI can render a live bandwidth/generation-speed indicator.
     Metrics(MetricsSnapshot),
+    /// A model-emitted tool call reached Joi's tool pipeline.
+    ToolCall {
+        /// Provider-assigned id.
+        id: ToolCallId,
+        /// Tool name.
+        name: String,
+        /// One-line resolved action summary.
+        summary: String,
+    },
+    /// A tool result was sent back to the provider.
+    ToolResult {
+        /// Provider-assigned id.
+        id: ToolCallId,
+        /// Tool name.
+        name: String,
+        /// Whether the tool succeeded.
+        ok: bool,
+        /// One-line result summary.
+        summary: String,
+    },
+    /// A tool call is waiting for frontend approval.
+    ToolPermission {
+        /// Session epoch captured when the prompt was emitted.
+        epoch: u64,
+        /// Provider-assigned id.
+        id: ToolCallId,
+        /// Tool name.
+        name: String,
+        /// One-line action summary.
+        summary: String,
+        /// Full trusted detail for the permission prompt.
+        detail: String,
+    },
     /// A surfaced error.
     Error {
         /// Short machine-ish kind.

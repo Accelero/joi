@@ -1,5 +1,5 @@
 //! The pure view-state model and its reducers. No IO and no ratatui types live here, so the
-//! non-trivial state transitions are unit-testable without a terminal (PLAN §9 M6). The event loop
+//! non-trivial state transitions are unit-testable without a terminal. The event loop
 //! in `main.rs` owns all IO: it folds keystrokes into [`Action`]s and the engine's stream into
 //! [`AppModel::on_ui_event`], runs any resulting [`Command`] against the engine, then renders.
 
@@ -8,6 +8,7 @@ use std::time::Instant;
 use joi_core::history::{HistoryTurn, Role};
 use joi_core::metrics::MetricsSnapshot;
 use joi_core::session::event::{AppState, ConnectionStatus, Reachability, Speaker, UiEvent};
+use joi_core::tools::ToolCallId;
 
 use crate::commands::{self, SlashCommand};
 use crate::input::Input;
@@ -93,6 +94,30 @@ pub enum Command {
     /// Set the agent's voice to this name (persisted via `update_setting`). Applies on the next
     /// session start, not the live one — the manager reads the voice at connect.
     SetVoice(String),
+    /// Resolve a pending tool permission prompt.
+    ResolveToolPermission {
+        /// Session epoch from the engine prompt.
+        epoch: u64,
+        /// Provider-assigned tool-call id.
+        id: ToolCallId,
+        /// Whether to approve this call.
+        approve: bool,
+    },
+}
+
+/// Pending tool permission prompt rendered by the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPermissionPrompt {
+    /// Session epoch from the engine prompt.
+    pub epoch: u64,
+    /// Provider-assigned tool-call id.
+    pub id: ToolCallId,
+    /// Tool name.
+    pub name: String,
+    /// One-line summary.
+    pub summary: String,
+    /// Full resolved action detail.
+    pub detail: String,
 }
 
 /// All the state the UI renders. Reducers mutate it; rendering only reads it (plus clamping the
@@ -132,6 +157,8 @@ pub struct AppModel {
     /// The `/voice` picker overlay, when open. Mutually exclusive with [`picker`](Self::picker) in
     /// practice — both open from a slash command, and a slash command can't run while one is up.
     pub voice_picker: Option<VoicePicker>,
+    /// Pending tool permission prompt, when a tool call is waiting for user approval.
+    pub tool_permission: Option<ToolPermissionPrompt>,
     /// The agent's current voice (`None` = the model default), shown at the bottom-right of the
     /// footer. Seeded from the settings schema at startup and refreshed whenever the engine
     /// re-broadcasts `UiEvent::Settings` (e.g. after a `/voice` change).
@@ -170,6 +197,7 @@ impl AppModel {
             sharing: false,
             picker: None,
             voice_picker: None,
+            tool_permission: None,
             voice: None,
             suggest_selected: 0,
             metrics: None,
@@ -274,6 +302,9 @@ impl AppModel {
         }
         if self.picker.is_some() {
             return self.on_picker_action(action);
+        }
+        if self.tool_permission.is_some() {
+            return self.on_tool_permission_action(action);
         }
         let page = self.transcript_page.max(1);
         match action {
@@ -391,6 +422,24 @@ impl AppModel {
         None
     }
 
+    /// Tool-permission reducer: Enter approves, Esc denies, all other keys are inert.
+    fn on_tool_permission_action(&mut self, action: Action) -> Option<Command> {
+        match action {
+            Action::Submit => self.resolve_tool_permission(true),
+            Action::Escape | Action::Quit => self.resolve_tool_permission(false),
+            _ => None,
+        }
+    }
+
+    fn resolve_tool_permission(&mut self, approve: bool) -> Option<Command> {
+        let prompt = self.tool_permission.take()?;
+        Some(Command::ResolveToolPermission {
+            epoch: prompt.epoch,
+            id: prompt.id,
+            approve,
+        })
+    }
+
     /// Scroll the transcript up by `lines`, leaving autoscroll. `transcript_top` already tracks the
     /// bottom while following (render keeps it synced), so subtracting from it scrolls up correctly.
     fn scroll_up(&mut self, lines: u16) {
@@ -480,6 +529,33 @@ impl AppModel {
             }
             UiEvent::Error { kind, message } => {
                 self.transcript.push_error(format!("{kind}: {message}"));
+            }
+            UiEvent::ToolCall { summary, .. } => {
+                self.transcript.push_error(format!("tool: {summary}"));
+            }
+            UiEvent::ToolResult { id, summary, .. } => {
+                if self.tool_permission.as_ref().is_some_and(|p| p.id == id) {
+                    self.tool_permission = None;
+                }
+                self.transcript
+                    .push_error(format!("tool result: {summary}"));
+            }
+            UiEvent::ToolPermission {
+                epoch,
+                id,
+                name,
+                summary,
+                detail,
+            } => {
+                self.tool_permission = Some(ToolPermissionPrompt {
+                    epoch,
+                    id,
+                    name,
+                    summary: summary.clone(),
+                    detail,
+                });
+                self.transcript
+                    .push_error(format!("tool permission: {summary}"));
             }
             UiEvent::History(_) => {}
             // A settings change was broadcast (e.g. the voice we just applied). Refresh the footer's
@@ -830,6 +906,45 @@ mod tests {
             Some(Command::StartScreenshare)
         );
         assert!(m.sharing);
+    }
+
+    #[test]
+    fn tool_permission_enter_approves_and_escape_denies() {
+        let mut m = AppModel::new(true);
+        let id = ToolCallId("t1".to_string());
+        m.on_ui_event(UiEvent::ToolPermission {
+            epoch: 7,
+            id: id.clone(),
+            name: "bash".to_string(),
+            summary: "run bash command".to_string(),
+            detail: "git status".to_string(),
+        });
+        assert!(m.tool_permission.is_some());
+        assert_eq!(
+            m.on_action(Action::Submit),
+            Some(Command::ResolveToolPermission {
+                epoch: 7,
+                id: id.clone(),
+                approve: true,
+            })
+        );
+        assert!(m.tool_permission.is_none());
+
+        m.on_ui_event(UiEvent::ToolPermission {
+            epoch: 8,
+            id: id.clone(),
+            name: "edit".to_string(),
+            summary: "edit file".to_string(),
+            detail: "a.txt".to_string(),
+        });
+        assert_eq!(
+            m.on_action(Action::Escape),
+            Some(Command::ResolveToolPermission {
+                epoch: 8,
+                id,
+                approve: false,
+            })
+        );
     }
 
     #[test]

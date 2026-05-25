@@ -1,4 +1,4 @@
-//! The curated runtime-settings surface over [`Config`] (mechanism; see `doc/SETTINGS.md`).
+//! The curated runtime-settings surface over [`Config`] (mechanism; see `doc/ARCH.md`).
 //!
 //! Settings *are* config — there is no separate settings store. This module adds only two things on
 //! top of [`Config`]: (a) a typed descriptor of the fields that may be changed at runtime, each

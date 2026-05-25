@@ -1,4 +1,4 @@
-//! The [`SessionManager`] actor — the single owner of the live session (PLAN §8).
+//! The [`SessionManager`] actor — the single owner of the live session.
 //!
 //! A single owning task holds the [`RealtimeSession`], the [`HistoryStore`], and the [`Config`],
 //! and `select!`s over (a) inbound [`Command`]s on an `mpsc` and (b) the provider's
@@ -11,10 +11,14 @@
 //! task, so the actor's `select!` reads owned values from two local receivers and its handlers
 //! borrow `self` freely.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::clock::{Clock, UnixMillis};
 use crate::config::Config;
@@ -27,6 +31,10 @@ use crate::metrics::{
 };
 use crate::session::event::{AppState, CloseReason, ConnectionStatus, SessionEvent, Speaker};
 use crate::session::{RealtimeSession, SessionConfig, UiEvent};
+use crate::tools::{
+    evaluate_permission, validate_args, Permission, PermissionAction, Tool, ToolCallId, ToolResult,
+    ToolRuntime,
+};
 
 /// Bytes per PCM16 sample — used to weigh audio frames into the throughput meter.
 const BYTES_PER_SAMPLE: u64 = 2;
@@ -54,7 +62,27 @@ where
     }
 }
 
-/// A command sent to the [`SessionManager`] actor (the command half of Seam A — PLAN §6).
+#[derive(Debug)]
+struct ToolOutcome {
+    epoch: u64,
+    id: ToolCallId,
+    name: String,
+    result: ToolResult,
+}
+
+struct PendingTool {
+    tool: Arc<dyn Tool>,
+    args: Value,
+    name: String,
+    permission: Permission,
+}
+
+struct RunningTool {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+/// A command sent to the [`SessionManager`] actor (the command half of Seam A).
 #[derive(Debug)]
 pub enum Command {
     /// Start (`resume=false`) or resume (`resume=true`) a session.
@@ -97,6 +125,15 @@ pub enum Command {
     QueryState {
         /// Reply with the state.
         reply: oneshot::Sender<AppState>,
+    },
+    /// Resolve a pending tool permission request.
+    ResolveToolPermission {
+        /// Epoch captured when the permission prompt was emitted.
+        epoch: u64,
+        /// Provider-assigned tool-call id.
+        id: ToolCallId,
+        /// Whether the user approved this call.
+        approve: bool,
     },
     /// Replace the actor's [`Config`] after a runtime settings change (boxed — it's large relative
     /// to the other variants). `NextSession` fields take effect on the next [`Command::Start`]. The
@@ -229,6 +266,19 @@ impl SessionManagerHandle {
         rx.await.map_err(|_| Self::dead())
     }
 
+    /// Resolve a pending tool permission request.
+    pub async fn resolve_tool_permission(
+        &self,
+        epoch: u64,
+        id: ToolCallId,
+        approve: bool,
+    ) -> Result<(), SessionError> {
+        self.cmd_tx
+            .send(Command::ResolveToolPermission { epoch, id, approve })
+            .await
+            .map_err(|_| Self::dead())
+    }
+
     /// Trigger an immediate reachability probe (the result arrives as a `UiEvent::Reachability` on
     /// the event stream). No-op when no probe is wired. Non-blocking and infallible by design — it
     /// just nudges the background monitor.
@@ -248,6 +298,11 @@ pub struct SessionManager {
     ui_tx: broadcast::Sender<UiEvent>,
     audio_tx: broadcast::Sender<Vec<i16>>,
     ev_tx: mpsc::Sender<SessionEvent>,
+    tool_tx: mpsc::Sender<ToolOutcome>,
+    tool_runtime: ToolRuntime,
+    active_epoch: u64,
+    pending_tools: HashMap<(u64, ToolCallId), PendingTool>,
+    running_tools: HashMap<(u64, ToolCallId), RunningTool>,
     state: AppState,
     mic_muted: bool,
     last_resumption_handle: Option<String>,
@@ -287,11 +342,13 @@ impl SessionManager {
         history: Arc<dyn HistoryStore>,
         factory: Arc<dyn SessionFactory>,
         probe: Option<Arc<dyn ConnectivityProbe>>,
+        tool_runtime: ToolRuntime,
     ) -> SessionManagerHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL);
         let (ui_tx, _) = broadcast::channel(UI_CHANNEL);
         let (audio_tx, _) = broadcast::channel(MEDIA_CHANNEL);
         let (ev_tx, ev_rx) = mpsc::channel(MEDIA_CHANNEL);
+        let (tool_tx, tool_rx) = mpsc::channel(COMMAND_CHANNEL);
 
         // Wire the reachability monitor only when a probe exists. The shared `Notify` lets both a
         // host (`check_reachability`) and the actor (on connect failure) ask for an immediate probe.
@@ -315,6 +372,11 @@ impl SessionManager {
             ui_tx: ui_tx.clone(),
             audio_tx: audio_tx.clone(),
             ev_tx,
+            tool_tx,
+            tool_runtime,
+            active_epoch: 0,
+            pending_tools: HashMap::new(),
+            running_tools: HashMap::new(),
             state: AppState::Stopped,
             mic_muted: false,
             last_resumption_handle: None,
@@ -326,7 +388,7 @@ impl SessionManager {
             last_token_usage: None,
             probe_trigger: probe_trigger.clone(),
         };
-        tokio::spawn(actor.run(cmd_rx, ev_rx));
+        tokio::spawn(actor.run(cmd_rx, ev_rx, tool_rx));
         SessionManagerHandle {
             cmd_tx,
             ui_tx,
@@ -336,11 +398,12 @@ impl SessionManager {
     }
 
     /// The actor loop. `session` and the two receivers are locals, so command and event handlers
-    /// borrow `self` without aliasing (the borrow-safe core of PLAN §8).
+    /// borrow `self` without aliasing.
     async fn run(
         mut self,
         mut cmd_rx: mpsc::Receiver<Command>,
         mut ev_rx: mpsc::Receiver<SessionEvent>,
+        mut tool_rx: mpsc::Receiver<ToolOutcome>,
     ) {
         let mut session: Option<Box<dyn RealtimeSession>> = None;
         let mut metrics_tick = tokio::time::interval(SAMPLE_INTERVAL);
@@ -359,7 +422,10 @@ impl SessionManager {
                     }
                 }
                 Some(event) = ev_rx.recv() => {
-                    self.handle_event(event).await;
+                    self.handle_event(event, &mut session).await;
+                }
+                Some(outcome) = tool_rx.recv() => {
+                    self.complete_tool(outcome, &mut session).await;
                 }
                 _ = metrics_tick.tick() => {
                     self.sample_metrics(session.as_deref());
@@ -443,6 +509,10 @@ impl SessionManager {
             Command::QueryState { reply } => {
                 let _ = reply.send(self.state);
             }
+            Command::ResolveToolPermission { epoch, id, approve } => {
+                self.resolve_tool_permission(epoch, id, approve, session)
+                    .await;
+            }
             Command::UpdateConfig { config } => {
                 // Swap in the new config. `NextSession` fields (voice, model, transcription, budget,
                 // compression) are read fresh by `do_start`, so they apply on the next connect; the
@@ -465,6 +535,7 @@ impl SessionManager {
         session: &mut Option<Box<dyn RealtimeSession>>,
     ) -> Result<(), SessionError> {
         self.do_stop(session).await; // idempotent: never leak a prior session
+        self.active_epoch = self.active_epoch.wrapping_add(1);
 
         self.set_state(AppState::Connecting);
         self.emit_connection(ConnectionStatus::Connecting, None);
@@ -478,11 +549,12 @@ impl SessionManager {
             seed_turns = initial_context.len(),
             "starting session"
         );
-        let cfg = SessionConfig::from_config(
+        let mut cfg = SessionConfig::from_config(
             &self.config,
             initial_context,
             self.last_resumption_handle.clone(),
         );
+        cfg.tools = self.tool_runtime.registry.schemas();
 
         let mut new_session = self.factory.create();
         if let Err(e) = new_session.connect(cfg).await {
@@ -525,6 +597,8 @@ impl SessionManager {
     }
 
     async fn do_stop(&mut self, session: &mut Option<Box<dyn RealtimeSession>>) {
+        self.active_epoch = self.active_epoch.wrapping_add(1);
+        self.cancel_all_tools();
         if let Some(mut s) = session.take() {
             let _ = s.close().await;
         }
@@ -554,7 +628,11 @@ impl SessionManager {
         }
     }
 
-    async fn handle_event(&mut self, event: SessionEvent) {
+    async fn handle_event(
+        &mut self,
+        event: SessionEvent,
+        session: &mut Option<Box<dyn RealtimeSession>>,
+    ) {
         match event {
             SessionEvent::AudioOutput { pcm } => {
                 self.meter.add_down(pcm.len() as u64 * BYTES_PER_SAMPLE);
@@ -623,9 +701,204 @@ impl SessionManager {
                     self.emit_connection(ConnectionStatus::Disconnected, None);
                 }
             }
-            SessionEvent::ToolCall { .. } => {
-                // [LATER] No tool dispatch in the MVP (FR-24).
+            SessionEvent::ToolCall { id, name, args } => {
+                self.handle_tool_call(id, name, args, session).await;
             }
+        }
+    }
+
+    async fn handle_tool_call(
+        &mut self,
+        id: ToolCallId,
+        name: String,
+        args: Value,
+        session: &mut Option<Box<dyn RealtimeSession>>,
+    ) {
+        let Some(tool) = self.tool_runtime.registry.get(&name) else {
+            self.send_tool_result_now(
+                self.active_epoch,
+                id,
+                name,
+                ToolResult::error("unknown tool"),
+                session,
+            )
+            .await;
+            return;
+        };
+
+        let schema = tool.schema();
+        if let Err(e) = validate_args(&schema.parameters, &args) {
+            self.send_tool_result_now(
+                self.active_epoch,
+                id,
+                name,
+                ToolResult::error(format!("invalid tool arguments: {e}")),
+                session,
+            )
+            .await;
+            return;
+        }
+
+        let permission = tool.permission(&args, &self.tool_runtime.ctx_template);
+        self.emit(UiEvent::ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            summary: permission.summary.clone(),
+        });
+        match evaluate_permission(&self.tool_runtime.permission_profile, &permission) {
+            PermissionAction::Allow => {
+                self.spawn_tool(self.active_epoch, id, name, args, tool);
+            }
+            PermissionAction::Ask => {
+                let epoch = self.active_epoch;
+                self.emit(UiEvent::ToolPermission {
+                    epoch,
+                    id: id.clone(),
+                    name: name.clone(),
+                    summary: permission.summary.clone(),
+                    detail: permission.detail.clone(),
+                });
+                self.pending_tools.insert(
+                    (epoch, id),
+                    PendingTool {
+                        tool,
+                        args,
+                        name,
+                        permission,
+                    },
+                );
+            }
+            PermissionAction::Deny => {
+                let summary = format!("denied {}", permission.summary);
+                self.send_tool_result_now(
+                    self.active_epoch,
+                    id,
+                    name,
+                    ToolResult::error(summary),
+                    session,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn resolve_tool_permission(
+        &mut self,
+        epoch: u64,
+        id: ToolCallId,
+        approve: bool,
+        session: &mut Option<Box<dyn RealtimeSession>>,
+    ) {
+        if epoch != self.active_epoch {
+            return;
+        }
+        let Some(pending) = self.pending_tools.remove(&(epoch, id.clone())) else {
+            return;
+        };
+        if approve {
+            self.spawn_tool(epoch, id, pending.name, pending.args, pending.tool);
+        } else {
+            self.send_tool_result_now(
+                epoch,
+                id,
+                pending.name,
+                ToolResult::error(format!("denied {}", pending.permission.summary)),
+                session,
+            )
+            .await;
+        }
+    }
+
+    fn spawn_tool(
+        &mut self,
+        epoch: u64,
+        id: ToolCallId,
+        name: String,
+        args: Value,
+        tool: Arc<dyn Tool>,
+    ) {
+        let cancel = CancellationToken::new();
+        let mut ctx = self.tool_runtime.ctx_template.clone();
+        ctx.cancel = cancel.clone();
+        let tx = self.tool_tx.clone();
+        let id_for_task = id.clone();
+        let name_for_task = name;
+        let handle = tokio::spawn(async move {
+            let run = tool.run(args, &ctx);
+            let result = tokio::select! {
+                () = ctx.cancel.cancelled() => ToolResult::error("tool cancelled"),
+                result = tokio::time::timeout(ctx.timeout, run) => {
+                    match result {
+                        Ok(result) => result,
+                        Err(_) => ToolResult::error("tool timed out"),
+                    }
+                }
+            };
+            let _ = tx
+                .send(ToolOutcome {
+                    epoch,
+                    id: id_for_task,
+                    name: name_for_task,
+                    result,
+                })
+                .await;
+        });
+        self.running_tools
+            .insert((epoch, id), RunningTool { cancel, handle });
+    }
+
+    async fn complete_tool(
+        &mut self,
+        outcome: ToolOutcome,
+        session: &mut Option<Box<dyn RealtimeSession>>,
+    ) {
+        let key = (outcome.epoch, outcome.id.clone());
+        self.running_tools.remove(&key);
+        self.send_tool_result_now(
+            outcome.epoch,
+            outcome.id,
+            outcome.name,
+            outcome.result,
+            session,
+        )
+        .await;
+    }
+
+    async fn send_tool_result_now(
+        &mut self,
+        epoch: u64,
+        id: ToolCallId,
+        name: String,
+        result: ToolResult,
+        session: &mut Option<Box<dyn RealtimeSession>>,
+    ) {
+        if epoch != self.active_epoch {
+            return;
+        }
+        let summary = tool_result_summary(&result);
+        let ok = result.ok;
+        if let Some(s) = session.as_mut() {
+            if let Err(e) = s.send_tool_result(id.clone(), result).await {
+                self.on_error("tool_result_send", &e);
+                return;
+            }
+        } else {
+            self.on_error("tool_result_send", &SessionError::NotConnected);
+            return;
+        }
+        self.emit(UiEvent::ToolResult {
+            id,
+            name,
+            ok,
+            summary,
+        });
+    }
+
+    fn cancel_all_tools(&mut self) {
+        self.pending_tools.clear();
+        for (_, running) in self.running_tools.drain() {
+            running.cancel.cancel();
+            running.handle.abort();
         }
     }
 
@@ -720,6 +993,25 @@ impl SessionManager {
     }
 }
 
+fn tool_result_summary(result: &ToolResult) -> String {
+    if !result.ok {
+        return result
+            .content
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool failed")
+            .to_string();
+    }
+    if let Some(summary) = result
+        .content
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+    {
+        return summary.to_string();
+    }
+    "tool completed".to_string()
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -733,7 +1025,9 @@ mod tests {
     use crate::history::InMemoryHistory;
     use crate::session::event::{EventReceiver, EventSender, TurnEvent};
     use crate::session::Capabilities;
+    use crate::tools::{PermissionProfile, ToolCtx, ToolRegistry};
     use async_trait::async_trait;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::broadcast::error::RecvError;
 
@@ -758,6 +1052,8 @@ mod tests {
         /// When set, `connect` records how many `initial_context` turns the manager seeded, so a
         /// test can prove start replays the persisted log.
         seeded: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        /// When set, `send_text` emits this tool call instead of a transcript turn.
+        tool_call: Option<(String, Value)>,
     }
 
     impl ScriptedSession {
@@ -775,6 +1071,7 @@ mod tests {
                 tokens: None,
                 user_stream: false,
                 seeded: None,
+                tool_call: None,
             }
         }
 
@@ -809,6 +1106,13 @@ mod tests {
         fn with_seed_recorder(seeded: Arc<std::sync::atomic::AtomicUsize>) -> Self {
             Self {
                 seeded: Some(seeded),
+                ..Self::new()
+            }
+        }
+
+        fn with_tool_call(name: &str, args: Value) -> Self {
+            Self {
+                tool_call: Some((name.to_string(), args)),
                 ..Self::new()
             }
         }
@@ -870,6 +1174,16 @@ mod tests {
 
         async fn send_text(&mut self, text: &str) -> Result<(), SessionError> {
             let tx = self.tx.as_ref().ok_or(SessionError::NotConnected)?.clone();
+            if let Some((name, args)) = self.tool_call.clone() {
+                tx.send(SessionEvent::ToolCall {
+                    id: ToolCallId("tool-1".to_string()),
+                    name,
+                    args,
+                })
+                .await
+                .ok();
+                return Ok(());
+            }
             tx.send(SessionEvent::TurnEvent(TurnEvent::TurnStarted))
                 .await
                 .ok();
@@ -901,6 +1215,14 @@ mod tests {
             tx.send(SessionEvent::TurnEvent(TurnEvent::TurnComplete))
                 .await
                 .ok();
+            Ok(())
+        }
+
+        async fn send_tool_result(
+            &mut self,
+            _id: ToolCallId,
+            _result: ToolResult,
+        ) -> Result<(), SessionError> {
             Ok(())
         }
 
@@ -942,6 +1264,67 @@ mod tests {
         }
     }
 
+    struct EchoTool {
+        action: PermissionAction,
+    }
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn schema(&self) -> crate::tools::ToolSchema {
+            crate::tools::ToolSchema {
+                name: "echo_tool".to_string(),
+                description: "Echo test input.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"}
+                    },
+                    "required": ["text"]
+                }),
+            }
+        }
+
+        fn permission(&self, args: &Value, _ctx: &ToolCtx) -> Permission {
+            Permission {
+                key: "echo".to_string(),
+                subject: args
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                default_action: self.action,
+                summary: "echo test".to_string(),
+                detail: "echo test detail".to_string(),
+            }
+        }
+
+        async fn run(&self, args: Value, _ctx: &ToolCtx) -> ToolResult {
+            ToolResult::ok(serde_json::json!({
+                "echo": args["text"],
+                "summary": "echoed"
+            }))
+        }
+    }
+
+    fn runtime_with_echo(clock: TestClock, action: PermissionAction) -> ToolRuntime {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool { action }));
+        ToolRuntime {
+            registry: Arc::new(registry),
+            ctx_template: ToolCtx {
+                readable_roots: Vec::new(),
+                writable_roots: Vec::new(),
+                cwd: PathBuf::new(),
+                timeout: Duration::from_secs(1),
+                max_output_bytes: 4096,
+                network: false,
+                cancel: CancellationToken::new(),
+                clock: Arc::new(clock),
+            },
+            permission_profile: PermissionProfile::default(),
+        }
+    }
+
     fn spawn_manager() -> (SessionManagerHandle, Arc<InMemoryHistory>) {
         let (handle, history, _clock) = spawn_manager_with_clock();
         (handle, history)
@@ -956,6 +1339,7 @@ mod tests {
             history.clone(),
             Arc::new(|| Box::new(ScriptedSession::new()) as Box<dyn RealtimeSession>),
             None,
+            ToolRuntime::disabled(Arc::new(clock.clone())),
         );
         (handle, history, clock)
     }
@@ -993,6 +1377,7 @@ mod tests {
                 ))) as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(TestClock::new(1_000))),
         );
 
         handle.start(false).await.unwrap();
@@ -1084,6 +1469,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowed_tool_call_runs_and_sends_result() {
+        let clock = TestClock::new(1_000);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(|| {
+                Box::new(ScriptedSession::with_tool_call(
+                    "echo_tool",
+                    serde_json::json!({"text": "hi"}),
+                )) as Box<dyn RealtimeSession>
+            }),
+            None,
+            runtime_with_echo(clock, PermissionAction::Allow),
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.send_text("call").await.unwrap();
+
+        let mut saw_call = false;
+        let mut saw_result = false;
+        for _ in 0..20 {
+            match next_ui(&mut ui).await {
+                UiEvent::ToolCall { name, .. } if name == "echo_tool" => saw_call = true,
+                UiEvent::ToolResult {
+                    name,
+                    ok: true,
+                    summary,
+                    ..
+                } if name == "echo_tool" && summary == "echoed" => saw_result = true,
+                _ => {}
+            }
+            if saw_call && saw_result {
+                break;
+            }
+        }
+        assert!(saw_call, "tool call event not emitted");
+        assert!(saw_result, "tool result event not emitted");
+    }
+
+    #[tokio::test]
+    async fn asked_tool_waits_for_permission_resolution() {
+        let clock = TestClock::new(1_000);
+        let handle = SessionManager::spawn(
+            Config::default(),
+            Arc::new(clock.clone()),
+            Arc::new(InMemoryHistory::new()),
+            Arc::new(|| {
+                Box::new(ScriptedSession::with_tool_call(
+                    "echo_tool",
+                    serde_json::json!({"text": "approval"}),
+                )) as Box<dyn RealtimeSession>
+            }),
+            None,
+            runtime_with_echo(clock, PermissionAction::Ask),
+        );
+        let mut ui = handle.subscribe();
+        handle.start(false).await.unwrap();
+        handle.send_text("call").await.unwrap();
+
+        let (epoch, id) = loop {
+            if let UiEvent::ToolPermission {
+                epoch, id, name, ..
+            } = next_ui(&mut ui).await
+            {
+                assert_eq!(name, "echo_tool");
+                break (epoch, id);
+            }
+        };
+        handle
+            .resolve_tool_permission(epoch, id, true)
+            .await
+            .unwrap();
+
+        let mut saw_result = false;
+        for _ in 0..20 {
+            if let UiEvent::ToolResult { name, ok: true, .. } = next_ui(&mut ui).await {
+                if name == "echo_tool" {
+                    saw_result = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_result, "approved tool did not run");
+    }
+
+    #[tokio::test]
     async fn start_seeds_context_from_the_persisted_log() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         // A prior conversation already sits in the log.
@@ -1109,6 +1581,7 @@ mod tests {
                 ))) as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(TestClock::new(1_000))),
         );
 
         // Even with resume=false, start replays the persisted log into the new session.
@@ -1134,6 +1607,7 @@ mod tests {
                 Box::new(ScriptedSession::with_user_transcript()) as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(TestClock::new(1_000))),
         );
         let mut ui = handle.subscribe();
         handle.start(false).await.unwrap();
@@ -1232,6 +1706,7 @@ mod tests {
                     as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(clock.clone())),
         );
         let mut ui = handle.subscribe();
         handle.start(false).await.unwrap();
@@ -1276,6 +1751,7 @@ mod tests {
                 ))) as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(clock.clone())),
         );
         let mut ui = handle.subscribe();
         handle.start(false).await.unwrap();
@@ -1396,6 +1872,7 @@ mod tests {
                 ))) as Box<dyn RealtimeSession>
             }),
             None,
+            ToolRuntime::disabled(Arc::new(TestClock::new(1_000))),
         );
         handle.start(false).await.unwrap();
 

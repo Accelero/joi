@@ -1,18 +1,18 @@
 //! Layered configuration (defaults → JSON file → `JOI_` env), loaded once at startup.
 //!
-//! Precedence, lowest to highest (PLAN §6.2): built-in [`Config::default`], a JSON file
+//! Precedence, lowest to highest: built-in [`Config::default`], a JSON file
 //! (`~/.joi/config.json`), then `JOI_`-prefixed environment variables (nested via `__`) — **env
 //! always wins over the file** — and finally the conventional shortcuts `GEMINI_API_KEY` /
 //! `GEMINI_MODEL`. CLI flags (`--config`/`--log`) are applied by the binary *before* this loader
 //! runs.
 //!
-//! The file is **JSON** (the engine reads *and writes* it — see the runtime settings interface in
-//! `doc/SETTINGS.md` — and JSON round-trips deterministically for machine writing). A pre-JSON
+//! The file is **JSON** (the engine reads *and writes* it through the runtime settings interface,
+//! and JSON round-trips deterministically for machine writing). A pre-JSON
 //! `~/.joi/config` (YAML) is migrated to `config.json` once, on first run after the upgrade.
 //!
 //! On startup the binary writes a defaults file to the config path if none exists
 //! ([`Config::write_default_if_missing`]), so users have a starting file to edit (the annotated
-//! field reference lives in `doc/CONFIG.md`). Every write goes through
+//! field reference lives in `doc/SPEC.md`). Every write goes through
 //! [`crate::util::atomic_write`], so a crash can't corrupt the config, and the API key is **never**
 //! written to disk (it comes from the environment).
 //!
@@ -24,7 +24,7 @@
 //! on first run). When that file is present and non-blank it is the authoritative
 //! `live_api.gemini.system_instruction`, overriding the inline config value.
 //!
-//! `joi-core` is the single source of truth for paths (PLAN §6.3): the binary must pass these
+//! `joi-core` is the single source of truth for paths: the binary must pass these
 //! resolved paths in rather than re-deriving them, to avoid divergent locations.
 
 use std::path::{Path, PathBuf};
@@ -36,6 +36,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
+use crate::tools::PermissionRule;
 
 /// Which provider adapter to drive (SPEC §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -77,7 +78,7 @@ impl LogLevel {
     }
 }
 
-/// Provider API key, settable in the YAML file or via env. Redacts in `Debug` so it can't leak into
+/// Provider API key, settable in the JSON config file or via env. Redacts in `Debug` so it can't leak into
 /// logs (SEC-1); empty means unset. Unlike `secrecy::SecretString` it supports the serde + `Eq`
 /// derives [`Config`] needs (and the key may legitimately live in config now).
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -280,7 +281,7 @@ fn read_prompt_file(path: &Path) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Audio I/O settings (PLAN §7.1).
+/// Audio I/O settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AudioCfg {
     /// Mic frame size in milliseconds (20 ms = 320 samples at 16 kHz).
@@ -309,7 +310,7 @@ pub struct AudioCfg {
     pub auto_gain: bool,
 }
 
-/// Screen-capture settings (PLAN §7.2, FR-8..10). Native capture is the only path.
+/// Screen-capture settings. Native capture is the only path.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ScreenCfg {
     /// Frames per second sent to the model.
@@ -363,6 +364,42 @@ pub struct UiCfg {
     pub terminal: TerminalCfg,
 }
 
+/// Agent-harness tool settings. Tools are off by default and only run inside configured roots.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ToolsCfg {
+    /// Whether Joi declares/runs tools for the model.
+    pub enabled: bool,
+    /// Built-in tool names to register. Empty means the standard built-in set.
+    pub builtins: Vec<String>,
+    /// Filesystem roots tools may read. Empty resolves to the process cwd in `joi-app`.
+    pub readable_roots: Vec<PathBuf>,
+    /// Filesystem roots tools may mutate. Empty resolves to the process cwd in `joi-app`.
+    pub writable_roots: Vec<PathBuf>,
+    /// Per-call timeout in seconds.
+    pub timeout_secs: u64,
+    /// Maximum result payload, in bytes, before truncation.
+    pub max_output_bytes: usize,
+    /// Whether the `bash` tool may run obvious network commands.
+    pub network: bool,
+    /// Ordered permission rules; first match wins.
+    pub permissions: Vec<PermissionRule>,
+}
+
+impl Default for ToolsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            builtins: Vec::new(),
+            readable_roots: Vec::new(),
+            writable_roots: Vec::new(),
+            timeout_secs: 30,
+            max_output_bytes: 64 * 1024,
+            network: false,
+            permissions: Vec::new(),
+        }
+    }
+}
+
 /// The complete, validated application configuration. Top-level fields are per-module sections.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -376,6 +413,9 @@ pub struct Config {
     pub media: MediaCfg,
     /// Frontend appearance.
     pub ui: UiCfg,
+    /// Agent-harness tool configuration.
+    #[serde(default)]
+    pub tools: ToolsCfg,
 }
 
 impl Default for Config {
@@ -427,12 +467,13 @@ impl Default for Config {
                     accent: "#9aede4".to_string(),
                 },
             },
+            tools: ToolsCfg::default(),
         }
     }
 }
 
 /// Filesystem locations Joi uses, all rooted at `~/.joi`. The binary passes these in rather than
-/// re-deriving them (PLAN §6.3). This deliberately departs from XDG: everything Joi owns lives under
+/// re-deriving them. This deliberately departs from XDG: everything Joi owns lives under
 /// one `~/.joi` directory (config + per-session logs + logs), so it's easy to find, back up, or wipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
@@ -475,7 +516,7 @@ impl ProjectPaths {
 }
 
 impl Config {
-    /// Load configuration: defaults → YAML file (if present) → `JOI_` env, then validate.
+    /// Load configuration: defaults → JSON file (if present) → `JOI_` env, then validate.
     ///
     /// `cli_path` overrides the default config-file location. If no file exists there yet, a
     /// defaults file is written first (best-effort) so the user has something to edit. Unset
@@ -535,7 +576,7 @@ impl Config {
     }
 
     /// Write the built-in defaults as JSON to `path` if no config file exists there yet. Gives the
-    /// user a starting file to edit (annotated reference: `doc/CONFIG.md`); never overwrites an
+    /// user a starting file to edit (annotated reference: `doc/SPEC.md`); never overwrites an
     /// existing one. The API key is never included — it comes from the environment.
     pub fn write_default_if_missing(path: &Path) -> Result<(), ConfigError> {
         if path.exists() {
@@ -715,6 +756,12 @@ impl Config {
                 "live_api.gemini.token_budget",
                 "must be at least 1000",
             ));
+        }
+        if self.tools.timeout_secs == 0 {
+            return Err(invalid("tools.timeout_secs", "must be > 0"));
+        }
+        if self.tools.max_output_bytes < 1024 {
+            return Err(invalid("tools.max_output_bytes", "must be at least 1024"));
         }
         Ok(())
     }

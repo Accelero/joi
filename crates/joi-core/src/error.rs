@@ -1,7 +1,7 @@
 //! Typed error enums for the core ports.
 //!
-//! Library code returns these (`thiserror`); the binary edge wraps them with `anyhow`
-//! (PLAN §1). No `unwrap`/`expect`/`panic` on these paths.
+//! Library code returns these (`thiserror`); the binary edge wraps them with `anyhow`. No
+//! `unwrap`/`expect`/`panic` on these paths.
 
 use std::path::PathBuf;
 
@@ -47,8 +47,7 @@ pub enum SessionError {
     /// The provider sent a protocol-level error.
     #[error("provider error: {0}")]
     Provider(String),
-    /// A capability whose seam exists but is not wired in the MVP (e.g. tool results — FR-24
-    /// is `[LATER]`; PLAN §2, §8).
+    /// A capability whose seam exists but this adapter does not implement.
     #[error("not implemented: {0}")]
     Unimplemented(&'static str),
 }

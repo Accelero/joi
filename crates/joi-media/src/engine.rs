@@ -1,6 +1,6 @@
 //! [`MediaEngine`]: the single interface the composition root (`joi-app`) uses for all native
 //! media. It owns the capture/playback/screen lifecycle and the pumps that move frames between the
-//! cpal/xcap threads and the session, so `JoiApp` stays thin (PLAN §7.5). The
+//! cpal/xcap threads and the session, so `JoiApp` stays thin. The
 //! [`SessionManagerHandle`] it binds to is the only seam it touches — the engine drives the mic,
 //! speaker, and screen on the host machine.
 
@@ -106,8 +106,8 @@ impl MediaEngine {
     /// is a no-op (the stream is not torn down and respawned). The manager and the mute gate both
     /// drop muted audio.
     pub fn start_capture(&self) {
-        // Hold `capture` across the whole operation so concurrent calls can't both spawn (and so the
-        // lock order is capture → render_sink, matching `stop_capture` — no deadlock; PLAN §7.3 #6).
+        // Hold `capture` across the whole operation so concurrent calls can't both spawn. Keep the
+        // lock order capture -> render_sink, matching `stop_capture`, to avoid a lifecycle deadlock.
         if let Ok(mut cap) = self.capture.lock() {
             if cap.is_some() {
                 return; // already capturing
@@ -188,7 +188,7 @@ impl MediaEngine {
 /// flush the playback buffer immediately (FR-2/FR-7). The AEC reference is **not** fed here: provider
 /// audio arrives in bursts, but the echo the mic hears is the jitter-buffered, real-time playback —
 /// so the reference is tapped inside the playback engine at the output callback (what's actually
-/// emitted), keeping it aligned with the near-end echo for AEC3 (PLAN §7.3 #2).
+/// emitted), keeping it aligned with the near-end echo for AEC3.
 fn spawn_playback_pump(
     handle: &SessionManagerHandle,
     output_device: String,

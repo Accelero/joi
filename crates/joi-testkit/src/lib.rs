@@ -1,4 +1,4 @@
-//! Adapter conformance suite + shared fixtures (PLAN §8, M3).
+//! Adapter conformance suite + shared fixtures.
 //!
 //! [`run_conformance`] runs one ordered scenario against any [`RealtimeSession`] implementation. A
 //! functional adapter (the mock, and the real Gemini) must produce a correctly ordered turn; a

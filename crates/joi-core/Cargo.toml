@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 figment.workspace = true
 directories.workspace = true

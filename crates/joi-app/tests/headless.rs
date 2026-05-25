@@ -1,4 +1,4 @@
-//! The **headless gate** (PLAN §3 deviation #2, §9 M5): build [`JoiApp`] with `MediaMode::None` +
+//! The **headless gate**: build [`JoiApp`] with `MediaMode::None` +
 //! the Mock provider and drive a full command→event loop with no devices and no GUI. If this
 //! passes, Seam A is honest — a frontend is pure presentation over the same engine.
 
@@ -82,7 +82,7 @@ async fn headless_full_command_event_loop() {
 #[tokio::test]
 async fn no_api_key_falls_back_without_panicking() {
     // Default config selects Gemini with an empty key → no factory, so the engine constructs but
-    // session commands return a clear error instead of panicking (PLAN §8 policy).
+    // session commands return a clear error instead of panicking.
     let mut config = Config::default();
     config.live_api.gemini.api_key = joi_core::config::ApiKey::default(); // explicit: unset
     config.history.dir = None;

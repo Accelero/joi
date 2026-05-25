@@ -32,8 +32,9 @@ These shape every capability below.
   The key travels only to the provider, never to logs, transcripts, or any third party.
 - **Cost-controllable.** The user can fully disconnect the live model at will; a disconnected Joi
   incurs no streaming cost.
-- **Extensible toward tools.** Joi ships without tool/command execution today, but the model must be
-  able to gain permission-gated tools (incl. shell access and memory) later without a redesign.
+- **Permission-gated tools.** Tool execution is disabled by default. When deliberately enabled, model
+  tool calls must pass through typed schemas, policy, sandbox roots, output caps, and non-voice
+  approval for mutating/destructive actions.
 
 ---
 
@@ -76,10 +77,12 @@ These shape every capability below.
 - **FR-14** **Start / stop** the live model. Stopping fully disconnects (no streaming cost).
 - **FR-15** **Pause to save cost** — disconnect the live session while preserving context — and
   **resume** later, reconnecting with that context restored so the conversation continues coherently.
-- **FR-16** Recover gracefully from transient connection drops, restoring the live session where the
-  provider supports it and otherwise falling back to a context-restoring restart; mic/share state is
-  never silently lost.
-- **FR-17** **Panic-stop** halts the session, microphone, and screen sharing in a single action.
+- **FR-16** `[LATER]` Recover gracefully from transient connection drops, restoring the live session
+  where the provider supports it and otherwise falling back to a context-restoring restart; mic/share
+  state is never silently lost. Today a provider/server close is surfaced and the live session stops
+  cleanly.
+- **FR-17** **Stop / quit** halts the live session and microphone in one action; the active frontend
+  must also tear down screen sharing when the session stops.
 
 ### 3.6 Session management & persistence `[NOW]`
 - **FR-18** Conversations **persist automatically** so context survives a system restart.
@@ -97,10 +100,13 @@ These shape every capability below.
 - **FR-23** The user supplies a provider API key; Joi connects **directly** to the provider and
   surfaces connection, auth, and network errors plainly.
 
-### 3.8 Tools & memory `[LATER]`
-- **FR-24** `[LATER]` The agent can call registered tools, routed through a **permission gate** that
-  requires deliberate, non-voice approval before any mutating or destructive action. The first such
-  tool is permission-gated shell access, executed in a constrained sandbox.
+### 3.8 Tools & memory `[NOW/LATER]`
+- **FR-24** `[NOW]` The agent can call registered built-in tools (`read`, `list`, `glob`, `grep`,
+  `write`, `edit`, `bash`) when tools are explicitly enabled. Calls are routed through native
+  provider function calling, schema validation, core policy, sandbox roots, time/output limits, and a
+  permission gate requiring deliberate, non-voice approval before mutating or destructive actions.
+  `read` returns line-hash edit tags, and `edit` validates those tags against current file content
+  before writing. MCP tools and stronger sandbox hardening remain follow-up work.
 - **FR-25** `[LATER]` A **memory** capability lets the agent persist and recall curated long-term
   facts across conversations — distinct from raw conversation history (FR-18) and subject to the same
   permission model.
@@ -114,12 +120,13 @@ These shape every capability below.
   provide it without writing it to disk in plaintext.
 - **SEC-2** `[NOW]` **Local-only data.** History and logs are stored locally; detectable secrets are
   redacted from logs.
-- **SEC-3** `[NOW]` **No execution surface yet.** No model-driven command or tool path is reachable
-  until the tool system (FR-24) is deliberately enabled.
-- **SEC-4** `[LATER]` **Non-voice consent.** Mutating or destructive tool actions require a
-  deliberate, non-spoken approval of the *resolved* action; approval times out to deny.
-- **SEC-5** `[LATER]` **Sandboxed execution.** Executed commands run unprivileged, scoped, without
-  ambient network/credentials by default, and are fully logged.
+- **SEC-3** `[NOW]` **Disabled by default.** No model-driven command or tool path is reachable unless
+  `tools.enabled` is explicitly true.
+- **SEC-4** `[NOW]` **Non-voice consent.** Mutating or destructive tool actions require a deliberate,
+  non-spoken approval of the *resolved* action.
+- **SEC-5** `[NOW]` **Scoped execution.** Built-in tools run against configured readable/writable
+  roots, with time/output caps. `bash` is non-interactive and obvious network commands are denied by
+  default. Stronger kernel isolation is a future hardening layer behind the same tool context.
 - **SEC-6** `[LATER]` **Anti-spoof.** Treat all on-screen/shared content as untrusted input; the
   permission prompt is application chrome, never rendered inside shared or streamed content.
 
@@ -127,23 +134,67 @@ These shape every capability below.
 
 ## 5. Configuration
 
-The user can configure, at minimum:
-- **Provider & model** — which provider, the exact model, voice, and system instruction.
-- **API key** — preferably via environment rather than on-disk plaintext.
-- **History** — the token budget that bounds re-seeded context.
-- **Media** — microphone/output devices and audio conditioning; screen frame rate, resolution cap,
-  and quality.
-- **Presentation** — theme/appearance of the active frontend.
-- **Logging** — level and destination.
+Joi reads one primary config file: `~/.joi/config.json`. On first run, Joi writes a defaults file.
+A pre-JSON legacy `~/.joi/config` YAML file is migrated to `config.json` once when no JSON config
+exists. The system prompt is stored separately in `~/.joi/prompt.md`; a present, non-blank prompt
+file overrides `live_api.gemini.system_instruction`.
 
-Configuration is layered so that environment values override file values.
+Precedence, lowest to highest:
+
+1. Built-in defaults.
+2. `~/.joi/config.json`, deep-merged over defaults.
+3. `JOI_` environment variables, nested with `__`.
+4. `GEMINI_API_KEY` and `GEMINI_MODEL`.
+
+The prompt file is the one documented exception to env precedence for the system instruction.
+
+Current config surface:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `live_api.provider` | `gemini` \| `mock` | `gemini` | `mock` is for tests/headless. |
+| `live_api.reachability_probe_secs` | u64 | `20` | `0` disables periodic polling; startup/on-demand probes still work. |
+| `live_api.gemini.model` | string | none | Required. Bare Live model name, no `models/` prefix. |
+| `live_api.gemini.api_key` | string | `""` | Prefer `GEMINI_API_KEY`; never persisted by Joi writes. |
+| `live_api.gemini.voice` | string \| null | `null` | Model default unless explicitly set through settings. |
+| `live_api.gemini.system_instruction` | string | persona | Overridden by `~/.joi/prompt.md`. |
+| `live_api.gemini.input_transcription` | bool | `true` | User transcript. |
+| `live_api.gemini.output_transcription` | bool | `true` | Agent transcript. |
+| `live_api.gemini.context_window_compression` | bool | `true` | Provider sliding-window compression for long live sessions. |
+| `live_api.gemini.token_budget` | u32 | `117964` | History re-seed budget; 90% of Gemini's 128k Live input window. Min 1000. |
+| `history.dir` | path \| null | `~/.joi/sessions` | Per-session `<uuid>.jsonl` logs plus `index.json`. |
+| `logging.level` | enum | `info` | `error`, `warn`, `info`, `debug`, `trace`; `RUST_LOG` may override where honored. |
+| `logging.file` | path \| null | `~/.joi/logs/joi.log` | Resolved by core; the TUI logs to `$JOI_TUI_LOG` or platform state dir. |
+| `media.audio.frame_ms` | u32 | `20` | Mic frame size, validated 5-60 ms. |
+| `media.audio.input_device` | string | `default` | OS default mic or exact device name. |
+| `media.audio.output_device` | string | `default` | OS default output or exact device name. |
+| `media.audio.echo_cancellation` | bool | `true` | AEC3. |
+| `media.audio.noise_suppression` | bool | `true` | High-pass filter plus noise suppression. |
+| `media.audio.auto_gain` | bool | `true` | AGC2. |
+| `media.screen.fps` | f32 | `1.0` | Validated `(0, 60]`. |
+| `media.screen.max_width` | u32 | `768` | Gemini Live's useful per-frame width. |
+| `media.screen.quality` | u8 | `80` | JPEG quality, 1-100. |
+| `ui.terminal.background` | string | `transparent` | `#rrggbb` or `transparent`. |
+| `ui.terminal.accent` | string | `#9aede4` | Hex or named color. |
+| `tools.enabled` | bool | `false` | Enables model-visible tools. |
+| `tools.builtins` | string[] | `[]` | Empty means the standard built-in set. |
+| `tools.readable_roots` | path[] | `[]` | Empty resolves to process cwd, not `~/.joi`. |
+| `tools.writable_roots` | path[] | `[]` | Empty resolves to process cwd, not `~/.joi`. |
+| `tools.timeout_secs` | u64 | `30` | Per-call timeout. |
+| `tools.max_output_bytes` | usize | `65536` | Minimum 1024. |
+| `tools.network` | bool | `false` | Allows obvious network shell commands only when true. |
+| `tools.permissions` | rule[] | `[]` | Ordered key/subject/action rules; first match wins. |
+
+Runtime-editable settings are a curated subset changed through the engine and persisted atomically.
+Today: `Voice` (applies on next session), `Accent` (immediate), and `Background` (immediate).
+The TUI exposes voice through `/voice`; a generic settings panel is future frontend work.
 
 ---
 
 ## 6. Error handling & edge cases
 
-- **Connection loss while running:** reflect a reconnecting state, attempt provider resume, then a
-  context-restoring restart; never silently lose mic/share state.
+- **Connection loss while running:** surface the disconnect/error clearly and stop cleanly today;
+  automatic provider resume and context-restoring restart are FR-16 follow-up work.
 - **Auth failure:** an explicit, actionable "invalid/expired key" path.
 - **Provider session-length cap:** resume if supported, else a context-restoring restart, surfaced to
   the user.
@@ -163,11 +214,12 @@ Configuration is layered so that environment values override file values.
 2. A user shares a screen, starts/stops at will, and Joi can describe on-screen content; quality is
    adjustable. *(FR-8–10)*
 3. A user stops/pauses to cut cost (no open connection), then resumes with context intact.
-   *(FR-14–16)*
+   *(FR-14–15)*
 4. After a full system restart, prior conversations are listed and any one can be resumed with its
    context restored; history is bounded. *(FR-18–22)*
-5. Panic-stop halts session, mic, and sharing in one action. *(FR-17)*
+5. Stop/quit halts the session, mic, and sharing in one action. *(FR-17)*
 6. The system behaves identically across providers behind the provider abstraction, with no
    provider-specific assumption leaking into conversation, history, or UI logic. *(§2)*
-7. No model-driven tool or command path is reachable while tools are disabled, yet the design admits
-   adding the gated tool system later without rework. *(SEC-3, FR-24)*
+7. No model-driven tool or command path is reachable while tools are disabled. When tools are enabled,
+   built-in calls use native function calling, the shared permission pipeline, and scoped execution.
+   *(SEC-3–5, FR-24)*

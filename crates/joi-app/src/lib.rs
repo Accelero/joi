@@ -1,7 +1,7 @@
 //! Composition root + Seam-A API for JOI. A host — the TUI today, a future out-of-process backend
 //! or WS server — builds a [`JoiApp`] from a [`Config`] and drives it via these methods plus the
 //! event/audio streams. No host, frontend, or transport types appear here, so the engine can be
-//! operated headlessly (PLAN §8).
+//! operated headlessly.
 //!
 //! The command surface: [`JoiApp::start`]/[`stop`](JoiApp::stop)/[`send_text`](JoiApp::send_text)/
 //! [`set_mic_muted`](JoiApp::set_mic_muted)/[`start_screenshare`](JoiApp::start_screenshare)/
@@ -12,10 +12,11 @@
 //! [`send_audio`](JoiApp::send_audio) / [`subscribe_audio`](JoiApp::subscribe_audio) raw-audio
 //! transport.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
-use joi_core::clock::SystemClock;
+use joi_core::clock::{Clock, SystemClock};
 use joi_core::config::{Config, ProjectPaths, UiCfg};
 use joi_core::error::{SessionError, SettingsError};
 use joi_core::history::{HistoryStore, HistoryTurn, InMemoryHistory, SessionStore, SessionSummary};
@@ -26,8 +27,10 @@ use joi_core::settings::{
     apply_setting, settings_schema as build_schema, SettingDescriptor, SettingId, SettingValue,
     SettingsContext,
 };
+use joi_core::tools::{ToolCtx, ToolRuntime};
 use joi_media::{MediaConfig, MediaEngine};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// Error when a session operation is requested but no persisted-session store exists (no API key,
 /// or the in-memory fallback is active).
@@ -44,6 +47,51 @@ fn build_current_schema(cfg: &Config) -> Vec<SettingDescriptor> {
         voices: joi_providers::voice_catalog(cfg),
     };
     build_schema(cfg, &ctx)
+}
+
+fn build_tool_runtime(cfg: &Config, clock: Arc<dyn Clock>) -> ToolRuntime {
+    if !cfg.tools.enabled {
+        return ToolRuntime::disabled(clock);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let readable_roots = roots_or_cwd(&cfg.tools.readable_roots, &cwd);
+    let writable_roots = roots_or_cwd(&cfg.tools.writable_roots, &cwd);
+    ToolRuntime {
+        registry: Arc::new(joi_tools::builtins(&cfg.tools.builtins)),
+        ctx_template: ToolCtx {
+            readable_roots,
+            writable_roots,
+            cwd,
+            timeout: Duration::from_secs(cfg.tools.timeout_secs),
+            max_output_bytes: cfg.tools.max_output_bytes,
+            network: cfg.tools.network,
+            cancel: CancellationToken::new(),
+            clock,
+        },
+        permission_profile: joi_core::tools::PermissionProfile {
+            rules: cfg.tools.permissions.clone(),
+        },
+    }
+}
+
+fn roots_or_cwd(roots: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
+    if roots.is_empty() {
+        return vec![normalize_path(cwd)];
+    }
+    roots
+        .iter()
+        .map(|root| {
+            if root.is_absolute() {
+                normalize_path(root)
+            } else {
+                normalize_path(&cwd.join(root))
+            }
+        })
+        .collect()
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// Whether the engine drives local audio/screen devices itself.
@@ -107,7 +155,7 @@ impl JoiApp {
         match joi_providers::build_session_factory(&config) {
             Ok(factory) => {
                 let factory: Arc<dyn SessionFactory> = Arc::from(factory);
-                let clock = Arc::new(SystemClock);
+                let clock: Arc<dyn Clock> = Arc::new(SystemClock);
                 // Persist this run's conversation as a new session under ~/.joi/sessions. Falls back
                 // to in-memory history if the dir is unset (headless/tests) or can't be created, so
                 // the app still runs. `config.history.dir` was resolved by `Config::load`.
@@ -141,7 +189,9 @@ impl JoiApp {
                 // Token-free reachability probe (provider-specific call, composed here so the
                 // engine stays provider-agnostic). `None` when the provider has no probe / no key.
                 let probe = joi_providers::build_connectivity_probe(&config);
-                let handle = SessionManager::spawn(config, clock, history, factory, probe);
+                let tool_runtime = build_tool_runtime(&config, clock.clone());
+                let handle =
+                    SessionManager::spawn(config, clock, history, factory, probe, tool_runtime);
                 let media = match media_mode {
                     MediaMode::LocalDevices => Some(MediaEngine::new(handle.clone(), media_config)),
                     MediaMode::None => None,
@@ -199,6 +249,18 @@ impl JoiApp {
     /// Send typed text to the model.
     pub async fn send_text(&self, text: &str) -> Result<(), SessionError> {
         self.session()?.send_text(text).await
+    }
+
+    /// Resolve a pending tool permission prompt.
+    pub async fn resolve_tool_permission(
+        &self,
+        epoch: u64,
+        id: joi_core::tools::ToolCallId,
+        approve: bool,
+    ) -> Result<(), SessionError> {
+        self.session()?
+            .resolve_tool_permission(epoch, id, approve)
+            .await
     }
 
     /// Push a mic frame (16 kHz mono PCM16) — for headless hosts; the desktop/TUI's `MediaEngine`

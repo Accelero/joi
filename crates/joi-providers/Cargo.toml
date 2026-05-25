@@ -14,7 +14,7 @@ workspace = true
 default = ["mock", "gemini"]
 mock = []
 # `gemini` pulls the adk-realtime adapter. Only its `gemini` backend feature is enabled — not
-# openai/livekit/vertex — to keep the dependency tree minimal (PLAN §7.4).
+# openai/livekit/vertex — to keep the dependency tree minimal.
 gemini = ["dep:adk-realtime", "dep:rustls", "dep:reqwest"]
 
 [dependencies]

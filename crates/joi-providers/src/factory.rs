@@ -1,6 +1,6 @@
 //! Provider selection — the composition-root helper that turns [`Config`] + the API key into a
-//! [`SessionFactory`] (PLAN §5: "only the composition root wires them together; the manager never
-//! names a concrete provider").
+//! [`SessionFactory`]. Only the composition root wires providers together; the manager never names a
+//! concrete provider.
 //!
 //! This lives here, not in `joi-core` (which must stay provider-agnostic). It is pure and fully
 //! unit-testable without devices or a host.

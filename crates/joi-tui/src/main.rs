@@ -1,4 +1,4 @@
-//! Native terminal-UI host for the JOI engine (Seam A). The only frontend built today (PLAN §2).
+//! Native terminal-UI host for the JOI engine (Seam A). The only frontend built today.
 //! Unlike the headless integration test (which runs [`MediaMode::None`](joi_app::MediaMode::None)),
 //! the TUI is a native process, so it drives the engine in
 //! [`MediaMode::LocalDevices`](joi_app::MediaMode::LocalDevices): real cpal mic/playback + xcap
@@ -171,6 +171,12 @@ async fn run_command(app: &JoiApp, model: &mut app::AppModel, command: app::Comm
             {
                 tracing::warn!("set voice failed: {e}");
             }
+        }
+        Command::ResolveToolPermission { epoch, id, approve } => {
+            log_command_err(
+                "resolve_tool_permission",
+                app.resolve_tool_permission(epoch, id, approve).await,
+            );
         }
     }
 }

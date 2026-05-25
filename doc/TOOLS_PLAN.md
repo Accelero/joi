@@ -1,29 +1,35 @@
 # Joi — Tool System Plan (built-in tools first, MCP-ready)
 
-> **Status:** plan, not yet implemented. Normative for the tool feature: it describes the layers,
-> types, and pipeline the implementation must follow. Read `doc/ARCH.md` (layering) and `doc/SPEC.md`
-> (`FR-24/25`, `SEC-3..6`) first. The realtime/provider seam already reserves the tool hooks
-> (`joi-core/src/tools.rs`, `SessionConfig.tools`, `SessionEvent::ToolCall`,
-> `RealtimeSession::send_tool_result`, `Capabilities.async_tool_calls`) — this plan fills them in.
+> **Status:** built-in tool pipeline implemented; MCP and hardening remain planned. Normative for
+> follow-up tool work: it describes the target layers, type surface, and pipeline. Read `doc/ARCH.md`
+> (layering) and `doc/SPEC.md` (`FR-24/25`, `SEC-3..6`) first. The current tree has the core
+> registry/permission/dispatch pipeline, `crates/joi-tools`, Gemini/Mock provider bridges, and app
+> injection behind `tools.enabled=false` defaults.
 >
-> **Reference implementation studied:** `anomalyco/opencode` (`packages/opencode/src/tool/*`,
-> `packages/llm/src/tool.ts`, `packages/llm/src/protocols/utils/gemini-tool-schema.ts`). We borrow
-> its proven shapes — one tool type with typed *and* dynamic (JSON-Schema) construction,
-> description-as-data, command-AST permission analysis, output caps, helpful error returns, and an
-> isolated Gemini-schema projection — and adapt them to Joi's Rust/actor architecture.
+> **Reference implementation studied:** OpenCode's public tool/agent docs and current `sst/opencode`
+> source (`packages/opencode/src/tool/*`), plus OpenAI Codex's public Rust CLI docs and current
+> `codex-rs/core/src/tools/*` source. We borrow the durable shapes — one registry for built-ins and
+> external tools, dedicated file/search tools instead of overusing shell, description-as-data,
+> command-AST permission analysis, policy-driven approval, output caps, helpful error returns,
+> provider-specific schema projection, and a central approval/sandbox/execution pipeline — and adapt
+> them to Joi's realtime Rust actor architecture.
 
 ---
 
 ## 1. Goals & non-goals
 
-**Goal.** Give the model four permission-gated, sandboxed built-in tools — **`read`, `write`,
-`edit`, `bash`** — through Joi's existing realtime seam, using **native structured function calling**
-(no text parsing), proven end-to-end **headless** with the Mock provider. Build every shared piece so
-that **MCP tools later slot in as just another source of `dyn Tool`**, reusing the entire pipeline.
+**Goal.** Give the model a small agent-harness built-in set — **`read`, `list`, `glob`, `grep`,
+`write`, `edit`, `bash`** — through Joi's existing realtime seam, using **native structured function
+calling** (no text parsing), proven end-to-end **headless** with the Mock provider. The set deliberately
+includes dedicated search/navigation tools so routine codebase inspection does not require shell
+approval. Build every shared piece so that **MCP tools later slot in as just another source of
+`dyn Tool`**, reusing the entire pipeline.
 
-**Non-goals (this pass).** No MCP client yet (designed-for, §12). No declarative/manifest tools. No
-WASM plugins. No memory tool (`FR-25`) yet — it drops onto the same seam later. No `async`/non-blocking
-tool calls (`Capabilities.async_tool_calls` stays `false`; calls are request/response within a turn).
+**Remaining non-goals.** No MCP client yet (designed-for, §12). No declarative/manifest tools. No
+WASM plugins. No memory tool (`FR-25`) yet — it drops onto the same seam later. No subagent/task tool,
+LSP tool, web tools, todo tool, skill loader, or patch/multiedit tool in the first built-in pass; those
+are follow-ups after the common pipeline is proven. No provider-declared async/non-blocking tool calls
+(`Capabilities.async_tool_calls` stays `false`; calls are request/response within a turn).
 
 **Invariant carried from `ARCH.md`.** All logic in Rust; the frontend only renders tool/permission
 events and dispatches a resolve command. Mechanism (registry, validation, dispatch, permission state
@@ -50,42 +56,64 @@ pipeline**:
  └──────────┘                                                       └────────────────────┘
 ```
 
-The registry, JSON-Schema validation, the permission gate, the sandbox-bearing `ToolCtx`, output
+The registry, schema-shaped argument validation, the permission gate, the sandbox-bearing `ToolCtx`, output
 caps, the `UiEvent`s, the transcript rendering, and the provider-side schema projection are **source-
 agnostic**. Adding MCP means adding a *source* (and an MCP client) — never touching the pipeline.
+
+The pipeline order is fixed and must stay central:
+
+```
+model call → schema validate → tool resolves permission request → core policy allow/ask/deny
+           → sandbox/context selection → spawned execution → cap/shape output
+           → send provider tool result → emit UI/tool audit events
+```
+
+That order is the architectural guardrail. Provider adapters never run tools; tool implementations
+never prompt; the TUI never decides policy; and `bash` does not become the generic escape hatch for
+basic codebase inspection.
 
 ---
 
 ## 3. Layering — where each piece lives
 
 ```
-joi-core   (mechanism: contracts + registry + validation + dispatch + permission state machine)
+joi-core   (mechanism: contracts + registry + validation + policy + dispatch + permission state machine)
   ▲   ▲
-  │   └── joi-tools   NEW, sealed: read/write/edit/bash impls, sandbox, bash command analysis
-  │                   (deps: tree-sitter + tree-sitter-bash, tokio process; depends on joi-core)
+  │   └── joi-tools   sealed: read/list/glob/grep/write/edit/bash impls, sandbox,
+  │                   hashline editing + conservative bash classification
+  │                   (tokio process; depends on joi-core)
   └────── joi-providers   Gemini: schema sanitizer, FunctionCall* mapping, send_tool_result
 joi-app    builds the ToolRegistry from config (built-in now, MCP later) and injects it; adds the
            resolve_tool_permission command
 joi-tui    renders tool-call/result lines + the permission modal; dispatches ResolveToolPermission
 ```
 
-**New crate `crates/joi-tools/`** (added to the workspace `members`). It mirrors how
+**Crate `crates/joi-tools/`** (added to the workspace `members`). It mirrors how
 `joi-providers`/`joi-media` are sealed: concrete behavior behind a core trait. Layout:
 
 ```
 crates/joi-tools/
   src/{lib, registry_build, sandbox, fs_path}.rs
   src/read/{mod.rs, description.md}
+  src/list/{mod.rs, description.md}
+  src/glob/{mod.rs, description.md}
+  src/grep/{mod.rs, description.md}
   src/write/{mod.rs, description.md}
   src/edit/{mod.rs, description.md}
-  src/bash/{mod.rs, description.md, analyze.rs}   # analyze.rs = tree-sitter command classification
+  src/bash/{mod.rs, description.md}
 ```
 
+Target `joi-tools` implementation deps for future hardening: `ignore` + `globset` for walks/globs,
+`regex` (or `grep-searcher`) for content search and `tokio::process` for `bash`. The initial
+implementation uses a smaller dependency set and keeps all concrete tool execution out of `joi-core`.
+
 **`check.sh` dependency assertions to add** (mirrors §7 of `ARCH.md`):
-- `joi-core` carries **no** `tree-sitter`/`tree-sitter-bash` and no tool-execution crate.
-- `joi-tui` depends on `joi-app` + `joi-core` only — **never** `joi-tools` (it uses the `UiEvent`/
-  `Command` types from core, not tool impls).
-- the existing `jsonschema` (validation) is allowed in `joi-core` (pure, no device I/O).
+- `joi-core` carries **no** concrete tool-execution crate.
+- `joi-tui` uses `UiEvent`/`Command` types from core and never names concrete tool impls.
+- Full `jsonschema` validation is optional future hardening; the initial implementation validates
+  the object/required/type subset emitted by built-ins.
+- `tokio-util` is added where `CancellationToken` lives; `joi-tools` enables the `tokio/process`
+  functionality it needs for `bash`.
 
 ---
 
@@ -105,20 +133,26 @@ Vec<ToolSchema>` (mod.rs:49), `RealtimeSession::send_tool_result` (mod.rs:117), 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
-    /// Classify this specific call. `Auto` runs without a prompt; `Ask` carries the *resolved*
-    /// action to show the user (e.g. the exact file path, or the parsed shell commands).
-    fn permission(&self, args: &serde_json::Value, ctx: &ToolCtx) -> Permission { Permission::Auto }
+    /// Classify this specific call. The tool returns the resolved action; core applies the configured
+    /// permission profile to it (`allow`/`ask`/`deny`) before execution.
+    fn permission(&self, args: &serde_json::Value, ctx: &ToolCtx) -> Permission;
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> ToolResult;
 }
 
-pub enum Permission {
-    Auto,
-    Ask { summary: String, detail: String },   // summary = one line; detail = full resolved action
+pub enum PermissionAction { Allow, Ask, Deny }
+
+pub struct Permission {
+    pub key: PermissionKey,          // read | edit | glob | grep | list | bash | external_directory | mcp:<server>
+    pub subject: String,             // normalized path, glob, grep pattern, bash command prefix, or tool name
+    pub default_action: PermissionAction,
+    pub summary: String,             // one line for transcript/modal
+    pub detail: String,              // full resolved action shown in trusted UI chrome
 }
 
 // Ambient context handed to every run (was an empty marker). Policy is injected here by joi-app.
 pub struct ToolCtx {
-    pub roots: Vec<PathBuf>,        // filesystem roots tools may touch (sandbox boundary)
+    pub readable_roots: Vec<PathBuf>, // filesystem roots tools may read (sandbox boundary)
+    pub writable_roots: Vec<PathBuf>, // filesystem roots tools may mutate
     pub cwd: PathBuf,
     pub timeout: Duration,
     pub max_output_bytes: usize,    // hard cap before a result reaches the model
@@ -141,9 +175,29 @@ impl ToolResult {
     pub fn error(msg: impl Into<String>) -> Self;      // ok=false, content={"error": msg}
 }
 
-// JSON-Schema validation of model args against a tool's schema (pure; `jsonschema` crate).
+// Schema-shaped validation of model args against a tool's schema (pure).
 pub fn validate_args(schema: &Value, args: &Value) -> Result<(), String>;
+
+// Core-owned policy engine, used for built-ins now and MCP later.
+pub struct PermissionProfile { /* ordered rules: exact/pattern subject -> allow|ask|deny */ }
+pub fn evaluate_permission(profile: &PermissionProfile, request: &Permission) -> PermissionAction;
+
+pub struct ToolRuntime {
+    pub registry: Arc<ToolRegistry>,
+    pub ctx_template: ToolCtx,
+    pub permission_profile: PermissionProfile,
+}
 ```
+
+Implementation note: today's `ToolCtx` is `#[derive(Copy)]` because it is empty. This plan removes
+`Copy`; the manager clones a template and replaces `cancel` per call.
+
+This is intentionally a two-step decision: a tool resolves the call into an auditable request, then
+core applies policy. That matches the direction of modern harnesses: `write` and `edit` share the
+`edit` permission key, `grep`/`glob`/`list` can be independently allowed, bash can match command
+prefix patterns, and future MCP tools use the same exact/pattern machinery under namespaced tool names.
+For the first implementation, pattern rules may be minimal (`*` and prefix/glob matching); the API must
+not hard-code built-in-only policy.
 
 ### 4.3 Event + command additions (the boundary contract)
 
@@ -173,7 +227,8 @@ provider event pump already uses (manager.rs:500-509).
 
 ### 5.1 New actor wiring
 
-- `SessionManager::spawn` gains a parameter `registry: Arc<ToolRegistry>` (stored on the actor).
+- `SessionManager::spawn` gains a parameter `tool_runtime: ToolRuntime` (stored on the actor; registry,
+  context template, and permission profile stay together).
 - Add `active_epoch: u64` to the actor. Increment it whenever the current provider session is invalidated
   (explicit stop, provider close/error, and before a new start). Capture it in every pending/running
   tool. The epoch is a race guard, not the primary stop mechanism: stop/close also cancels running
@@ -216,12 +271,14 @@ self.active_epoch = self.active_epoch.wrapping_add(1); // invalidate queued outc
 1. let epoch = self.active_epoch
 2. tool = registry.get(name)        — None ⇒ tool_tx.send(epoch error "unknown tool: {name}"); return
 3. validate_args(tool.schema, args) — Err(e) ⇒ tool_tx.send(epoch error "invalid arguments: {e}"); return
-4. match tool.permission(&args, &self.tool_ctx()):
-     Auto                   ⇒ spawn_tool(epoch, id, name, tool, args)            // run immediately
-     Ask { summary, detail} ⇒ pending.insert((epoch, id.clone()), PendingTool{ epoch, .. });
-                              emit UiEvent::ToolPermission{epoch,id,name,summary,detail};
-                              spawn a timeout task → Command::ResolveToolPermission{epoch,id, approve:false}
-                              after `tools.permission_timeout_secs` (SEC-4: times out to deny)
+4. request = tool.permission(&args, &self.tool_ctx()) — the resolved, auditable action
+5. match evaluate_permission(&self.permission_profile, &request):
+     Allow                  ⇒ spawn_tool(epoch, id, name, tool, args)            // run immediately
+     Deny                   ⇒ tool_tx.send(epoch error "denied by policy: {request.summary}"); return
+     Ask                    ⇒ pending.insert((epoch, id.clone()), PendingTool{ epoch, .. });
+                              emit UiEvent::ToolPermission{epoch,id,name,request.summary,request.detail};
+                              waits for Command::ResolveToolPermission{epoch,id, approve}
+                              (future hardening: timeout task → deny)
    also emit UiEvent::ToolCall{id,name, summary} so the transcript shows the invocation
 ```
 
@@ -348,9 +405,8 @@ If a future provider surfaces `FunctionCallDelta`, accumulate deltas keyed by ca
 the transcript deltas already use (gemini.rs:354). No provider should pass raw text arguments into the
 manager.
 
-The vendored Gemini adapter currently collapses `toolCall.functionCalls` to `calls.first()`. M2 must
-patch that adapter path to emit one `FunctionCallDone` per function call before claiming parallel
-tool-call support for Gemini.
+The vendored Gemini adapter is patched to emit one `FunctionCallDone` per entry in `functionCalls`.
+Keep that invariant before claiming parallel tool-call support for any provider.
 
 ### 6.4 Return the result (`send_tool_result`, override the default at session/mod.rs:117)
 
@@ -377,34 +433,47 @@ are authored by hand as `serde_json::json!` JSON-Schema objects in the OpenAPI s
 is near-identity for our own tools). Each tool returns **actionable errors** (e.g. "file not found;
 did you mean X?") so the model self-corrects.
 
-| Tool | Params (JSON-Schema) | Permission | Sandbox / limits |
+| Tool | Params (JSON-Schema) | Permission key / default | Sandbox / limits |
 |---|---|---|---|
-| **`read`** | `path: string`, `offset?: int`, `limit?: int` | `Auto` if `path` ∈ roots; else `Ask` | path canonicalized + must resolve under `roots`; line cap (2000) + byte cap (50 KB), "…truncated" marker (opencode constants) |
-| **`write`** | `path: string`, `content: string` | `Ask { "write <path>" }` | path under a **writable** root; refuse symlink escape; size cap |
-| **`edit`** | `path: string`, `old: string`, `new: string`, `replace_all?: bool` | `Ask { "edit <path>" }` | requires `old` to occur **exactly once** unless `replace_all` (the Joi-Edit uniqueness rule); path under writable root; returns a diff summary |
-| **`bash`** | `command: string`, `timeout_ms?: int` | `Auto` only if **every** parsed command ∈ read-only allowlist; else `Ask` with the resolved command list | unprivileged child, `cwd` ∈ roots, scrubbed env, network command policy defaults to deny, `timeout`, stdout/stderr byte cap |
+| **`read`** | `path: string`, `max_bytes?: int` | `read` / `Allow` inside readable roots | path canonicalized + must resolve under `readable_roots`; byte cap; returns `text` where every line is prefixed `line:hash|` for hash-addressed edits |
+| **`list`** | `path?: string`, `depth?: int`, `include_hidden?: bool` | `list` / `Allow` inside readable roots | bounded directory walk; ignores heavyweight dirs (`.git`, `target`, `node_modules`) unless requested; stable sorted output |
+| **`glob`** | `pattern: string`, `path?: string` | `glob` / `Allow` inside readable roots | `globset`/`ignore` walker; result count cap; dotfile and ignore behavior explicit in args |
+| **`grep`** | `pattern: string`, `path?: string`, `case_sensitive?: bool` | `grep` / `Allow` inside readable roots | match cap; each match includes line number, text, and the same `line:hash` tag used by `edit` |
+| **`write`** | `path: string`, `content: string` | `edit` / `Ask` | path under a **writable** root; refuse symlink escape; size cap; create parent dirs only when requested |
+| **`edit`** | `path: string`, `new: string`, `start?: string`, `end?: string`, `after?: string`, `old?: string`, `replace_all?: bool` | `edit` / `Ask` | preferred mode is hash-addressed: replace `start`..`end` inclusive or insert `after`, validating the current line hash before writing; legacy exact `old` replacement remains as fallback |
+| **`bash`** | `command: string`, `timeout_ms?: int` | `bash` / `Ask`; policy may allow proven read-only command patterns | non-interactive child, `cwd` under readable root and writable only per config, scrubbed env, network command policy defaults to deny, `timeout`, stdout/stderr byte cap |
 
-### 7.1 `bash` command analysis (`bash/analyze.rs`) — the SEC-4 enabler
+`write` and `edit` intentionally share the `edit` permission key, matching existing harness practice:
+users usually think in terms of "can this agent modify files?" rather than separate write/edit toggles.
+`read`, `list`, `glob`, and `grep` stay separate so a read-only agent can be broad or tight without
+forcing shell access.
 
-Port opencode's `shell.ts` idea with the Rust `tree-sitter` + `tree-sitter-bash` crates: parse
-`command` into an AST, walk `descendantsOfType("command")`, and for each extract the command name and
-its file/dir arguments (unquoting, expanding `~`/`$HOME`/`$PWD`). Classify:
+### 7.1 `bash` command classification — the SEC-4 enabler
+
+Joi is not a coding-only harness, so bash classification stays conservative and language-agnostic.
+Classify obvious command prefixes rather than depending on code-oriented parsers:
 - **read-only allowlist** (`ls`, `cat`, `pwd`, `echo`, `grep`, `rg`, `find`, `git status/log/diff`, …)
-  ⇒ contributes to `Auto` only when the command's flags are also safe. Examples: reject `find -exec`
-  and `find -delete`; reject shell redirections; run `git` with config/env that disables pagers and
-  external diff helpers; reject unknown flags whose behavior may execute helpers or write files.
+  ⇒ contributes to `Allow` only when the command is simple enough to classify.
 - **mutating** (`rm`, `mv`, `cp`, `mkdir`, `chmod`, `touch`, redirections `>`/`>>`, …) ⇒ forces
-  `Ask`, and the resolved targets go into the permission `detail`.
-- **network-capable commands** (`curl`, `wget`, `ssh`, package managers, language package installers,
-  etc.) ⇒ denied unless `tools.bash.network = true`, and even then still prompt unless explicitly
-  allowed. This is policy classification, not kernel-level network isolation.
+  `Ask`, and the resolved command goes into the permission `detail`.
+- **network-capable commands** (`curl`, `wget`, `ssh`, package managers, installers, etc.) ⇒ denied
+  unless `tools.network = true`, and even then still prompt unless explicitly allowed. This is policy
+  classification, not kernel-level network isolation.
 
-`permission(args)` returns `Auto` only when the whole pipeline is read-only **and** every touched path
-is within `roots`; otherwise `Ask { summary: first line, detail: the parsed command + targets }`. The
-gate is the backstop: argument expansion in a shell is undecidable in general (`$()`, variables, globs,
-aliases/functions, command substitutions), so **anything not provably read-only prompts or denies**, and
-the prompt shows what was parsed. Invoke `bash` without user rc files and with a scrubbed environment so
-aliases/functions cannot change command meaning.
+`permission(args)` returns a `Permission { key: bash, subject: normalized_command_prefix, ... }`.
+Its `default_action` is `Allow` only when the whole pipeline is provably read-only **and** every touched
+path is within `readable_roots`; mutating commands default to `Ask`; network-capable commands default
+to `Deny` unless network is enabled, then `Ask`. The policy profile may still tighten any of those.
+The gate is the backstop: argument expansion in a shell is undecidable in general (`$()`, variables,
+globs, aliases/functions, command substitutions), so **anything not provably read-only prompts or
+denies**, and the prompt shows what was parsed. Invoke `bash` without user rc files and with a scrubbed
+environment so aliases/functions cannot change command meaning.
+
+`bash` execution details are part of the contract, not implementation trivia: close stdin, allocate no
+TTY, set `NO_COLOR=1`, set `GIT_PAGER=cat`/`PAGER=cat`, set `LC_ALL=C`, clear tool-unrelated secrets,
+use `kill_on_drop`, kill the process group on cancellation/timeout, and return stdout/stderr/exit
+status as structured JSON. Interactive programs and commands that request a TTY return an actionable
+error rather than hanging the voice session.
 
 ---
 
@@ -413,15 +482,16 @@ aliases/functions cannot change command meaning.
 - **SEC-3 (no surface until enabled).** The registry is empty unless `tools.enabled = true`; an empty
   registry means `SessionConfig.tools` is empty and the no-op path (today's behavior) is preserved.
   Per-tool `enabled` flags gate each tool individually.
-- **SEC-4 (non-voice consent of the resolved action, timeout→deny).** The permission gate is driven by
-  `Permission::Ask` carrying the **resolved** action (path / parsed commands), surfaced as
-  `UiEvent::ToolPermission`, and resolved **only** by a keyboard `Command::ResolveToolPermission`
-  (never by voice). Unresolved gates auto-deny after `tools.permission_timeout_secs`.
+- **SEC-4 (non-voice consent of the resolved action).** Each tool first produces a
+  `Permission` request carrying the **resolved** action (path / parsed commands / MCP server+tool).
+  Core evaluates the request against a permission profile (`allow`/`ask`/`deny`, with exact and pattern
+  matches), surfaces `Ask` as `UiEvent::ToolPermission`, and resolves it **only** by
+  `Command::ResolveToolPermission` (never by voice). Future hardening should add timeout-to-deny.
 - **SEC-5 (sandboxed execution).** *This pass:* lightweight scoped — unprivileged child, `cwd`/paths
-  confined to `roots` (canonicalize + reject symlink/`..` escape), scrubbed environment, policy-level
-  denial/prompting for network-capable commands, wall-clock timeout, output byte cap, full `tracing` of
-  every executed command. This is not a kernel-enforced network sandbox; do not claim that network is
-  impossible until the strict OS sandbox follow-up lands.
+  confined to `readable_roots`/`writable_roots` (canonicalize + reject symlink/`..` escape), scrubbed
+  environment, policy-level denial/prompting for network-capable commands, wall-clock timeout, output
+  byte cap, full `tracing` of every executed command. This is not a kernel-enforced network sandbox;
+  do not claim that network is impossible until the strict OS sandbox follow-up lands.
   *Marked follow-up:* a strict OS sandbox (Linux `bubblewrap`/`landlock`) enforcing FS/network
   isolation in the kernel — slots behind the same `ToolCtx`/`run` boundary without pipeline changes.
 - **SEC-6 (anti-spoof).** The permission modal is TUI chrome rendered by `joi-tui` — never inside
@@ -440,42 +510,73 @@ configs keep SEC-3's "no tool surface until explicitly enabled" invariant. Per-t
 ```jsonc
 "tools": {
   "enabled": false,                      // master switch (SEC-3); set true to opt in
-  "roots": null,                         // null → [cwd, ~/.joi]; explicit list overrides
-  "permission_timeout_secs": 60,         // SEC-4 deny timeout
-  "max_output_bytes": 51200,             // 50 KB cap fed back to the model
-  "read":  { "enabled": true },
-  "write": { "enabled": true,  "permission": "ask" },
-  "edit":  { "enabled": true,  "permission": "ask" },
-  "bash":  { "enabled": true,  "permission": "ask", "network": false, "timeout_ms": 30000 }
+  "builtins": [],                        // [] → standard set
+  "readable_roots": [],                  // [] → [process cwd]; explicit list overrides
+  "writable_roots": [],                  // [] → [process cwd]; never defaults to ~/.joi
+  "timeout_secs": 30,
+  "max_output_bytes": 65536,
+  "network": false,
+  "permissions": [
+    { "key": "bash", "subject": "git status*", "action": "allow" }
+  ]
 }
 ```
 
-`validate()` checks: `permission_timeout_secs ≥ 1`; `max_output_bytes ≥ 1024`; `bash.timeout_ms` in a
-sane range; each `permission ∈ {auto, ask}`. Update `config/joi.example.json` and `doc/CONFIG.md`.
+`readable_roots`/`writable_roots` default to the process cwd because `~/.joi` contains config,
+sessions, prompts, and possibly secrets; it must not become tool-readable or writable by default.
+`validate()` checks: `timeout_secs ≥ 1`; `max_output_bytes ≥ 1024`; roots are absolute or
+resolvable from cwd; writable roots are also readable roots (or are explicitly added to both);
+`bash.timeout_ms` is in a sane range; each permission action is `allow`, `ask`, or `deny`; wildcard
+rules are ordered with last-match-wins. Update `config/joi.example.json` and `doc/SPEC.md`.
 
 ---
 
 ## 10. Composition — `joi-app`
 
 ```rust
-// new: build the registry from config (built-in now; MCP appended here later — §12).
-fn build_tool_registry(cfg: &Config) -> Arc<ToolRegistry> {
+// new: build the registry and permission profile from config (MCP appended here later — §12).
+fn build_tool_registry(cfg: &Config, cwd: &Path) -> ToolRuntime {
     let mut reg = ToolRegistry::default();
     if cfg.tools.enabled {
-        joi_tools::register_builtins(&mut reg, &cfg.tools);   // read/write/edit/bash per flags
+        joi_tools::register_builtins(&mut reg, &cfg.tools);   // read/list/glob/grep/write/edit/bash
     }
-    Arc::new(reg)
+    ToolRuntime {
+        registry: Arc::new(reg),
+        ctx_template: ToolCtx::from_config(cfg, cwd),
+        permission_profile: PermissionProfile::from_config(&cfg.tools.permission),
+    }
 }
 ```
 
 In `build_with_config_path` (lib.rs:96), after the factory branch (lib.rs:107) and before
-`SessionManager::spawn` (lib.rs:144), build the registry and pass it into `spawn(... , registry)`.
-Policy lives here (which tools, which roots, the in-memory-history fallback already present). Add the
-`JoiApp::resolve_tool_permission(epoch, id, approve)` method (mirrors the handle 1:1).
+`SessionManager::spawn` (lib.rs:144), build the registry/runtime and pass it into
+`spawn(..., tool_runtime)`. Policy lives here (which tools, which roots, cwd resolution, the
+in-memory-history fallback already present). Add the `JoiApp::resolve_tool_permission(epoch, id,
+approve)` method (mirrors the handle 1:1).
 
-`joi-tools::register_builtins` constructs each enabled tool with its config and inserts it — this is the
+`joi_tools::builtins` constructs each enabled tool with its config and inserts it — this is the
 sole place built-in tools are named, exactly as `build_session_factory` is the sole place a provider is
 named.
+
+### 10.1 Current codebase adaptations required
+
+The current tree has these bindings. Future changes should preserve them:
+
+- `crates/joi-core/src/tools.rs`: replace the empty `ToolCtx` marker with the real context, remove its
+  `Copy` derive, add `Permission`/`PermissionProfile`/`ToolRegistry`/`ToolRuntime`, and keep `ToolSchema`
+  and `ToolResult` provider-neutral.
+- `crates/joi-core/src/manager.rs`: replace the existing `SessionEvent::ToolCall { .. }` no-op with
+  the dispatch state machine; extend `Command`, `SessionManagerHandle`, and `SessionManager::spawn`.
+- `crates/joi-core/src/session/event.rs`: add the tool UI events to the serializable `UiEvent` enum.
+- `crates/joi-core/src/config.rs`: add `ToolsCfg` under the existing JSON config and keep defaults
+  disabled.
+- `crates/joi-app/src/lib.rs`: build and inject `ToolRuntime`; expose `resolve_tool_permission`.
+- `crates/joi-providers/src/gemini.rs`: project schemas into `RealtimeConfig::with_tools`, map
+  `FunctionCallDone` to `SessionEvent::ToolCall`, and override `send_tool_result`.
+- `vendor/adk-realtime/src/gemini/session.rs`: keep `toolCall.functionCalls` emitting one
+  `FunctionCallDone` per function call before claiming parallel tool-call support.
+- `crates/joi-providers/src/mock.rs`: add scripted tool-call fixtures and record tool results for
+  headless conformance tests.
 
 ---
 
@@ -498,18 +599,22 @@ Pure presentation over the new events (no logic):
 When MCP is built next, it is **a new tool source, not a pipeline rewrite**. What it reuses unchanged:
 
 - **`Tool` trait (dynamic mode).** An `McpTool { server, name, schema }` implements `Tool`: `schema()`
-  returns the server-advertised JSON Schema (the same `parameters: Value` shape), `permission(args, ctx)`
-  defaults to `Ask` (server tools are untrusted) unless annotated read-only, `run()` performs the
-  JSON-RPC call. Drops into the **same `ToolRegistry`**.
-- **Validation, gate, dispatch, `ToolCtx` caps, `UiEvent`s, transcript, timeout** — all source-agnostic.
+  returns the server-advertised JSON Schema (the same `parameters: Value` shape), `permission(args,
+  ctx)` returns a namespaced request such as `key=mcp:<server>`, `subject=<server>_<tool>`, defaulting
+  to `Ask` unless the server/tool is explicitly configured read-only, and `run()` performs the JSON-RPC
+  call. Drops into the **same `ToolRegistry`**.
+- **Validation, permission policy, gate, dispatch, `ToolCtx` caps, `UiEvent`s, transcript, timeout** —
+  all source-agnostic.
 - **The Gemini schema sanitizer** (§6.2) runs on MCP schemas too — server schemas are exactly the
   arbitrary-JSON-Schema case the projection was built for. Big reuse win.
 
 MCP-specific work (later, in `joi-tools` or a `joi-mcp` module): an MCP **client** (spawn/connect stdio
 or HTTP servers, the JSON-RPC framing, `tools/list` discovery, lifecycle/health), and a `[tools.mcp]`
-config block of server entries. `build_tool_registry` gains one step: append discovered MCP tools. The
-manager, providers, and TUI are untouched. **Design rule for this pass:** never put a tool-source
-assumption into the manager or the provider — they speak only `dyn Tool` and `ToolSchema`/`ToolResult`.
+config block of server entries. `build_tool_registry` gains one step: append discovered MCP tools. If
+MCP discovery must run before the session starts, `JoiApp::build_with_config_path` may need an async
+variant or the registry builder may need a lazy refresh before `start`; the manager/provider contract
+does not change. **Design rule for this pass:** never put a tool-source assumption into the manager or
+the provider — they speak only `dyn Tool` and `ToolSchema`/`ToolResult`.
 
 ---
 
@@ -525,40 +630,45 @@ assumption into the manager or the provider — they speak only `dyn Tool` and `
 - **`joi-providers`.** `gemini_tool_schema::sanitize` unit tests (port opencode's cases);
   `FunctionCall*` → `ToolCall` mapping over fixtures; **Mock provider emits a deterministic `ToolCall`**
   so the rest of the engine can be driven with no network. Run the testkit conformance against Mock.
-- **`joi-tools`.** `read`/`write`/`edit` happy paths **and** sandbox-escape rejection (`../`, symlink,
-  out-of-root); `edit` uniqueness rule; `bash` classification (read-only auto vs mutating ask), timeout,
-  output cap; assert each `description.md` is present and non-empty.
+- **`joi-tools`.** `read`/`list`/`glob`/`grep`/`write`/`edit` happy paths **and** sandbox-escape
+  rejection (`../`, symlink, out-of-root); `grep`/`glob` result caps; `edit` uniqueness rule; `bash`
+  classification (read-only allow vs mutating ask vs network deny), timeout, output cap; assert each
+  `description.md` is present and non-empty.
 - **`joi-app` headless gate (invariant #8).** Build `JoiApp(MediaMode::None, Mock)` with a registry
   holding `EchoTool`; Mock emits a `ToolCall`; assert the tool ran and the result returned and the
   `UiEvent`s fired — **no devices, no GUI**. This *is* the headless proof for the feature.
 - **`scripts/check.sh`.** Add the §3 dependency assertions; keep `fmt`/`clippy -D warnings`/`test`
   green.
-- **Manual E2E (Gemini key).** Ask the model to read a file, write one (approve the prompt), edit one,
-  and run `ls` (auto) then `rm` (prompted → deny → model reports denial). Confirm audio keeps flowing
-  during a long `bash`.
+- **Manual E2E (Gemini key).** Ask the model to list files, glob Rust files, grep for a symbol, read a
+  file, write one (approve the prompt), edit one, and run `ls` (allowed by policy) then `rm`
+  (prompted → deny → model reports denial). Confirm audio keeps flowing during a long `bash`.
 
 ---
 
 ## 14. Milestones (ordered; each ends green: build + tests + `clippy -D warnings`)
 
-- **M1 — core + tool config skeleton.** Add `ToolsCfg` with secure disabled defaults; extend
-  `Tool`/`ToolCtx`/`ToolResult`; add `Permission`, `ToolRegistry`, `validate_args`; add the
+- **M1 — core + tool config skeleton. DONE.** Add `ToolsCfg` with secure disabled defaults; extend
+  `Tool`/`ToolCtx`/`ToolResult`; add `Permission`, `PermissionProfile`, `ToolRegistry`,
+  `validate_args`; add the
   `UiEvent`/`Command` variants; implement the manager dispatch state machine (internal
   `tool_tx`/`tool_rx`, epoch-keyed `pending`, `running` cancellation, timeout, `spawn_tool`,
   `complete_tool`) + `registry` param on `spawn`. Unit-tested with `EchoTool` + extended
   `ScriptedSession`, including cancellation on stop/close and stale-result drop across stop/restart.
   *Done:* `cargo test -p joi-core` green; no new device deps.
-- **M2 — providers.** `gemini_tool_schema` sanitizer + `with_tools` in `connect`; `FunctionCall*`
-  mapping; `send_tool_result`; Mock emits a `ToolCall`. *Done:* provider tests + conformance green.
-- **M3 — joi-tools (fs tools).** New crate; `read`/`write`/`edit` + `sandbox`/`fs_path` + description
-  files; `register_builtins` (fs only). *Done:* `cargo test -p joi-tools` incl. sandbox-escape tests.
-- **M4 — joi-tools (bash).** `bash` + `analyze.rs` (tree-sitter), permission classification, lightweight
-  sandbox, timeout, output cap; wire into `register_builtins`. *Done:* bash classification/timeout tests.
-- **M5 — joi-app + config docs.** `build_tool_registry` + injection; `resolve_tool_permission`; example
-  config + `CONFIG.md`; `check.sh` assertions added. *Done:* the headless gate test passes.
-- **M6 — joi-tui.** Transcript tool lines + permission modal + keys; reducers unit-tested without a
+- **M2 — providers. PARTIAL DONE.** `with_tools` in `connect`; `FunctionCallDone`
+  mapping; `send_tool_result`; Mock emits a `ToolCall`. Remaining: full Gemini schema sanitizer tests.
+- **M3 — joi-tools (read/search/fs tools). INITIAL DONE.** New crate; `read`/`list`/`glob`/`grep`/`write`/`edit` +
+  `sandbox`/`fs_path` + description files; `register_builtins` (non-bash only). *Done:*
+  `cargo test -p joi-tools` incl. sandbox-escape and result-cap tests.
+- **M4 — joi-tools (bash). PARTIAL DONE.** `bash` exists with non-interactive execution, timeout, and
+  simple read-only/network classification. Remaining: stronger generic command classification,
+  lightweight sandbox hardening, and broader output-cap tests. *Done:* bash classification/timeout
+  tests cover allow/ask/deny policy outcomes.
+- **M5 — joi-app + config docs. DONE.** `build_tool_registry` + injection; `resolve_tool_permission`; example
+  config + `SPEC.md`; `check.sh` assertions added. *Done:* the headless gate test passes.
+- **M6 — joi-tui. DONE.** Transcript tool lines + permission modal + keys; reducers unit-tested without a
   terminal. *Done:* manual E2E (§13) passes against a live key.
-- **M7 — docs.** Flip `FR-24` from `[LATER]` to done in `SPEC.md`; note the tool layer in `ARCH.md`
+- **M7 — docs. DONE.** Flip `FR-24` from `[LATER]` to done in `SPEC.md`; note the tool layer in `ARCH.md`
   (mechanism in core, sealed `joi-tools`, MCP-ready registry); update `CLAUDE.md` status.
 - **(future) M8 — MCP.** Per §12: MCP client + `[tools.mcp]` config + one extra `build_tool_registry`
   step. No pipeline changes.
@@ -585,8 +695,9 @@ assumption into the manager or the provider — they speak only `dyn Tool` and `
 - **Post-result continuation.** Verify in M2 whether adk needs an explicit trigger after
   `send_tool_response` or the Live model auto-continues (typed text needs `create_response`; tool
   responses should not — confirm).
-- **Sandbox escape.** Canonicalize paths and reject anything resolving outside `roots`, including via
-  symlink and `..`; the keyboard gate is the backstop for the undecidable shell-expansion cases.
+- **Sandbox escape.** Canonicalize paths and reject anything resolving outside
+  `readable_roots`/`writable_roots`, including via symlink and `..`; the keyboard gate is the backstop
+  for the undecidable shell-expansion cases.
 - **Network isolation.** The MVP has policy-level denial/prompting for network-capable commands, not
   kernel network isolation. True "network off" requires the strict OS sandbox follow-up.
 - **Token/window blowout.** `cap_output` before `send_tool_result`; tool output competes with the Live
