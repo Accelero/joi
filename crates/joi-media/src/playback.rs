@@ -119,7 +119,7 @@ impl Playback {
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
-                let (cb_buffer, render) = (Arc::clone(&buffer), Arc::clone(render_sink));
+                let (cb_buffer, render) = (Arc::clone(&buffer), render_sink.clone());
                 device.build_output_stream(
                     &config,
                     move |out: &mut [f32], _| {
@@ -137,7 +137,7 @@ impl Playback {
                 )
             }
             cpal::SampleFormat::I16 => {
-                let render = Arc::clone(render_sink);
+                let render = render_sink.clone();
                 device.build_output_stream(
                     &config,
                     move |out: &mut [i16], _| {
@@ -181,17 +181,11 @@ impl Playback {
     }
 }
 
-/// Forward the just-emitted playback samples (device-rate mono) to the AEC far-end reference, if a
-/// capture session has wired one. Called from the realtime output callback, so it must not block:
-/// the channel is unbounded (`send` never waits) and the lock is uncontended except at a session's
-/// start/stop. This is the reference *actually* emitted (post jitter-buffer), so it stays aligned
-/// with the echo the mic picks up — unlike feeding raw provider audio as it arrives.
+/// Forward the just-emitted playback samples (device-rate mono) to the AEC far-end reference.
+/// Called from the realtime output callback, so it must not block. The bounded queue drops on
+/// overflow; capture keeps the newest render reference inside AEC's delay-tracking range.
 fn forward_render(render_sink: &RenderSink, mono: &[i16]) {
-    if let Ok(sink) = render_sink.lock() {
-        if let Some(tx) = sink.as_ref() {
-            let _ = tx.send(mono.to_vec());
-        }
-    }
+    render_sink.try_send(mono);
 }
 
 /// Pull `frames` mono samples from the shared buffer, returning silence on lock poisoning.

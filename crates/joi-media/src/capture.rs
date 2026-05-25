@@ -4,13 +4,14 @@
 //! PCM16 for the session. Gemini only does VAD, so a leveled, denoised, echo-free mic improves
 //! detection and stops the model interrupting itself when playing through speakers.
 //!
-//! **AEC:** the playback engine's provider audio is forwarded here as the render (far-end)
-//! reference via `render_rx`; the APM subtracts it from the mic so Joi's own voice picked up by the
-//! speakers doesn't read as user speech (which otherwise triggers a barge-in feedback loop).
+//! **AEC:** the playback engine forwards emitted device-rate samples into a bounded render
+//! reference queue; capture drains that queue before APM and the APM subtracts it from the mic so
+//! Joi's own voice picked up by the speakers doesn't read as user speech (which otherwise triggers
+//! a barge-in feedback loop).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -42,7 +43,7 @@ pub struct CaptureHandle {
 /// arrive at (`rate`, the playback device rate). Capture resamples them to the APM rate.
 pub struct RenderRef {
     /// Stream of emitted playback samples, forwarded from the playback output callback.
-    pub rx: Receiver<Vec<i16>>,
+    pub rx: Arc<Mutex<Receiver<Vec<i16>>>>,
     /// Sample rate of those samples (the playback device rate).
     pub rate: u32,
 }
@@ -64,8 +65,9 @@ pub struct ApmConfig {
 /// PCM16 frames of `frame_samples` are pushed to `frames`, dropped on overflow. While `muted` is
 /// set, no audio is captured (the manager separately tells the provider the stream paused).
 /// Capture stops when the returned [`CaptureHandle`] is dropped.
-/// `render_rx` carries the provider audio Joi is playing — the AEC far-end reference (24 kHz PCM16,
-/// [`AudioFormat::OUTPUT`]). It ends when the engine clears the render sink on stop.
+/// `render` carries the provider audio Joi is actually emitting through the playback device — the
+/// AEC far-end reference at the playback device rate. Capture drains the bounded queue and runs APM
+/// before any frame reaches the rest of the program.
 #[must_use]
 pub fn spawn_capture(
     device_name: String,
@@ -177,11 +179,9 @@ fn run_capture(
             break;
         }
         // Buffer the far-end reference (what we're playing); `process` consumes it 1:1 with capture
-        // frames so the AEC sees both at the same cadence. Drains all that's queued; ends quietly
-        // once the render sink is dropped on stop.
-        while let Ok(chunk) = render.rx.try_recv() {
-            pipeline.buffer_render(&chunk);
-        }
+        // frames so the AEC sees both at the same cadence. The source is a bounded always-on queue
+        // owned by the media engine, so stale render is capped and playback never blocks.
+        pipeline.drain_render(render);
         match raw_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(mono) => {
                 pipeline.diag.on_input(&mono, device_rate);
@@ -256,6 +256,8 @@ struct CaptureDiag {
     frames_since_log: usize,
     rx_samples: u64,
     rx_since: std::time::Instant,
+    render_backlog_peak: usize,
+    render_backlog_dropped: u64,
 }
 
 #[cfg(debug_assertions)]
@@ -270,6 +272,8 @@ impl CaptureDiag {
             frames_since_log: 0,
             rx_samples: 0,
             rx_since: std::time::Instant::now(),
+            render_backlog_peak: 0,
+            render_backlog_dropped: 0,
         }
     }
 
@@ -300,11 +304,15 @@ impl CaptureDiag {
         let post_apm_dbfs = self.post_apm.drain_dbfs();
         if self.echo_cancellation {
             let render_dbfs = self.render.drain_dbfs();
+            let render_backlog_ms = self.render_backlog_ms();
+            let render_backlog_dropped = self.drain_render_backlog_dropped();
             tracing::debug!(
                 raw_dbfs,
                 pre_apm_dbfs,
                 post_apm_dbfs,
                 render_dbfs,
+                render_backlog_ms,
+                render_backlog_dropped,
                 "mic levels (dBFS)"
             );
         } else {
@@ -331,6 +339,26 @@ impl CaptureDiag {
         self.rx_samples = 0;
         self.rx_since = std::time::Instant::now();
     }
+
+    fn on_render_backlog(&mut self, samples: usize) {
+        self.render_backlog_peak = self.render_backlog_peak.max(samples);
+    }
+
+    fn on_render_backlog_drop(&mut self, samples: usize) {
+        self.render_backlog_dropped = self.render_backlog_dropped.saturating_add(samples as u64);
+    }
+
+    fn render_backlog_ms(&mut self) -> u64 {
+        let samples = self.render_backlog_peak;
+        self.render_backlog_peak = 0;
+        (samples as u64).saturating_mul(1000) / u64::from(APM_RATE)
+    }
+
+    fn drain_render_backlog_dropped(&mut self) -> u64 {
+        let dropped = self.render_backlog_dropped;
+        self.render_backlog_dropped = 0;
+        dropped
+    }
 }
 
 /// Release stub: zero-sized, all methods no-ops — the diagnostics aren't compiled into the binary.
@@ -355,6 +383,10 @@ impl CaptureDiag {
     fn on_apm_frame(&mut self) {}
     #[inline]
     fn on_input(&mut self, _mono: &[f32], _assumed_rate: u32) {}
+    #[inline]
+    fn on_render_backlog(&mut self, _samples: usize) {}
+    #[inline]
+    fn on_render_backlog_drop(&mut self, _samples: usize) {}
 }
 
 /// Resample → APM (echo cancellation + noise suppression + AGC) → 20 ms PCM16 framing. Lives on the
@@ -474,6 +506,17 @@ impl CapturePipeline {
         if self.render_in.len() > MAX_RENDER_BACKLOG {
             let excess = self.render_in.len() - MAX_RENDER_BACKLOG;
             self.render_in.drain(..excess);
+            self.diag.on_render_backlog_drop(excess);
+        }
+        self.diag.on_render_backlog(self.render_in.len());
+    }
+
+    fn drain_render(&mut self, render: &RenderRef) {
+        let Ok(rx) = render.rx.lock() else {
+            return;
+        };
+        while let Ok(chunk) = rx.try_recv() {
+            self.buffer_render(&chunk);
         }
     }
 }

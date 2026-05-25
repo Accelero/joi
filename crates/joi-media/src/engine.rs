@@ -15,11 +15,41 @@ use crate::capture::{spawn_capture, ApmConfig, CaptureHandle, RenderRef};
 use crate::playback::{spawn_playback, PlaybackCmd};
 use crate::screen::{spawn_screen_capture, ScreenHandle};
 
-/// Sink for the active capture's echo-cancellation reference: the provider audio Joi is playing.
-/// `Some` only while capturing; the playback pump forwards each chunk so the capture APM can
-/// subtract Joi's own voice from the mic (AEC). A `std::sync::mpsc` channel bridges the async pump
-/// to the synchronous capture thread.
-pub(crate) type RenderSink = Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<i16>>>>>;
+/// Bounded, stable sink for the echo-cancellation render reference: the provider audio Joi is
+/// actually emitting through playback. Playback writes from its realtime callback with `try_send`
+/// only while this sink is atomically enabled; capture drains it on its processing thread before
+/// feeding AEC. Keeping this stable avoids a session-lifecycle mutex in the playback callback and
+/// makes stale-reference latency bounded.
+#[derive(Clone)]
+pub(crate) struct RenderSink {
+    tx: std::sync::mpsc::SyncSender<Vec<i16>>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl RenderSink {
+    pub(crate) fn new(tx: std::sync::mpsc::SyncSender<Vec<i16>>) -> Self {
+        Self {
+            tx,
+            enabled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn try_send(&self, samples: &[i16]) {
+        if self.enabled.load(Ordering::Relaxed) {
+            let _ = self.tx.try_send(samples.to_vec());
+        }
+    }
+}
+
+pub(crate) type RenderSource = Arc<Mutex<std::sync::mpsc::Receiver<Vec<i16>>>>;
+
+/// About 200 ms worth of typical 44.1/48 kHz callback chunks. Overflow drops render reference rather
+/// than blocking playback; capture also caps the post-resample APM backlog.
+const RENDER_QUEUE_CHUNKS: usize = 64;
 
 /// Native-media settings, sourced from `Config` by the composition root.
 #[derive(Debug, Clone)]
@@ -61,8 +91,10 @@ pub struct MediaEngine {
     frame_tx: tokio::sync::mpsc::Sender<VideoFrame>,
     /// Active screen capture (present only while sharing); dropping it stops capture.
     screen: Mutex<Option<ScreenHandle>>,
-    /// Echo-cancellation reference sink for the active capture (see [`RenderSink`]).
+    /// Echo-cancellation reference sink used by playback (see [`RenderSink`]).
     render_sink: RenderSink,
+    /// Echo-cancellation reference source drained by active capture.
+    render_source: RenderSource,
     /// Playback device sample rate, published by the playback engine once its stream opens. The
     /// AEC reference is tapped at the playback output at this rate; capture resamples it to the APM
     /// rate. `0` until playback has started.
@@ -78,13 +110,15 @@ impl MediaEngine {
         let (cap_tx, cap_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<VideoFrame>(8);
         let mic_muted = Arc::new(AtomicBool::new(false));
-        let render_sink: RenderSink = Arc::new(Mutex::new(None));
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel(RENDER_QUEUE_CHUNKS);
+        let render_sink = RenderSink::new(render_tx);
+        let render_source: RenderSource = Arc::new(Mutex::new(render_rx));
         let playback_rate = Arc::new(AtomicU32::new(0));
 
         spawn_playback_pump(
             &handle,
             config.output_device.clone(),
-            Arc::clone(&render_sink),
+            render_sink.clone(),
             Arc::clone(&playback_rate),
         );
         spawn_audio_drain(handle.clone(), cap_rx);
@@ -98,6 +132,7 @@ impl MediaEngine {
             frame_tx,
             screen: Mutex::new(None),
             render_sink,
+            render_source,
             playback_rate,
         }
     }
@@ -112,13 +147,8 @@ impl MediaEngine {
             if cap.is_some() {
                 return; // already capturing
             }
-            // A fresh render channel; the playback pump forwards provider audio here as the
-            // echo-cancellation reference. Only wire the sink when AEC is on — otherwise the sender
-            // is dropped immediately and nothing is forwarded (capture won't use it anyway).
-            let (render_tx, render_rx) = std::sync::mpsc::channel::<Vec<i16>>();
-            if let Ok(mut sink) = self.render_sink.lock() {
-                *sink = self.config.echo_cancellation.then_some(render_tx);
-            }
+            drain_render_source(&self.render_source);
+            self.render_sink.set_enabled(self.config.echo_cancellation);
             // The AEC reference arrives at the playback device rate (tapped at the output callback);
             // capture resamples it to the APM rate. Fall back to the provider rate if playback hasn't
             // published its rate yet (no playback => no reference anyway).
@@ -132,7 +162,7 @@ impl MediaEngine {
                 self.config.frame_samples,
                 Arc::clone(&self.mic_muted),
                 RenderRef {
-                    rx: render_rx,
+                    rx: Arc::clone(&self.render_source),
                     rate: render_rate,
                 },
                 ApmConfig {
@@ -150,9 +180,8 @@ impl MediaEngine {
         if let Ok(mut cap) = self.capture.lock() {
             *cap = None;
         }
-        if let Ok(mut sink) = self.render_sink.lock() {
-            *sink = None; // stop forwarding the AEC reference
-        }
+        self.render_sink.set_enabled(false);
+        drain_render_source(&self.render_source);
     }
 
     /// App-level mute: gates native capture at the source, regardless of session state.
@@ -215,6 +244,12 @@ fn spawn_playback_pump(
             }
         }
     });
+}
+
+fn drain_render_source(render_source: &RenderSource) {
+    if let Ok(rx) = render_source.lock() {
+        while rx.try_recv().is_ok() {}
+    }
 }
 
 /// Captured mic frames → session (the manager gates muted audio).
