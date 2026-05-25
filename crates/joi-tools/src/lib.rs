@@ -304,7 +304,7 @@ impl Tool for WriteTool {
             return ToolResult::error("missing content");
         };
         let path = resolve_path(ctx, &path);
-        if !inside_any(&path, &ctx.writable_roots) {
+        if !is_safe_writable_path(&path, &ctx.writable_roots) {
             return ToolResult::error("path is outside writable roots");
         }
         if let Some(parent) = path.parent() {
@@ -357,7 +357,9 @@ impl Tool for EditTool {
             return ToolResult::error("missing new");
         };
         let path = resolve_path(ctx, &path);
-        if !inside_any(&path, &ctx.writable_roots) || !inside_any(&path, &ctx.readable_roots) {
+        if !is_safe_writable_path(&path, &ctx.writable_roots)
+            || !inside_any(&path, &ctx.readable_roots)
+        {
             return ToolResult::error("path is outside editable roots");
         }
         let text = match tokio::fs::read_to_string(&path).await {
@@ -421,8 +423,6 @@ impl Tool for BashTool {
         let command = arg_string(args, "command").unwrap_or_default();
         let action = if !ctx.network && looks_like_network_command(&command) {
             PermissionAction::Deny
-        } else if looks_read_only(&command) {
-            PermissionAction::Allow
         } else {
             PermissionAction::Ask
         };
@@ -537,6 +537,35 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
+}
+
+fn is_safe_writable_path(path: &Path, roots: &[PathBuf]) -> bool {
+    if !inside_any(path, roots) {
+        return false;
+    }
+
+    let Some(existing) = nearest_existing_path(path) else {
+        return false;
+    };
+    let Ok(existing) = std::fs::canonicalize(existing) else {
+        return false;
+    };
+
+    roots.iter().any(|root| {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        existing.starts_with(root)
+    })
+}
+
+fn nearest_existing_path(path: &Path) -> Option<&Path> {
+    let mut candidate = Some(path);
+    while let Some(path) = candidate {
+        if path.exists() {
+            return Some(path);
+        }
+        candidate = path.parent();
+    }
+    None
 }
 
 fn display_path(path: impl AsRef<Path>) -> String {
@@ -794,14 +823,6 @@ fn looks_like_network_command(command: &str) -> bool {
         })
 }
 
-fn looks_read_only(command: &str) -> bool {
-    let first = command.split_whitespace().next().unwrap_or_default();
-    matches!(
-        first,
-        "cat" | "ls" | "pwd" | "rg" | "grep" | "find" | "sed" | "head" | "tail" | "wc" | "git"
-    )
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -875,6 +896,28 @@ mod tests {
             .await;
         assert!(result.ok);
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "hi");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_rejects_symlink_escape() {
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::write(outside.join("target.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.join("target.txt"), root.join("link.txt")).unwrap();
+
+        let ctx = ctx(root);
+        let registry = builtins(&["write".to_string()]);
+        let tool = registry.get("write").unwrap();
+        let result = tool
+            .run(json!({"path": "link.txt", "content": "changed"}), &ctx)
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("target.txt")).unwrap(),
+            "outside"
+        );
     }
 
     #[tokio::test]
@@ -973,6 +1016,16 @@ mod tests {
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "alpha\nBETA\n"
         );
+    }
+
+    #[test]
+    fn bash_read_only_command_asks_for_approval() {
+        let root = temp_root();
+        let ctx = ctx(root);
+        let registry = builtins(&["bash".to_string()]);
+        let tool = registry.get("bash").unwrap();
+        let permission = tool.permission(&json!({"command": "ls"}), &ctx);
+        assert_eq!(permission.default_action, PermissionAction::Ask);
     }
 
     #[test]

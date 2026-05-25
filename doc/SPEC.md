@@ -178,8 +178,8 @@ Current config surface:
 | `ui.terminal.accent` | string | `#9aede4` | Hex or named color. |
 | `tools.enabled` | bool | `false` | Enables model-visible tools. |
 | `tools.builtins` | string[] | `[]` | Empty means the standard built-in set. |
-| `tools.readable_roots` | path[] | `[]` | Empty resolves to process cwd, not `~/.joi`. |
-| `tools.writable_roots` | path[] | `[]` | Empty resolves to process cwd, not `~/.joi`. |
+| `tools.readable_roots` | path[] | `[]` | Empty resolves to the filesystem root, so tools may read absolute paths. |
+| `tools.writable_roots` | path[] | `[]` | Empty resolves to the process launch cwd. |
 | `tools.timeout_secs` | u64 | `30` | Per-call timeout. |
 | `tools.max_output_bytes` | usize | `65536` | Minimum 1024. |
 | `tools.network` | bool | `false` | Allows obvious network shell commands only when true. |

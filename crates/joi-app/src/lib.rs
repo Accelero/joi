@@ -54,8 +54,9 @@ fn build_tool_runtime(cfg: &Config, clock: Arc<dyn Clock>) -> ToolRuntime {
         return ToolRuntime::disabled(clock);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let readable_roots = roots_or_cwd(&cfg.tools.readable_roots, &cwd);
-    let writable_roots = roots_or_cwd(&cfg.tools.writable_roots, &cwd);
+    let fs_root = filesystem_root();
+    let readable_roots = roots_or_default(&cfg.tools.readable_roots, &cwd, &fs_root);
+    let writable_roots = roots_or_default(&cfg.tools.writable_roots, &cwd, &cwd);
     ToolRuntime {
         registry: Arc::new(joi_tools::builtins(&cfg.tools.builtins)),
         ctx_template: ToolCtx {
@@ -74,9 +75,9 @@ fn build_tool_runtime(cfg: &Config, clock: Arc<dyn Clock>) -> ToolRuntime {
     }
 }
 
-fn roots_or_cwd(roots: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
+fn roots_or_default(roots: &[PathBuf], cwd: &Path, default_root: &Path) -> Vec<PathBuf> {
     if roots.is_empty() {
-        return vec![normalize_path(cwd)];
+        return vec![normalize_path(default_root)];
     }
     roots
         .iter()
@@ -88,6 +89,10 @@ fn roots_or_cwd(roots: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+fn filesystem_root() -> PathBuf {
+    PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -451,5 +456,32 @@ impl JoiApp {
         self.handle
             .as_ref()
             .map(SessionManagerHandle::subscribe_audio)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_read_roots_default_to_filesystem_root() {
+        let cwd = PathBuf::from("/tmp/joi");
+        let fs_root = filesystem_root();
+        assert_eq!(roots_or_default(&[], &cwd, &fs_root), vec![fs_root]);
+    }
+
+    #[test]
+    fn empty_write_roots_default_to_cwd() {
+        let cwd = PathBuf::from("/tmp/joi");
+        assert_eq!(roots_or_default(&[], &cwd, &cwd), vec![cwd]);
+    }
+
+    #[test]
+    fn explicit_relative_roots_resolve_against_cwd() {
+        let cwd = PathBuf::from("/tmp/joi");
+        assert_eq!(
+            roots_or_default(&[PathBuf::from("workspace")], &cwd, &cwd),
+            vec![PathBuf::from("/tmp/joi/workspace")]
+        );
     }
 }

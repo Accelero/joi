@@ -441,7 +441,7 @@ did you mean X?") so the model self-corrects.
 | **`grep`** | `pattern: string`, `path?: string`, `case_sensitive?: bool` | `grep` / `Allow` inside readable roots | match cap; each match includes line number, text, and the same `line:hash` tag used by `edit` |
 | **`write`** | `path: string`, `content: string` | `edit` / `Ask` | path under a **writable** root; refuse symlink escape; size cap; create parent dirs only when requested |
 | **`edit`** | `path: string`, `new: string`, `start?: string`, `end?: string`, `after?: string`, `old?: string`, `replace_all?: bool` | `edit` / `Ask` | preferred mode is hash-addressed: replace `start`..`end` inclusive or insert `after`, validating the current line hash before writing; legacy exact `old` replacement remains as fallback |
-| **`bash`** | `command: string`, `timeout_ms?: int` | `bash` / `Ask`; policy may allow proven read-only command patterns | non-interactive child, `cwd` under readable root and writable only per config, scrubbed env, network command policy defaults to deny, `timeout`, stdout/stderr byte cap |
+| **`bash`** | `command: string`, `timeout_ms?: int` | `bash` / `Ask`; policy may explicitly allow trusted command patterns | non-interactive child, `cwd` under readable root and writable only per config, scrubbed env, network command policy defaults to deny, `timeout`, stdout/stderr byte cap |
 
 `write` and `edit` intentionally share the `edit` permission key, matching existing harness practice:
 users usually think in terms of "can this agent modify files?" rather than separate write/edit toggles.
@@ -451,23 +451,21 @@ forcing shell access.
 ### 7.1 `bash` command classification — the SEC-4 enabler
 
 Joi is not a coding-only harness, so bash classification stays conservative and language-agnostic.
-Classify obvious command prefixes rather than depending on code-oriented parsers:
-- **read-only allowlist** (`ls`, `cat`, `pwd`, `echo`, `grep`, `rg`, `find`, `git status/log/diff`, …)
-  ⇒ contributes to `Allow` only when the command is simple enough to classify.
-- **mutating** (`rm`, `mv`, `cp`, `mkdir`, `chmod`, `touch`, redirections `>`/`>>`, …) ⇒ forces
-  `Ask`, and the resolved command goes into the permission `detail`.
+For now, every bash command defaults to `Ask` unless it is denied by the network policy. Configured
+permission rules may explicitly allow trusted command patterns such as `git status*` later.
+
+- **ordinary commands** (`ls`, `cat`, `pwd`, `grep`, `rg`, `find`, `git status`, `cargo test`, `rm`,
+  redirections, etc.) ⇒ `Ask`, and the resolved command goes into the permission `detail`.
 - **network-capable commands** (`curl`, `wget`, `ssh`, package managers, installers, etc.) ⇒ denied
   unless `tools.network = true`, and even then still prompt unless explicitly allowed. This is policy
   classification, not kernel-level network isolation.
 
-`permission(args)` returns a `Permission { key: bash, subject: normalized_command_prefix, ... }`.
-Its `default_action` is `Allow` only when the whole pipeline is provably read-only **and** every touched
-path is within `readable_roots`; mutating commands default to `Ask`; network-capable commands default
-to `Deny` unless network is enabled, then `Ask`. The policy profile may still tighten any of those.
+`permission(args)` returns a `Permission { key: bash, subject: command, ... }`. Network-capable
+commands default to `Deny` unless network is enabled, then `Ask`; everything else defaults to `Ask`.
 The gate is the backstop: argument expansion in a shell is undecidable in general (`$()`, variables,
-globs, aliases/functions, command substitutions), so **anything not provably read-only prompts or
-denies**, and the prompt shows what was parsed. Invoke `bash` without user rc files and with a scrubbed
-environment so aliases/functions cannot change command meaning.
+globs, aliases/functions, command substitutions), so bash never auto-runs by default. Invoke `bash`
+without user rc files and with a scrubbed environment so aliases/functions cannot change command
+meaning.
 
 `bash` execution details are part of the contract, not implementation trivia: close stdin, allocate no
 TTY, set `NO_COLOR=1`, set `GIT_PAGER=cat`/`PAGER=cat`, set `LC_ALL=C`, clear tool-unrelated secrets,
@@ -511,8 +509,8 @@ configs keep SEC-3's "no tool surface until explicitly enabled" invariant. Per-t
 "tools": {
   "enabled": false,                      // master switch (SEC-3); set true to opt in
   "builtins": [],                        // [] → standard set
-  "readable_roots": [],                  // [] → [process cwd]; explicit list overrides
-  "writable_roots": [],                  // [] → [process cwd]; never defaults to ~/.joi
+  "readable_roots": [],                  // [] → filesystem root; explicit list overrides
+  "writable_roots": [],                  // [] → process launch cwd; never defaults to ~/.joi
   "timeout_secs": 30,
   "max_output_bytes": 65536,
   "network": false,
@@ -522,12 +520,12 @@ configs keep SEC-3's "no tool surface until explicitly enabled" invariant. Per-t
 }
 ```
 
-`readable_roots`/`writable_roots` default to the process cwd because `~/.joi` contains config,
-sessions, prompts, and possibly secrets; it must not become tool-readable or writable by default.
-`validate()` checks: `timeout_secs ≥ 1`; `max_output_bytes ≥ 1024`; roots are absolute or
-resolvable from cwd; writable roots are also readable roots (or are explicitly added to both);
-`bash.timeout_ms` is in a sane range; each permission action is `allow`, `ask`, or `deny`; wildcard
-rules are ordered with last-match-wins. Update `config/joi.example.json` and `doc/SPEC.md`.
+`readable_roots` defaults to the filesystem root so the agent can inspect local context with absolute
+paths. `writable_roots` defaults to the process launch cwd so `write`/`edit` are scoped to the project
+the user started Joi from, not to `~/.joi` or the whole machine. `validate()` checks:
+`timeout_secs >= 1`; `max_output_bytes >= 1024`; roots are absolute or resolvable from cwd; each
+permission action is `allow`, `ask`, or `deny`; wildcard rules are ordered with first-match-wins.
+Update `config/joi.example.json` and `doc/SPEC.md`.
 
 ---
 
@@ -632,8 +630,8 @@ the provider — they speak only `dyn Tool` and `ToolSchema`/`ToolResult`.
   so the rest of the engine can be driven with no network. Run the testkit conformance against Mock.
 - **`joi-tools`.** `read`/`list`/`glob`/`grep`/`write`/`edit` happy paths **and** sandbox-escape
   rejection (`../`, symlink, out-of-root); `grep`/`glob` result caps; `edit` uniqueness rule; `bash`
-  classification (read-only allow vs mutating ask vs network deny), timeout, output cap; assert each
-  `description.md` is present and non-empty.
+  classification (ordinary ask vs network deny), timeout, output cap; assert each `description.md` is
+  present and non-empty.
 - **`joi-app` headless gate (invariant #8).** Build `JoiApp(MediaMode::None, Mock)` with a registry
   holding `EchoTool`; Mock emits a `ToolCall`; assert the tool ran and the result returned and the
   `UiEvent`s fired — **no devices, no GUI**. This *is* the headless proof for the feature.
@@ -661,9 +659,9 @@ the provider — they speak only `dyn Tool` and `ToolSchema`/`ToolResult`.
   `sandbox`/`fs_path` + description files; `register_builtins` (non-bash only). *Done:*
   `cargo test -p joi-tools` incl. sandbox-escape and result-cap tests.
 - **M4 — joi-tools (bash). PARTIAL DONE.** `bash` exists with non-interactive execution, timeout, and
-  simple read-only/network classification. Remaining: stronger generic command classification,
-  lightweight sandbox hardening, and broader output-cap tests. *Done:* bash classification/timeout
-  tests cover allow/ask/deny policy outcomes.
+  conservative ask-by-default/network-deny classification. Remaining: lightweight sandbox hardening,
+  explicit allow-rule ergonomics, and broader output-cap tests. *Done:* bash classification/timeout
+  tests cover ask/deny policy outcomes.
 - **M5 — joi-app + config docs. DONE.** `build_tool_registry` + injection; `resolve_tool_permission`; example
   config + `SPEC.md`; `check.sh` assertions added. *Done:* the headless gate test passes.
 - **M6 — joi-tui. DONE.** Transcript tool lines + permission modal + keys; reducers unit-tested without a
