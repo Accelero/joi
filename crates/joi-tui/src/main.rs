@@ -59,9 +59,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = JoiApp::build(config, MediaMode::LocalDevices);
     let mut model = app::AppModel::new(app.has_api_key());
-    // Resolve the configurable colors (background + accent) from the shared `ui.terminal` config.
+    // Resolve the configurable terminal palette from the shared `ui.terminal` config.
     let ui = app.ui_config();
-    model.theme = theme::Theme::from_config(&ui.terminal.background, &ui.terminal.accent);
+    model.theme = theme::Theme::from_config(&ui.terminal);
     // Seed the footer's voice readout from the current settings; later changes refresh it via the
     // `UiEvent::Settings` broadcast the engine emits.
     model.voice = picker::current_voice(&app.settings_schema());

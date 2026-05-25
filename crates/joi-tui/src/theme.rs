@@ -5,6 +5,8 @@
 use joi_core::session::event::{AppState, ConnectionStatus};
 use ratatui::style::Color;
 
+use joi_core::config::TerminalCfg;
+
 /// The fixed dark floor the status dot fades toward when glowing (independent of the configurable
 /// background, which may be transparent).
 const GLOW_FLOOR: Color = Color::Rgb(0x07, 0x09, 0x0c);
@@ -33,6 +35,17 @@ pub struct Theme {
     pub background: Color,
     /// Accent color (brand, prompt, active states, controls, corners…).
     pub accent: Color,
+    /// Tool block accent, intentionally separate from [`Self::accent`] so tool use does not read as
+    /// user text.
+    pub tool_accent: Color,
+    /// Tool detail text.
+    pub tool_text: Color,
+    /// Successful tool status.
+    pub tool_success: Color,
+    /// Denied tool status.
+    pub tool_denied: Color,
+    /// Failed tool status.
+    pub tool_failed: Color,
 }
 
 impl Default for Theme {
@@ -40,6 +53,11 @@ impl Default for Theme {
         Self {
             background: Color::Reset,
             accent: DEFAULT_ACCENT,
+            tool_accent: SPEAK,
+            tool_text: FG_FAINT,
+            tool_success: CURRENT,
+            tool_denied: WARN,
+            tool_failed: WARN,
         }
     }
 }
@@ -48,14 +66,20 @@ impl Theme {
     /// Resolve from the `ui.terminal` config strings. `transparent`/`default`/`terminal`/empty →
     /// transparent background; an unparseable accent falls back to [`DEFAULT_ACCENT`].
     #[must_use]
-    pub fn from_config(background: &str, accent: &str) -> Self {
-        let background = match background.trim().to_ascii_lowercase().as_str() {
+    pub fn from_config(cfg: &TerminalCfg) -> Self {
+        let default = Self::default();
+        let background = match cfg.background.trim().to_ascii_lowercase().as_str() {
             "" | "transparent" | "default" | "terminal" | "none" => Color::Reset,
-            _ => parse_hex(background).unwrap_or(Color::Reset),
+            _ => parse_hex(&cfg.background).unwrap_or(Color::Reset),
         };
         Self {
             background,
-            accent: parse_hex(accent).unwrap_or(DEFAULT_ACCENT),
+            accent: parse_hex(&cfg.accent).unwrap_or(DEFAULT_ACCENT),
+            tool_accent: parse_hex(&cfg.tool_accent).unwrap_or(default.tool_accent),
+            tool_text: parse_hex(&cfg.tool_text).unwrap_or(default.tool_text),
+            tool_success: parse_hex(&cfg.tool_success).unwrap_or(default.tool_success),
+            tool_denied: parse_hex(&cfg.tool_denied).unwrap_or(default.tool_denied),
+            tool_failed: parse_hex(&cfg.tool_failed).unwrap_or(default.tool_failed),
         }
     }
 }
@@ -168,12 +192,32 @@ mod tests {
 
     #[test]
     fn from_config_parses_hex_and_transparent() {
-        let t = Theme::from_config("transparent", "#9aede4");
+        let t = Theme::from_config(&TerminalCfg {
+            background: "transparent".to_string(),
+            accent: "#9aede4".to_string(),
+            tool_accent: "#c3b6e6".to_string(),
+            tool_text: "#9aa4b0".to_string(),
+            tool_success: "#8fd69f".to_string(),
+            tool_denied: "#d8c08a".to_string(),
+            tool_failed: "#d8c08a".to_string(),
+        });
         assert_eq!(t.background, Color::Reset);
         assert_eq!(t.accent, Color::Rgb(0x9a, 0xed, 0xe4));
+        assert_eq!(t.tool_accent, Color::Rgb(0xc3, 0xb6, 0xe6));
+        assert_ne!(t.tool_accent, t.accent);
         // bad accent → default; explicit bg hex parses.
-        let t = Theme::from_config("#101418", "not-a-color");
+        let t = Theme::from_config(&TerminalCfg {
+            background: "#101418".to_string(),
+            accent: "not-a-color".to_string(),
+            tool_accent: "not-a-color".to_string(),
+            tool_text: "not-a-color".to_string(),
+            tool_success: "not-a-color".to_string(),
+            tool_denied: "not-a-color".to_string(),
+            tool_failed: "not-a-color".to_string(),
+        });
         assert_eq!(t.background, Color::Rgb(0x10, 0x14, 0x18));
         assert_eq!(t.accent, DEFAULT_ACCENT);
+        assert_eq!(t.tool_accent, SPEAK);
+        assert_eq!(t.tool_text, FG_FAINT);
     }
 }

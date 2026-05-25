@@ -177,6 +177,11 @@ Current config surface:
 | `media.screen.quality` | u8 | `80` | JPEG quality, 1-100. |
 | `ui.terminal.background` | string | `transparent` | `#rrggbb` or `transparent`. |
 | `ui.terminal.accent` | string | `#9aede4` | Hex or named color. |
+| `ui.terminal.tool_accent` | string | `#c3b6e6` | Tool name/spinner accent; separate from user accent. |
+| `ui.terminal.tool_text` | string | `#9aa4b0` | Tool detail text. |
+| `ui.terminal.tool_success` | string | `#8fd69f` | Successful tool status. |
+| `ui.terminal.tool_denied` | string | `#d8c08a` | Denied tool status. |
+| `ui.terminal.tool_failed` | string | `#d8c08a` | Failed tool status. |
 | `tools.enabled` | bool | `false` | Enables model-visible tools. |
 | `tools.builtins` | string[] | `[]` | Empty means the standard built-in set. |
 | `tools.readable_roots` | path[] | `[]` | Empty resolves to the filesystem root, so tools may read absolute paths. |

@@ -36,7 +36,12 @@
   "ui": {
     "terminal": {
       "background": "transparent",
-      "accent": "#9aede4"
+      "accent": "#9aede4",
+      "tool_accent": "#c3b6e6",
+      "tool_text": "#9aa4b0",
+      "tool_success": "#8fd69f",
+      "tool_denied": "#d8c08a",
+      "tool_failed": "#d8c08a"
     }
   }
 }

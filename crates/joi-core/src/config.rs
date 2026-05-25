@@ -334,9 +334,54 @@ pub struct HistoryCfg {
 pub struct TerminalCfg {
     /// Background color — a hex string (`#rrggbb`) or `transparent` to inherit the terminal's own
     /// background.
+    #[serde(default = "default_terminal_background")]
     pub background: String,
     /// Accent color as a hex string (`#rrggbb`) or a named color.
+    #[serde(default = "default_terminal_accent")]
     pub accent: String,
+    /// Tool block accent color. Kept separate from `accent`, which marks user text and primary UI.
+    #[serde(default = "default_terminal_tool_accent")]
+    pub tool_accent: String,
+    /// Tool detail text color.
+    #[serde(default = "default_terminal_tool_text")]
+    pub tool_text: String,
+    /// Successful tool status color.
+    #[serde(default = "default_terminal_tool_success")]
+    pub tool_success: String,
+    /// Denied tool status color.
+    #[serde(default = "default_terminal_tool_denied")]
+    pub tool_denied: String,
+    /// Failed tool status color.
+    #[serde(default = "default_terminal_tool_failed")]
+    pub tool_failed: String,
+}
+
+fn default_terminal_background() -> String {
+    "transparent".to_string()
+}
+
+fn default_terminal_accent() -> String {
+    "#9aede4".to_string()
+}
+
+fn default_terminal_tool_accent() -> String {
+    "#c3b6e6".to_string()
+}
+
+fn default_terminal_tool_text() -> String {
+    "#9aa4b0".to_string()
+}
+
+fn default_terminal_tool_success() -> String {
+    "#8fd69f".to_string()
+}
+
+fn default_terminal_tool_denied() -> String {
+    "#d8c08a".to_string()
+}
+
+fn default_terminal_tool_failed() -> String {
+    "#d8c08a".to_string()
 }
 
 /// Logging settings (SPEC §5).
@@ -463,8 +508,13 @@ impl Default for Config {
             },
             ui: UiCfg {
                 terminal: TerminalCfg {
-                    background: "transparent".to_string(),
-                    accent: "#9aede4".to_string(),
+                    background: default_terminal_background(),
+                    accent: default_terminal_accent(),
+                    tool_accent: default_terminal_tool_accent(),
+                    tool_text: default_terminal_tool_text(),
+                    tool_success: default_terminal_tool_success(),
+                    tool_denied: default_terminal_tool_denied(),
+                    tool_failed: default_terminal_tool_failed(),
                 },
             },
             tools: ToolsCfg::default(),
@@ -952,6 +1002,7 @@ mod tests {
         cfg.live_api.gemini.voice = Some("Charon".to_string());
         cfg.media.audio.frame_ms = 30;
         cfg.ui.terminal.accent = "#ff0066".to_string();
+        cfg.ui.terminal.tool_accent = "#c3b6e6".to_string();
         cfg.write_json(&path).unwrap();
 
         figment::Jail::expect_with(|_jail| {
@@ -959,6 +1010,7 @@ mod tests {
             assert_eq!(loaded.live_api.gemini.voice.as_deref(), Some("Charon"));
             assert_eq!(loaded.media.audio.frame_ms, 30);
             assert_eq!(loaded.ui.terminal.accent, "#ff0066");
+            assert_eq!(loaded.ui.terminal.tool_accent, "#c3b6e6");
             Ok(())
         });
     }

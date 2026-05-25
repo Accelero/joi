@@ -13,7 +13,7 @@ use joi_core::session::event::{AppState, ConnectionStatus, Reachability};
 use crate::app::AppModel;
 use crate::commands;
 use crate::theme;
-use crate::transcript::LineKind;
+use crate::transcript::{LineKind, ToolEntry, ToolStatus};
 
 pub fn render(frame: &mut Frame, model: &mut AppModel) {
     let area = frame.area();
@@ -531,14 +531,27 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     // Paragraph's internal scroll/line-count). No speaker labels — turns are distinguished by color
     // (see `kind_color`) and separated by a blank line between every turn (each `Entry` is one
     // turn — even back-to-back agent turns get their own breather).
-    let accent = model.theme.accent;
     let mut lines: Vec<Line> = Vec::new();
-    for (i, entry) in model.transcript.entries().iter().enumerate() {
+    let entries = model.transcript.entries();
+    for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
             lines.push(Line::default()); // blank line between turns
         }
-        let style = Style::new().fg(kind_color(entry.kind, accent));
-        for piece in textwrap::wrap(&entry.text, width) {
+        if let Some(tool) = entry.tool.as_ref() {
+            append_tool_lines(&mut lines, tool, model.theme, model.tick, width);
+            continue;
+        }
+        let previous_was_tool = i
+            .checked_sub(1)
+            .and_then(|idx| entries.get(idx))
+            .is_some_and(|entry| entry.kind == LineKind::Tool);
+        let text = if previous_was_tool {
+            entry.text.trim_start_matches(['\r', '\n'])
+        } else {
+            entry.text.as_str()
+        };
+        let style = Style::new().fg(kind_color(entry.kind, model.theme));
+        for piece in textwrap::wrap(text, width) {
             lines.push(Line::from(piece.into_owned()).style(style));
         }
     }
@@ -567,11 +580,61 @@ fn render_transcript(frame: &mut Frame, area: Rect, model: &mut AppModel) {
     );
 }
 
-fn kind_color(kind: LineKind, accent: Color) -> Color {
+fn append_tool_lines(
+    lines: &mut Vec<Line<'static>>,
+    tool: &ToolEntry,
+    theme: theme::Theme,
+    tick: u64,
+    width: usize,
+) {
+    let marker = tool_marker(tool.status, tick);
+    lines.push(Line::from(vec![
+        Span::styled(marker, Style::new().fg(theme.tool_accent)),
+        Span::raw(" "),
+        Span::styled(
+            tool.name.clone(),
+            Style::new()
+                .fg(theme.tool_accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            tool.status.label(),
+            Style::new().fg(tool_status_color(tool.status, theme)),
+        ),
+    ]));
+
+    let wrap_width = width.saturating_sub(2).max(1);
+    for piece in textwrap::wrap(&tool.summary, wrap_width) {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::new().fg(theme.tool_text)),
+            Span::styled(piece.into_owned(), Style::new().fg(theme.tool_text)),
+        ]));
+    }
+}
+
+fn tool_marker(status: ToolStatus, tick: u64) -> &'static str {
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    match status {
+        ToolStatus::Running => SPINNER[(tick as usize) % SPINNER.len()],
+        ToolStatus::Success | ToolStatus::Denied | ToolStatus::Failed => "•",
+    }
+}
+
+fn tool_status_color(status: ToolStatus, theme: theme::Theme) -> Color {
+    match status {
+        ToolStatus::Running => theme.tool_text,
+        ToolStatus::Success => theme.tool_success,
+        ToolStatus::Denied => theme.tool_denied,
+        ToolStatus::Failed => theme.tool_failed,
+    }
+}
+
+fn kind_color(kind: LineKind, theme: theme::Theme) -> Color {
     match kind {
-        LineKind::User => accent,
+        LineKind::User => theme.accent,
         LineKind::Agent => theme::FG,
-        LineKind::Tool => theme::FG_FAINT,
+        LineKind::Tool => theme.tool_text,
         LineKind::Error => theme::DANGER,
     }
 }
@@ -840,9 +903,62 @@ mod tests {
 
     #[test]
     fn tool_lines_use_grey_not_error_red() {
-        let color = kind_color(LineKind::Tool, theme::DEFAULT_ACCENT);
-        assert_eq!(color, theme::FG_FAINT);
+        let color = kind_color(LineKind::Tool, theme::Theme::default());
+        assert_eq!(color, theme::Theme::default().tool_text);
         assert_ne!(color, theme::DANGER);
+        assert_ne!(color, theme::DEFAULT_ACCENT);
+    }
+
+    #[test]
+    fn tool_line_has_single_blank_row_before_following_text() {
+        let (w, h) = (60u16, 16u16);
+        let mut model = AppModel::new(true);
+        model.transcript.push_tool_result(
+            joi_core::tools::ToolCallId("tool-1".to_string()),
+            "bash",
+            true,
+            "bash completed",
+        );
+        model.transcript.push_transcript(
+            joi_core::session::event::Speaker::Agent,
+            "\nnext answer".into(),
+            true,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(f, &mut model)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..h)
+            .map(|y| {
+                (1..w - 1)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let tool_header = rows
+            .iter()
+            .position(|row| row.contains("bash") && row.contains("success"))
+            .unwrap();
+        let tool_detail = rows
+            .iter()
+            .position(|row| row.contains("bash completed"))
+            .unwrap();
+        let answer = rows
+            .iter()
+            .position(|row| row.contains("next answer"))
+            .unwrap();
+        assert_eq!(
+            tool_detail,
+            tool_header + 1,
+            "tool detail should sit directly under the header: {rows:?}"
+        );
+        let gap = &rows[tool_detail + 1..answer];
+        assert!(
+            gap.len() == 1 && gap[0].is_empty(),
+            "expected exactly one blank row under the tool block: {rows:?}"
+        );
     }
 
     #[test]

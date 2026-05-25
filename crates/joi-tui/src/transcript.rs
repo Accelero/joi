@@ -24,12 +24,46 @@ pub enum LineKind {
     Error,
 }
 
+/// Display state for a tool transcript entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStatus {
+    /// The tool call was emitted and has not returned yet.
+    Running,
+    /// The tool completed successfully.
+    Success,
+    /// The user or system denied the tool call.
+    Denied,
+    /// The tool returned an error.
+    Failed,
+}
+
+impl ToolStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolStatus::Running => "running",
+            ToolStatus::Success => "success",
+            ToolStatus::Denied => "denied",
+            ToolStatus::Failed => "failed",
+        }
+    }
+}
+
+/// Structured display payload for a tool call/result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEntry {
+    pub id: ToolCallId,
+    pub name: String,
+    pub status: ToolStatus,
+    pub summary: String,
+}
+
 /// One transcript line: its kind and the accumulated text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub kind: LineKind,
     pub text: String,
     pub tool_id: Option<ToolCallId>,
+    pub tool: Option<ToolEntry>,
 }
 
 /// The streaming transcript. `open` is `Some(kind)` while the last entry is still accumulating
@@ -57,6 +91,7 @@ impl Transcript {
                     kind,
                     text,
                     tool_id: None,
+                    tool: None,
                 });
                 self.open = Some(kind);
             }
@@ -73,6 +108,7 @@ impl Transcript {
             kind: LineKind::Error,
             text: message,
             tool_id: None,
+            tool: None,
         });
     }
 
@@ -82,7 +118,13 @@ impl Transcript {
         self.start(Entry {
             kind: LineKind::Tool,
             text: format!("using {name}: {summary}"),
-            tool_id: Some(id),
+            tool_id: Some(id.clone()),
+            tool: Some(ToolEntry {
+                id,
+                name: name.to_string(),
+                status: ToolStatus::Running,
+                summary: summary.to_string(),
+            }),
         });
     }
 
@@ -90,7 +132,8 @@ impl Transcript {
     /// already outside the scrollback.
     pub fn push_tool_result(&mut self, id: ToolCallId, name: &str, ok: bool, summary: &str) {
         self.open = None;
-        let text = format!("{name}: {} - {summary}", tool_status(ok, summary));
+        let status = tool_status(ok, summary);
+        let text = format!("{name}: {} - {summary}", status.label());
         if let Some(entry) = self
             .entries
             .iter_mut()
@@ -99,12 +142,24 @@ impl Transcript {
         {
             entry.kind = LineKind::Tool;
             entry.text = text;
+            entry.tool = Some(ToolEntry {
+                id,
+                name: name.to_string(),
+                status,
+                summary: summary.to_string(),
+            });
             return;
         }
         self.start(Entry {
             kind: LineKind::Tool,
             text,
-            tool_id: Some(id),
+            tool_id: Some(id.clone()),
+            tool: Some(ToolEntry {
+                id,
+                name: name.to_string(),
+                status,
+                summary: summary.to_string(),
+            }),
         });
     }
 
@@ -121,13 +176,13 @@ impl Transcript {
     }
 }
 
-fn tool_status(ok: bool, summary: &str) -> &'static str {
+fn tool_status(ok: bool, summary: &str) -> ToolStatus {
     if ok {
-        "success"
+        ToolStatus::Success
     } else if summary.to_ascii_lowercase().contains("denied") {
-        "denied"
+        ToolStatus::Denied
     } else {
-        "failed"
+        ToolStatus::Failed
     }
 }
 
