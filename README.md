@@ -46,9 +46,8 @@ crates/
 vendor/          two required patched deps (adk-realtime, sonora-aec3)
 ```
 
-See [`doc/SPEC.md`](doc/SPEC.md) for what Joi must do (`FR-*`) and [`doc/ARCH.md`](doc/ARCH.md) for
-how it's layered. The built-in tool harness is implemented behind disabled-by-default config; the
-remaining tool roadmap is in [`doc/TOOLS_PLAN.md`](doc/TOOLS_PLAN.md).
+See [`doc/SPEC.md`](doc/SPEC.md) for what Joi must do (`FR-*`), [`doc/ARCH.md`](doc/ARCH.md) for how
+it's layered, and [`doc/PLAN.md`](doc/PLAN.md) for the prioritized follow-up roadmap.
 
 ## Development
 

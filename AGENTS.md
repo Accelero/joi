@@ -6,11 +6,11 @@ debug the project.
 
 ## Status
 
-- The clean rewrite is implemented. The active workspace is the six crates under `crates/`.
+- The clean rewrite is implemented. The active workspace is the seven crates under `crates/`.
 - `doc/ARCH.md` is normative for architecture and layering.
 - `doc/SPEC.md` is normative for requirements, `[NOW]` / `[LATER]` status, and config reference.
-- `doc/TOOLS_PLAN.md` tracks the tool roadmap. The first built-in pipeline exists; MCP, stronger
-  bash analysis, and richer permission UX are follow-up work.
+- `doc/PLAN.md` tracks the prioritized follow-up roadmap. The first built-in tool pipeline exists;
+  reconnect, tool hardening, MCP, settings UI, memory, and future hosts are follow-up work.
 - `CLAUDE.md` is older agent guidance but now points back to `ARCH.md`; follow this `AGENTS.md` and
   `ARCH.md` for current decisions.
 
@@ -171,5 +171,5 @@ with no devices and no GUI.
 - For provider work, add mapping/unit tests in `joi-providers` and keep wire quirks sealed there.
 - For config/settings work, maintain atomic writes, secret redaction, env precedence, and
   non-destructive provider-dependent resolution.
-- For tool work, start from `doc/TOOLS_PLAN.md`; preserve the single core pipeline and keep concrete
+- For tool work, start from `doc/PLAN.md`; preserve the single core pipeline and keep concrete
   tool behavior sealed outside `joi-core`.

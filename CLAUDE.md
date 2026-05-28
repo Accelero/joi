@@ -1,7 +1,7 @@
 # Joi — agent guide
 
-> **Status:** the clean rewrite is implemented — the six crates in `crates/` (core, providers,
-> media, app, testkit, tui) follow the architecture below; `scripts/check.sh` is green. The
+> **Status:** the clean rewrite is implemented — the seven crates in `crates/` (core, providers,
+> media, app, tools, testkit, tui) follow the architecture below; `scripts/check.sh` is green. The
 > normative architecture lives in @doc/ARCH.md, and current requirements/config live in
 > @doc/SPEC.md. Read ARCH.md before making structural decisions.
 

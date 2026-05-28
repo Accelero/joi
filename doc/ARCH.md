@@ -6,7 +6,7 @@
 > the source of truth for structural decisions. The engine is frontend-agnostic, the only frontend
 > built today is the TUI, boundary types are plain Rust + `serde` (no `ts-rs`), and Seam B / a Tauri
 > host / a web UI are future work the design must not preclude. The built-in tool harness is
-> implemented; MCP and richer tool UX follow `doc/TOOLS_PLAN.md`.
+> implemented; remaining follow-up work is prioritized in `doc/PLAN.md`.
 
 Joi is a local, provider-agnostic **voice + screen + terminal** companion (TUI-first; more frontends
 will follow). It connects a human to a realtime multimodal model (Gemini Live today, others behind
