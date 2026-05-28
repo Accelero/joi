@@ -188,8 +188,19 @@ impl JoiApp {
                     screen_max_width: config.media.screen.max_width,
                     screen_quality: config.media.screen.quality,
                     echo_cancellation: config.media.audio.echo_cancellation,
+                    high_pass_filter: config.media.audio.high_pass_filter,
                     noise_suppression: config.media.audio.noise_suppression,
+                    mic_boost_db: config.media.audio.mic_boost_db,
+                    agc_headroom_db: config.media.audio.agc_headroom_db,
+                    agc_max_gain_db: config.media.audio.agc_max_gain_db,
+                    agc_initial_gain_db: config.media.audio.agc_initial_gain_db,
+                    agc_gain_change_db_per_sec: config.media.audio.agc_gain_change_db_per_sec,
                     auto_gain: config.media.audio.auto_gain,
+                    leveler_enabled: config.media.audio.leveler_enabled,
+                    leveler_target_rms_dbfs: config.media.audio.leveler_target_rms_dbfs,
+                    leveler_max_gain_db: config.media.audio.leveler_max_gain_db,
+                    leveler_max_reduction_db: config.media.audio.leveler_max_reduction_db,
+                    limiter_ceiling_dbfs: config.media.audio.limiter_ceiling_dbfs,
                 };
                 // Token-free reachability probe (provider-specific call, composed here so the
                 // engine stays provider-agnostic). `None` when the provider has no probe / no key.

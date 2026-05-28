@@ -24,8 +24,19 @@
       "input_device": "default",
       "output_device": "default",
       "echo_cancellation": true,
-      "noise_suppression": true,
-      "auto_gain": true
+      "high_pass_filter": true,
+      "noise_suppression": "classic",
+      "mic_boost_db": 0.0,
+      "agc_headroom_db": 5.0,
+      "agc_max_gain_db": 50.0,
+      "agc_initial_gain_db": 15.0,
+      "agc_gain_change_db_per_sec": 6.0,
+      "auto_gain": true,
+      "leveler_enabled": false,
+      "leveler_target_rms_dbfs": -20.0,
+      "leveler_max_gain_db": 18.0,
+      "leveler_max_reduction_db": 24.0,
+      "limiter_ceiling_dbfs": -1.0
     },
     "screen": {
       "fps": 1.0,

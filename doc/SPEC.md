@@ -170,8 +170,19 @@ Current config surface:
 | `media.audio.input_device` | string | `default` | OS default mic or exact device name. |
 | `media.audio.output_device` | string | `default` | OS default output or exact device name. |
 | `media.audio.echo_cancellation` | bool | `true` | AEC3. |
-| `media.audio.noise_suppression` | bool | `true` | High-pass filter plus noise suppression. |
+| `media.audio.high_pass_filter` | bool | `true` | DC/rumble cleanup before denoising. |
+| `media.audio.noise_suppression` | enum | `classic` | `off`, `classic`, or `ai`. |
+| `media.audio.mic_boost_db` | f32 | `0.0` | Fixed digital boost before the limiter, 0-36 dB. |
+| `media.audio.agc_headroom_db` | f32 | `5.0` | AGC clipping headroom, 0-20 dB. Lower is louder. |
+| `media.audio.agc_max_gain_db` | f32 | `50.0` | Maximum adaptive AGC gain, 0-60 dB. |
+| `media.audio.agc_initial_gain_db` | f32 | `15.0` | Initial adaptive AGC gain, 0-`agc_max_gain_db`. |
+| `media.audio.agc_gain_change_db_per_sec` | f32 | `6.0` | Maximum AGC gain-change rate, 0.1-60 dB/s. |
 | `media.audio.auto_gain` | bool | `true` | AGC2. |
+| `media.audio.leveler_enabled` | bool | `false` | Final compressor/limiter before provider audio send. |
+| `media.audio.leveler_target_rms_dbfs` | f32 | `-20.0` | Final leveler RMS target, -40 to -6 dBFS. |
+| `media.audio.leveler_max_gain_db` | f32 | `18.0` | Maximum final leveler gain, 0-36 dB. |
+| `media.audio.leveler_max_reduction_db` | f32 | `24.0` | Maximum final leveler reduction, 0-48 dB. |
+| `media.audio.limiter_ceiling_dbfs` | f32 | `-1.0` | Final limiter ceiling, -12 to 0 dBFS. |
 | `media.screen.fps` | f32 | `1.0` | Validated `(0, 60]`. |
 | `media.screen.max_width` | u32 | `768` | Gemini Live's useful per-frame width. |
 | `media.screen.quality` | u8 | `80` | JPEG quality, 1-100. |

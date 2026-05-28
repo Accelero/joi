@@ -281,8 +281,22 @@ fn read_prompt_file(path: &Path) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Noise suppression strategy for the microphone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppressionMode {
+    /// No noise suppression. Echo cancellation, high-pass filtering, and gain may still run.
+    Off,
+    /// Classic algorithmic noise suppression for steady background noise.
+    #[default]
+    Classic,
+    /// AI/neural speech cleanup for stronger noise reduction. More CPU than [`Self::Classic`].
+    Ai,
+}
+
 /// Audio I/O settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AudioCfg {
     /// Mic frame size in milliseconds (20 ms = 320 samples at 16 kHz).
     ///
@@ -301,13 +315,37 @@ pub struct AudioCfg {
     /// hear itself (and interrupt itself) on speakers. Turn off when using headphones, or when an
     /// OS/server APM (e.g. PipeWire's echo-cancel source) already does it.
     pub echo_cancellation: bool,
-    /// Noise suppression on the mic (high-pass filter + NS). Disable when an OS/server APM already
-    /// conditions the input, to avoid double-processing.
-    pub noise_suppression: bool,
+    /// High-pass filter on the mic: removes DC bias and low-frequency rumble before denoising.
+    pub high_pass_filter: bool,
+    /// Noise suppression on the mic: `"off"`, `"classic"` algorithmic suppression, or `"ai"` neural
+    /// speech cleanup.
+    #[serde(default)]
+    pub noise_suppression: NoiseSuppressionMode,
+    /// Fixed digital boost in dB before the AGC2 limiter. Useful when the mic or denoiser output is
+    /// consistently too quiet; high values are mainly for limiter/leveling tests.
+    pub mic_boost_db: f32,
+    /// AGC target headroom before clipping. Lower is louder and more aggressive.
+    pub agc_headroom_db: f32,
+    /// Maximum adaptive digital gain AGC may apply.
+    pub agc_max_gain_db: f32,
+    /// Initial adaptive digital gain when capture starts.
+    pub agc_initial_gain_db: f32,
+    /// Maximum AGC gain change rate. Higher reacts faster and can pump more.
+    pub agc_gain_change_db_per_sec: f32,
     /// Automatic gain control on the mic (AGC2). Disable when an OS APM does the conditioning: an AGC
     /// stage *without* a co-located echo canceller is echo-blind and will amplify residual echo
     /// during playback into false barge-ins.
     pub auto_gain: bool,
+    /// Final compressor/limiter before audio is sent to the provider.
+    pub leveler_enabled: bool,
+    /// Target RMS for the final compressor/leveler.
+    pub leveler_target_rms_dbfs: f32,
+    /// Maximum gain the final leveler may add.
+    pub leveler_max_gain_db: f32,
+    /// Maximum gain reduction the final leveler may apply.
+    pub leveler_max_reduction_db: f32,
+    /// Limiter ceiling for final samples.
+    pub limiter_ceiling_dbfs: f32,
 }
 
 /// Screen-capture settings. Native capture is the only path.
@@ -495,8 +533,19 @@ impl Default for Config {
                     input_device: "default".to_string(),
                     output_device: "default".to_string(),
                     echo_cancellation: true,
-                    noise_suppression: true,
+                    high_pass_filter: true,
+                    noise_suppression: NoiseSuppressionMode::Classic,
+                    mic_boost_db: 0.0,
+                    agc_headroom_db: 5.0,
+                    agc_max_gain_db: 50.0,
+                    agc_initial_gain_db: 15.0,
+                    agc_gain_change_db_per_sec: 6.0,
                     auto_gain: true,
+                    leveler_enabled: false,
+                    leveler_target_rms_dbfs: -20.0,
+                    leveler_max_gain_db: 18.0,
+                    leveler_max_reduction_db: 24.0,
+                    limiter_ceiling_dbfs: -1.0,
                 },
                 screen: ScreenCfg {
                     fps: 1.0,
@@ -763,6 +812,7 @@ impl Config {
     }
 
     /// Reject out-of-range values and bad enums before they reach the rest of the system.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |field: &str, reason: &str| ConfigError::Invalid {
             field: field.to_string(),
@@ -794,6 +844,72 @@ impl Config {
         }
         if !(screen.fps.is_finite() && screen.fps > 0.0 && screen.fps <= 60.0) {
             return Err(invalid("media.screen.fps", "must be in (0, 60]"));
+        }
+        if !(audio.mic_boost_db.is_finite() && (0.0..=36.0).contains(&audio.mic_boost_db)) {
+            return Err(invalid(
+                "media.audio.mic_boost_db",
+                "must be between 0 and 36 dB",
+            ));
+        }
+        if !(audio.agc_headroom_db.is_finite() && (0.0..=20.0).contains(&audio.agc_headroom_db)) {
+            return Err(invalid(
+                "media.audio.agc_headroom_db",
+                "must be between 0 and 20 dB",
+            ));
+        }
+        if !(audio.agc_max_gain_db.is_finite() && (0.0..=60.0).contains(&audio.agc_max_gain_db)) {
+            return Err(invalid(
+                "media.audio.agc_max_gain_db",
+                "must be between 0 and 60 dB",
+            ));
+        }
+        if !(audio.agc_initial_gain_db.is_finite()
+            && (0.0..=audio.agc_max_gain_db).contains(&audio.agc_initial_gain_db))
+        {
+            return Err(invalid(
+                "media.audio.agc_initial_gain_db",
+                "must be between 0 and media.audio.agc_max_gain_db",
+            ));
+        }
+        if !(audio.agc_gain_change_db_per_sec.is_finite()
+            && (0.1..=60.0).contains(&audio.agc_gain_change_db_per_sec))
+        {
+            return Err(invalid(
+                "media.audio.agc_gain_change_db_per_sec",
+                "must be between 0.1 and 60 dB/s",
+            ));
+        }
+        if !(audio.leveler_target_rms_dbfs.is_finite()
+            && (-40.0..=-6.0).contains(&audio.leveler_target_rms_dbfs))
+        {
+            return Err(invalid(
+                "media.audio.leveler_target_rms_dbfs",
+                "must be between -40 and -6 dBFS",
+            ));
+        }
+        if !(audio.leveler_max_gain_db.is_finite()
+            && (0.0..=36.0).contains(&audio.leveler_max_gain_db))
+        {
+            return Err(invalid(
+                "media.audio.leveler_max_gain_db",
+                "must be between 0 and 36 dB",
+            ));
+        }
+        if !(audio.leveler_max_reduction_db.is_finite()
+            && (0.0..=48.0).contains(&audio.leveler_max_reduction_db))
+        {
+            return Err(invalid(
+                "media.audio.leveler_max_reduction_db",
+                "must be between 0 and 48 dB",
+            ));
+        }
+        if !(audio.limiter_ceiling_dbfs.is_finite()
+            && (-12.0..=0.0).contains(&audio.limiter_ceiling_dbfs))
+        {
+            return Err(invalid(
+                "media.audio.limiter_ceiling_dbfs",
+                "must be between -12 and 0 dBFS",
+            ));
         }
         if screen.max_width == 0 {
             return Err(invalid("media.screen.max_width", "must be > 0"));
@@ -1066,6 +1182,41 @@ mod tests {
             // unspecified nested fields keep their defaults (deep merge)
             assert_eq!(cfg.live_api.gemini.voice, None); // unset → model default
             assert_eq!(cfg.media.audio.input_device, "default");
+            assert!(cfg.media.audio.high_pass_filter);
+            assert_eq!(
+                cfg.media.audio.noise_suppression,
+                NoiseSuppressionMode::Classic
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn noise_suppression_mode_accepts_strings_and_rejects_bools() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "joi.json",
+                r#"
+{
+  "live_api": { "gemini": { "model": "m" } },
+  "media": { "audio": { "noise_suppression": "ai" } }
+}
+"#,
+            )?;
+            let cfg = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap();
+            assert_eq!(cfg.media.audio.noise_suppression, NoiseSuppressionMode::Ai);
+
+            jail.create_file(
+                "joi.json",
+                r#"
+{
+  "live_api": { "gemini": { "model": "m" } },
+  "media": { "audio": { "noise_suppression": false } }
+}
+"#,
+            )?;
+            let err = Config::load_from(Path::new("joi.json"), &test_paths()).unwrap_err();
+            assert!(matches!(err, ConfigError::Load(_)));
             Ok(())
         });
     }

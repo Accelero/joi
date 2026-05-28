@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 joi-core = { path = "../joi-core" }
 cpal = "0.15"
+nnnoiseless = "0.5.2"
 sonora = "0.1"
 xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }

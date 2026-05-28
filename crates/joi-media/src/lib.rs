@@ -10,6 +10,8 @@ pub mod engine;
 // Low-level cpal/xcap workers are crate-internal; `MediaEngine` is the public interface.
 mod capture;
 mod playback;
+#[cfg(debug_assertions)]
+mod processed_mic_recorder;
 mod screen;
 
 pub use engine::{MediaConfig, MediaEngine};

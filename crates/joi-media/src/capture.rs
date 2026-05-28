@@ -15,16 +15,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use joi_core::config::NoiseSuppressionMode;
 use joi_core::media::{pcm16_from_f32, resample_linear, AudioFormat, FrameAccumulator};
-use sonora::config::{EchoCanceller, GainController2, HighPassFilter, NoiseSuppression};
+use sonora::config::{
+    AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
+};
 use sonora::{AudioProcessing, Config, StreamConfig as ApmStreamConfig};
 
+#[cfg(debug_assertions)]
+use crate::processed_mic_recorder::ProcessedMicRecorder;
 use crate::MediaError;
 
 /// APM runs at 16 kHz (a WebRTC-supported rate, and our provider rate); device audio is resampled
 /// to it first. 10 ms frames = 160 samples.
 const APM_RATE: u32 = AudioFormat::INPUT.sample_rate;
 const APM_FRAME: usize = (APM_RATE / 100) as usize;
+/// The neural denoiser processes 10 ms frames at 48 kHz.
+const NEURAL_DENOISE_RATE: u32 = 48_000;
 /// Cap on buffered far-end (render) audio (~200 ms at 16 kHz). If the provider ever streams faster
 /// than real time, drop the oldest so the AEC reference lead stays within AEC3's delay-tracking
 /// range instead of growing unboundedly.
@@ -52,13 +59,36 @@ pub struct RenderRef {
 /// moved to an OS/server APM (e.g. PipeWire's echo-cancel source) instead — turn the matching stage
 /// off here to avoid double-processing.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ApmConfig {
     /// Acoustic echo cancellation (needs the far-end render reference).
     pub echo_cancellation: bool,
-    /// Noise suppression.
-    pub noise_suppression: bool,
+    /// High-pass filter.
+    pub high_pass_filter: bool,
+    /// Noise suppression mode.
+    pub noise_suppression: NoiseSuppressionMode,
+    /// Fixed digital boost before the limiter.
+    pub mic_boost_db: f32,
+    /// AGC target headroom before clipping.
+    pub agc_headroom_db: f32,
+    /// Maximum adaptive digital gain.
+    pub agc_max_gain_db: f32,
+    /// Initial adaptive digital gain.
+    pub agc_initial_gain_db: f32,
+    /// Maximum AGC gain change rate.
+    pub agc_gain_change_db_per_sec: f32,
     /// Automatic gain control (AGC2).
     pub auto_gain: bool,
+    /// Final compressor/limiter before provider send.
+    pub leveler_enabled: bool,
+    /// Target RMS for the final leveler.
+    pub leveler_target_rms_dbfs: f32,
+    /// Maximum gain the final leveler may add.
+    pub leveler_max_gain_db: f32,
+    /// Maximum gain reduction the final leveler may apply.
+    pub leveler_max_reduction_db: f32,
+    /// Limiter ceiling for final samples.
+    pub limiter_ceiling_dbfs: f32,
 }
 
 /// Spawn mic capture on its own thread (owns the `!Send` input stream and the APM). 16 kHz mono
@@ -163,8 +193,19 @@ fn run_capture(
         device_rate,
         channels,
         echo_cancellation = apm.echo_cancellation,
-        noise_suppression = apm.noise_suppression,
+        high_pass_filter = apm.high_pass_filter,
+        noise_suppression = ?apm.noise_suppression,
+        mic_boost_db = apm.mic_boost_db,
+        agc_headroom_db = apm.agc_headroom_db,
+        agc_max_gain_db = apm.agc_max_gain_db,
+        agc_initial_gain_db = apm.agc_initial_gain_db,
+        agc_gain_change_db_per_sec = apm.agc_gain_change_db_per_sec,
         auto_gain = apm.auto_gain,
+        leveler_enabled = apm.leveler_enabled,
+        leveler_target_rms_dbfs = apm.leveler_target_rms_dbfs,
+        leveler_max_gain_db = apm.leveler_max_gain_db,
+        leveler_max_reduction_db = apm.leveler_max_reduction_db,
+        limiter_ceiling_dbfs = apm.limiter_ceiling_dbfs,
         "native mic capture started"
     );
 
@@ -366,6 +407,7 @@ impl CaptureDiag {
 struct CaptureDiag;
 
 #[cfg(not(debug_assertions))]
+#[allow(clippy::unused_self)]
 impl CaptureDiag {
     #[inline]
     fn new(_echo_cancellation: bool) -> Self {
@@ -394,7 +436,10 @@ impl CaptureDiag {
 /// far-end (playback) streams are fed at 16 kHz in 10 ms APM frames; the echo canceller subtracts
 /// the far-end from the near-end.
 struct CapturePipeline {
-    apm: AudioProcessing,
+    conditioning_apm: AudioProcessing,
+    gain_apm: Option<AudioProcessing>,
+    neural_denoiser: Option<NeuralDenoiser>,
+    leveler: Option<OutputLeveler>,
     device_rate: u32,
     /// Sample rate of the far-end (render) reference as delivered by the playback engine — its
     /// device rate. Resampled to [`APM_RATE`] before feeding the echo canceller.
@@ -409,33 +454,49 @@ struct CapturePipeline {
     out: FrameAccumulator,
     /// Per-second level/rate diagnostics (debug builds only; no-op in release).
     diag: CaptureDiag,
+    /// Optional diagnostic tap of post-APM audio, enabled by `JOI_PROCESSED_MIC_WAV`.
+    #[cfg(debug_assertions)]
+    recorder: Option<ProcessedMicRecorder>,
 }
 
 impl CapturePipeline {
     fn new(device_rate: u32, render_rate: u32, frame_samples: usize, apm: ApmConfig) -> Self {
         let echo_cancellation = apm.echo_cancellation;
-        let config = Config {
+        let conditioning_config = Config {
             // AEC3: remove Joi's own playback (picked up by the mic) so it doesn't read as speech.
             // Off when `audio.echo_cancellation = false` (e.g. headphones, or an OS APM does it).
             echo_canceller: apm.echo_cancellation.then(EchoCanceller::default),
             // High-pass filter: removes the DC bias / sub-audible rumble a raw mic (notably a
-            // PDM/DMIC) carries — without it the DC dominates the RMS and buries speech. Coupled with
-            // NS, the conventional WebRTC pre-conditioning grouping.
-            high_pass_filter: apm.noise_suppression.then(HighPassFilter::default),
-            // NS/AGC are independently switchable: turn them off when an echo-aware OS APM does the
-            // conditioning, so a co-located AGC isn't echo-blind here (which amplifies residual echo).
-            noise_suppression: apm.noise_suppression.then(NoiseSuppression::default),
-            gain_controller2: apm.auto_gain.then(GainController2::default),
+            // PDM/DMIC) carries — without it the DC dominates the RMS and buries speech.
+            high_pass_filter: apm.high_pass_filter.then(HighPassFilter::default),
+            // Classic noise suppression is mutually exclusive with neural cleanup by design; stacking
+            // both tends to make speech sound watery.
+            noise_suppression: matches!(apm.noise_suppression, NoiseSuppressionMode::Classic)
+                .then(NoiseSuppression::default),
+            ..Default::default()
+        };
+        let gain_config = Config {
+            gain_controller2: (apm.auto_gain || apm.mic_boost_db > 0.0).then(|| agc2_config(&apm)),
             ..Default::default()
         };
         let sc = ApmStreamConfig::new(APM_RATE, 1);
-        let apm = AudioProcessing::builder()
-            .config(config)
+        let conditioning_apm = AudioProcessing::builder()
+            .config(conditioning_config)
             .capture_config(sc)
             .render_config(sc)
             .build();
+        let gain_apm = (apm.auto_gain || apm.mic_boost_db > 0.0).then(|| {
+            AudioProcessing::builder()
+                .config(gain_config)
+                .capture_config(sc)
+                .build()
+        });
         Self {
-            apm,
+            conditioning_apm,
+            gain_apm,
+            neural_denoiser: matches!(apm.noise_suppression, NoiseSuppressionMode::Ai)
+                .then(NeuralDenoiser::new),
+            leveler: apm.leveler_enabled.then(|| OutputLeveler::new(&apm)),
             device_rate,
             render_rate,
             echo_cancellation,
@@ -443,6 +504,8 @@ impl CapturePipeline {
             render_in: Vec::new(),
             out: FrameAccumulator::new(frame_samples),
             diag: CaptureDiag::new(echo_cancellation),
+            #[cfg(debug_assertions)]
+            recorder: ProcessedMicRecorder::from_env(),
         }
     }
 
@@ -468,21 +531,48 @@ impl CapturePipeline {
                 };
                 let mut render_out = vec![0.0f32; APM_FRAME];
                 let _ = self
-                    .apm
+                    .conditioning_apm
                     .process_render_f32(&[&render_frame], &mut [&mut render_out]);
                 self.diag.tap_render(&render_frame);
             }
 
             let frame: Vec<f32> = self.apm_in.drain(..APM_FRAME).collect();
             self.diag.tap_pre(&frame);
-            let mut out = vec![0.0f32; APM_FRAME];
+            let mut conditioned = vec![0.0f32; APM_FRAME];
             if self
-                .apm
-                .process_capture_f32(&[&frame], &mut [&mut out])
+                .conditioning_apm
+                .process_capture_f32(&[&frame], &mut [&mut conditioned])
                 .is_ok()
             {
+                let denoised = if let Some(denoiser) = &mut self.neural_denoiser {
+                    denoiser.process(&conditioned)
+                } else {
+                    conditioned
+                };
+                let gained = if let Some(gain_apm) = &mut self.gain_apm {
+                    let mut gained = vec![0.0f32; APM_FRAME];
+                    if gain_apm
+                        .process_capture_f32(&[&denoised], &mut [&mut gained])
+                        .is_ok()
+                    {
+                        gained
+                    } else {
+                        denoised
+                    }
+                } else {
+                    denoised
+                };
+                let out = if let Some(leveler) = &mut self.leveler {
+                    leveler.process(&gained)
+                } else {
+                    gained
+                };
                 self.diag.tap_post(&out);
                 for done in self.out.push(&pcm16_from_f32(&out)) {
+                    #[cfg(debug_assertions)]
+                    if let Some(recorder) = &mut self.recorder {
+                        recorder.write_samples(&done);
+                    }
                     let _ = frames.try_send(done);
                 }
             }
@@ -518,6 +608,145 @@ impl CapturePipeline {
         while let Ok(chunk) = rx.try_recv() {
             self.buffer_render(&chunk);
         }
+    }
+}
+
+struct NeuralDenoiser {
+    state: Box<nnnoiseless::DenoiseState<'static>>,
+    first_frame: bool,
+}
+
+impl NeuralDenoiser {
+    fn new() -> Self {
+        Self {
+            state: nnnoiseless::DenoiseState::new(),
+            first_frame: true,
+        }
+    }
+
+    fn process(&mut self, frame_16k: &[f32]) -> Vec<f32> {
+        let pcm_16k = pcm16_from_f32(frame_16k);
+        let pcm_48k = resample_linear(&pcm_16k, APM_RATE, NEURAL_DENOISE_RATE);
+        let mut input = [0.0f32; nnnoiseless::DenoiseState::FRAME_SIZE];
+        for (dst, &sample) in input.iter_mut().zip(pcm_48k.iter()) {
+            *dst = f32::from(sample);
+        }
+
+        let mut output = [0.0f32; nnnoiseless::DenoiseState::FRAME_SIZE];
+        let _speech_probability = self.state.process_frame(&mut output, &input);
+        if self.first_frame {
+            self.first_frame = false;
+            return vec![0.0; APM_FRAME];
+        }
+
+        let out_48k: Vec<i16> = output
+            .iter()
+            .map(|&s| s.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16)
+            .collect();
+        let out_16k = resample_linear(&out_48k, NEURAL_DENOISE_RATE, APM_RATE);
+        let mut out: Vec<f32> = out_16k
+            .into_iter()
+            .map(|s| f32::from(s) / 32768.0)
+            .collect();
+        out.resize(APM_FRAME, 0.0);
+        out.truncate(APM_FRAME);
+        out
+    }
+}
+
+struct OutputLeveler {
+    target_rms_dbfs: f32,
+    max_gain_db: f32,
+    max_reduction_db: f32,
+    limiter_ceiling: f32,
+    gain_db: f32,
+    initialized: bool,
+    gain_up_coeff: f32,
+    gain_down_coeff: f32,
+}
+
+impl OutputLeveler {
+    const RMS_FLOOR_DBFS: f32 = -90.0;
+    const INIT_GATE_DBFS: f32 = -75.0;
+    const GAIN_UP_MS: f32 = 45.0;
+    const GAIN_DOWN_MS: f32 = 10.0;
+
+    fn new(apm: &ApmConfig) -> Self {
+        Self {
+            target_rms_dbfs: apm.leveler_target_rms_dbfs,
+            max_gain_db: apm.leveler_max_gain_db,
+            max_reduction_db: apm.leveler_max_reduction_db,
+            limiter_ceiling: db_to_linear(apm.limiter_ceiling_dbfs),
+            gain_db: 0.0,
+            initialized: false,
+            gain_up_coeff: smoothing_coeff(Self::GAIN_UP_MS),
+            gain_down_coeff: smoothing_coeff(Self::GAIN_DOWN_MS),
+        }
+    }
+
+    fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        let rms_dbfs = rms_dbfs(input);
+        let desired_db = if rms_dbfs <= Self::RMS_FLOOR_DBFS {
+            0.0
+        } else {
+            (self.target_rms_dbfs - rms_dbfs).clamp(-self.max_reduction_db, self.max_gain_db)
+        };
+
+        if !self.initialized && rms_dbfs > Self::INIT_GATE_DBFS {
+            self.gain_db = desired_db;
+            self.initialized = true;
+        } else {
+            let coeff = if desired_db < self.gain_db {
+                self.gain_down_coeff
+            } else {
+                self.gain_up_coeff
+            };
+            self.gain_db = desired_db + (self.gain_db - desired_db) * coeff;
+        }
+
+        let gain = db_to_linear(self.gain_db);
+        input
+            .iter()
+            .map(|&s| (s * gain).clamp(-self.limiter_ceiling, self.limiter_ceiling))
+            .collect()
+    }
+}
+
+fn rms_dbfs(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return OutputLeveler::RMS_FLOOR_DBFS;
+    }
+    let sum_sq: f32 = frame.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / frame.len() as f32).sqrt();
+    if rms <= 1e-9 {
+        OutputLeveler::RMS_FLOOR_DBFS
+    } else {
+        20.0 * rms.log10()
+    }
+}
+
+fn smoothing_coeff(ms: f32) -> f32 {
+    let frame_ms = 10.0;
+    (-frame_ms / ms).exp()
+}
+
+fn db_to_linear(db: f32) -> f32 {
+    10.0f32.powf(db / 20.0)
+}
+
+fn agc2_config(apm: &ApmConfig) -> GainController2 {
+    GainController2 {
+        adaptive_digital: apm.auto_gain.then(|| AdaptiveDigital {
+            headroom_db: apm.agc_headroom_db,
+            max_gain_db: apm.agc_max_gain_db,
+            initial_gain_db: apm.agc_initial_gain_db,
+            max_gain_change_db_per_second: apm.agc_gain_change_db_per_sec,
+            ..Default::default()
+        }),
+        fixed_digital: sonora::config::FixedDigital {
+            gain_db: apm.mic_boost_db,
+        },
+        ..Default::default()
     }
 }
 
@@ -560,4 +789,71 @@ fn downmix_i16(input: &[i16], channels: usize) -> Vec<f32> {
         .step_by(step)
         .map(|&s| f32::from(s) / 32768.0)
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn test_apm(auto_gain: bool, mic_boost_db: f32) -> ApmConfig {
+        ApmConfig {
+            echo_cancellation: false,
+            high_pass_filter: true,
+            noise_suppression: NoiseSuppressionMode::Off,
+            mic_boost_db,
+            agc_headroom_db: 1.0,
+            agc_max_gain_db: 60.0,
+            agc_initial_gain_db: 30.0,
+            agc_gain_change_db_per_sec: 24.0,
+            auto_gain,
+            leveler_enabled: true,
+            leveler_target_rms_dbfs: -18.0,
+            leveler_max_gain_db: 24.0,
+            leveler_max_reduction_db: 36.0,
+            limiter_ceiling_dbfs: -1.0,
+        }
+    }
+
+    #[test]
+    fn auto_gain_config_enables_adaptive_digital_gain() {
+        let agc = agc2_config(&test_apm(true, 0.0));
+        assert!(agc.adaptive_digital.is_some());
+        if let Some(adaptive) = agc.adaptive_digital {
+            assert!((adaptive.headroom_db - 1.0).abs() < f32::EPSILON);
+            assert!((adaptive.max_gain_db - 60.0).abs() < f32::EPSILON);
+            assert!((adaptive.initial_gain_db - 30.0).abs() < f32::EPSILON);
+            assert!((adaptive.max_gain_change_db_per_second - 24.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn mic_boost_config_enables_fixed_digital_gain() {
+        let agc = agc2_config(&test_apm(false, 12.0));
+        assert!(agc.adaptive_digital.is_none());
+        assert!((agc.fixed_digital.gain_db - 12.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn output_leveler_reduces_hot_audio_to_limiter_ceiling() {
+        let mut apm = test_apm(false, 0.0);
+        apm.limiter_ceiling_dbfs = -6.0;
+        let mut leveler = OutputLeveler::new(&apm);
+        let out = leveler.process(&[2.0; APM_FRAME]);
+        let ceiling = db_to_linear(-6.0);
+        assert!(out.iter().all(|s| s.abs() <= ceiling + f32::EPSILON));
+    }
+
+    #[test]
+    fn output_leveler_bootstraps_quiet_speech_gain() {
+        let mut apm = test_apm(false, 0.0);
+        apm.leveler_target_rms_dbfs = -20.0;
+        apm.leveler_max_gain_db = 18.0;
+        let mut leveler = OutputLeveler::new(&apm);
+        let sample = db_to_linear(-45.0);
+
+        let out = leveler.process(&[sample; APM_FRAME]);
+
+        assert!(out[0] > sample * db_to_linear(17.0));
+    }
 }

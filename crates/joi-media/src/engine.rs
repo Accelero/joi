@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use joi_core::config::NoiseSuppressionMode;
 use joi_core::manager::SessionManagerHandle;
 use joi_core::media::{AudioFormat, VideoFrame};
 use tokio::sync::broadcast::error::RecvError;
@@ -53,6 +54,7 @@ const RENDER_QUEUE_CHUNKS: usize = 64;
 
 /// Native-media settings, sourced from `Config` by the composition root.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct MediaConfig {
     /// Mic capture device name, or `"default"`. A specific name lets Joi bypass a flaky/virtual
     /// system-default source (e.g. a PipeWire `echo-cancel-source`) and own its own audio path.
@@ -71,10 +73,32 @@ pub struct MediaConfig {
     /// Acoustic echo cancellation on the mic (subtract Joi's own playback). Off → no far-end
     /// reference is wired and the canceller is disabled.
     pub echo_cancellation: bool,
-    /// Noise suppression on the mic.
-    pub noise_suppression: bool,
+    /// High-pass filter on the mic.
+    pub high_pass_filter: bool,
+    /// Noise suppression mode on the mic.
+    pub noise_suppression: NoiseSuppressionMode,
+    /// Fixed digital boost before the limiter.
+    pub mic_boost_db: f32,
+    /// AGC target headroom before clipping.
+    pub agc_headroom_db: f32,
+    /// Maximum adaptive digital gain.
+    pub agc_max_gain_db: f32,
+    /// Initial adaptive digital gain.
+    pub agc_initial_gain_db: f32,
+    /// Maximum AGC gain change rate.
+    pub agc_gain_change_db_per_sec: f32,
     /// Automatic gain control on the mic.
     pub auto_gain: bool,
+    /// Final compressor/limiter before provider send.
+    pub leveler_enabled: bool,
+    /// Target RMS for the final leveler.
+    pub leveler_target_rms_dbfs: f32,
+    /// Maximum gain the final leveler may add.
+    pub leveler_max_gain_db: f32,
+    /// Maximum gain reduction the final leveler may apply.
+    pub leveler_max_reduction_db: f32,
+    /// Limiter ceiling for final samples.
+    pub limiter_ceiling_dbfs: f32,
 }
 
 /// Owns all native media for one app instance. Construct once with [`MediaEngine::new`] (within a
@@ -167,8 +191,19 @@ impl MediaEngine {
                 },
                 ApmConfig {
                     echo_cancellation: self.config.echo_cancellation,
+                    high_pass_filter: self.config.high_pass_filter,
                     noise_suppression: self.config.noise_suppression,
+                    mic_boost_db: self.config.mic_boost_db,
+                    agc_headroom_db: self.config.agc_headroom_db,
+                    agc_max_gain_db: self.config.agc_max_gain_db,
+                    agc_initial_gain_db: self.config.agc_initial_gain_db,
+                    agc_gain_change_db_per_sec: self.config.agc_gain_change_db_per_sec,
                     auto_gain: self.config.auto_gain,
+                    leveler_enabled: self.config.leveler_enabled,
+                    leveler_target_rms_dbfs: self.config.leveler_target_rms_dbfs,
+                    leveler_max_gain_db: self.config.leveler_max_gain_db,
+                    leveler_max_reduction_db: self.config.leveler_max_reduction_db,
+                    limiter_ceiling_dbfs: self.config.limiter_ceiling_dbfs,
                 },
             ));
         }
