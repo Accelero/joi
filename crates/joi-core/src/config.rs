@@ -224,6 +224,13 @@ You are heard, not read.
 - Be warm and respectful, but never at the cost of brevity. Here, kindness is clarity and not
   wasting the user's time.
 
+## Tool use
+
+- Use tools only when they are necessary to fulfill the user's request.
+- Never use tools opportunistically, speculatively, or without a specific goal tied to the current
+  request.
+- If you can answer correctly without a tool, answer directly.
+
 ## Answer, then stop
 
 This is the most important rule. Once you have answered, you are finished — stop talking. Do not
@@ -315,14 +322,14 @@ pub struct AudioCfg {
     /// hear itself (and interrupt itself) on speakers. Turn off when using headphones, or when an
     /// OS/server APM (e.g. PipeWire's echo-cancel source) already does it.
     pub echo_cancellation: bool,
-    /// High-pass filter on the mic: removes DC bias and low-frequency rumble before denoising.
+    /// High-pass filter on the mic: removes DC bias and low-frequency rumble after denoising.
     pub high_pass_filter: bool,
     /// Noise suppression on the mic: `"off"`, `"classic"` algorithmic suppression, or `"ai"` neural
     /// speech cleanup.
     #[serde(default)]
     pub noise_suppression: NoiseSuppressionMode,
-    /// Fixed digital boost in dB before the AGC2 limiter. Useful when the mic or denoiser output is
-    /// consistently too quiet; high values are mainly for limiter/leveling tests.
+    /// Legacy fixed digital boost in dB. Keep at `0.0`; the standard path uses the final leveler
+    /// for makeup gain.
     pub mic_boost_db: f32,
     /// AGC target headroom before clipping. Lower is louder and more aggressive.
     pub agc_headroom_db: f32,
@@ -344,6 +351,8 @@ pub struct AudioCfg {
     pub leveler_max_gain_db: f32,
     /// Maximum gain reduction the final leveler may apply.
     pub leveler_max_reduction_db: f32,
+    /// Compressor gain-up/attack time. Higher values avoid quickly raising transient noise.
+    pub leveler_gain_up_ms: f32,
     /// Limiter ceiling for final samples.
     pub limiter_ceiling_dbfs: f32,
 }
@@ -534,17 +543,18 @@ impl Default for Config {
                     output_device: "default".to_string(),
                     echo_cancellation: true,
                     high_pass_filter: true,
-                    noise_suppression: NoiseSuppressionMode::Classic,
+                    noise_suppression: NoiseSuppressionMode::Ai,
                     mic_boost_db: 0.0,
                     agc_headroom_db: 5.0,
                     agc_max_gain_db: 50.0,
                     agc_initial_gain_db: 15.0,
                     agc_gain_change_db_per_sec: 6.0,
-                    auto_gain: true,
-                    leveler_enabled: false,
-                    leveler_target_rms_dbfs: -20.0,
-                    leveler_max_gain_db: 18.0,
-                    leveler_max_reduction_db: 24.0,
+                    auto_gain: false,
+                    leveler_enabled: true,
+                    leveler_target_rms_dbfs: -10.0,
+                    leveler_max_gain_db: 36.0,
+                    leveler_max_reduction_db: 36.0,
+                    leveler_gain_up_ms: 250.0,
                     limiter_ceiling_dbfs: -1.0,
                 },
                 screen: ScreenCfg {
@@ -888,11 +898,11 @@ impl Config {
             ));
         }
         if !(audio.leveler_max_gain_db.is_finite()
-            && (0.0..=36.0).contains(&audio.leveler_max_gain_db))
+            && (0.0..=40.0).contains(&audio.leveler_max_gain_db))
         {
             return Err(invalid(
                 "media.audio.leveler_max_gain_db",
-                "must be between 0 and 36 dB",
+                "must be between 0 and 40 dB",
             ));
         }
         if !(audio.leveler_max_reduction_db.is_finite()
@@ -901,6 +911,14 @@ impl Config {
             return Err(invalid(
                 "media.audio.leveler_max_reduction_db",
                 "must be between 0 and 48 dB",
+            ));
+        }
+        if !(audio.leveler_gain_up_ms.is_finite()
+            && (10.0..=2_000.0).contains(&audio.leveler_gain_up_ms))
+        {
+            return Err(invalid(
+                "media.audio.leveler_gain_up_ms",
+                "must be between 10 and 2000 ms",
             ));
         }
         if !(audio.limiter_ceiling_dbfs.is_finite()
@@ -999,6 +1017,10 @@ mod tests {
         assert!(
             p.contains("would you like"),
             "names the trailing-question anti-pattern to avoid"
+        );
+        assert!(
+            p.contains("Use tools only when they are necessary"),
+            "tool use is constrained to necessary, goal-directed work"
         );
         assert!(
             p.contains(r#"Right: "Paris.""#),
@@ -1183,10 +1205,7 @@ mod tests {
             assert_eq!(cfg.live_api.gemini.voice, None); // unset → model default
             assert_eq!(cfg.media.audio.input_device, "default");
             assert!(cfg.media.audio.high_pass_filter);
-            assert_eq!(
-                cfg.media.audio.noise_suppression,
-                NoiseSuppressionMode::Classic
-            );
+            assert_eq!(cfg.media.audio.noise_suppression, NoiseSuppressionMode::Ai);
             Ok(())
         });
     }

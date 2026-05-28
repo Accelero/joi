@@ -77,8 +77,6 @@ pub struct MediaConfig {
     pub high_pass_filter: bool,
     /// Noise suppression mode on the mic.
     pub noise_suppression: NoiseSuppressionMode,
-    /// Fixed digital boost before the limiter.
-    pub mic_boost_db: f32,
     /// AGC target headroom before clipping.
     pub agc_headroom_db: f32,
     /// Maximum adaptive digital gain.
@@ -97,6 +95,8 @@ pub struct MediaConfig {
     pub leveler_max_gain_db: f32,
     /// Maximum gain reduction the final leveler may apply.
     pub leveler_max_reduction_db: f32,
+    /// Compressor gain-up/attack time in milliseconds.
+    pub leveler_gain_up_ms: f32,
     /// Limiter ceiling for final samples.
     pub limiter_ceiling_dbfs: f32,
 }
@@ -193,7 +193,6 @@ impl MediaEngine {
                     echo_cancellation: self.config.echo_cancellation,
                     high_pass_filter: self.config.high_pass_filter,
                     noise_suppression: self.config.noise_suppression,
-                    mic_boost_db: self.config.mic_boost_db,
                     agc_headroom_db: self.config.agc_headroom_db,
                     agc_max_gain_db: self.config.agc_max_gain_db,
                     agc_initial_gain_db: self.config.agc_initial_gain_db,
@@ -203,6 +202,7 @@ impl MediaEngine {
                     leveler_target_rms_dbfs: self.config.leveler_target_rms_dbfs,
                     leveler_max_gain_db: self.config.leveler_max_gain_db,
                     leveler_max_reduction_db: self.config.leveler_max_reduction_db,
+                    leveler_gain_up_ms: self.config.leveler_gain_up_ms,
                     limiter_ceiling_dbfs: self.config.limiter_ceiling_dbfs,
                 },
             ));
